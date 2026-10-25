@@ -1,0 +1,9 @@
+Package: com.cookieodd.shenglinmomo
+Name: 声临·陌陌版 (ShenglinMomo)
+Version: 0.1
+Architecture: iphoneos-arm64
+Description: 陌陌语音消息的 AI 音色转换（基于声临引擎）。
+Maintainer: CN-TaylorChen
+Author: CN-TaylorChen
+Section: Tweaks
+Depends: firmware (>= 15.0)
