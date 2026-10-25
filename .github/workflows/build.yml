@@ -1,0 +1,57 @@
+name: Build ShenglinMomo
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Theos
+        uses: Randomblock1/theos-action@v1
+        with:
+          theos-sdks: 'https://github.com/theos/sdks'
+          theos-sdks-branch: 'master'
+
+      - name: Fetch AMR-NB encoder (opencore-amrnb)
+        run: |
+          set -e
+          mkdir -p vendor/amr/lib vendor/amr_xcf
+          curl -sSL -o vendor/amr_xcf/amrnb.zip \
+            https://github.com/feuvan/opencore-amr-iOS/releases/download/v0.1.6/opencore-amrnb.xcframework.zip
+          unzip -q -o vendor/amr_xcf/amrnb.zip -d vendor/amr_xcf
+          A=$(find vendor/amr_xcf -path "*ios-arm64*" ! -path "*simulator*" -name "libopencore-amrnb.a" | head -n 1)
+          if [ -z "$A" ]; then A=$(find vendor/amr_xcf -path "*ios-arm64*" ! -path "*simulator*" -name "libopencore-amrnb" | head -n 1); fi
+          if [ -z "$A" ]; then A=$(find vendor/amr_xcf -name "*.a" | grep -v -i simulator | head -n 1); fi
+          if [ -n "$A" ]; then cp "$A" vendor/amr/lib/libopencore-amrnb.a; echo "AMR lib: $A"; else echo "AMR lib not found (will send raw audio)"; fi
+          ls -la vendor/amr/lib || true
+
+      - name: Build dylib
+        env:
+          THEOS: ${{ github.workspace }}/theos
+        run: make
+
+      - name: Package deb
+        run: |
+          python3 make_deb.py --control control \
+            --dylib ShenglinMomo.dylib --plist ShenglinMomo.plist \
+            --dylib-name ShenglinMomo.dylib \
+            --out "ShenglinMomo-v$(grep '^Version:' control | awk '{print $2}').deb"
+
+      - name: Resolve artifact name (声临-v<版本>)
+        id: art
+        run: echo "name=ShenglinMomo-v$(grep '^Version:' control | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.art.outputs.name }}
+          path: |
+            ShenglinMomo.dylib
+            ShenglinMomo.plist
+            ShenglinMomo-v*.deb

@@ -1,0 +1,9 @@
+Package: com.cookieodd.shenglinmomo
+Name: 声临·陌陌版 (ShenglinMomo)
+Version: 0.2
+Architecture: iphoneos-arm64
+Description: 陌陌聊天输入框用 #tts 口令把文字转成 AI 音色语音消息发送。
+Maintainer: CN-TaylorChen
+Author: CN-TaylorChen
+Section: Tweaks
+Depends: firmware (>= 15.0)
