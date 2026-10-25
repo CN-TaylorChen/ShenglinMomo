@@ -31,4 +31,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.art.outputs.name }}
-          path: ShenglinMomo.dylib
+          path: |
+            ShenglinMomo.dylib
+            ShenglinMomo.plist
