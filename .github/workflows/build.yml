@@ -25,10 +25,20 @@ jobs:
           curl -sSL -o vendor/amr_xcf/amrnb.zip \
             https://github.com/feuvan/opencore-amr-iOS/releases/download/v0.1.6/opencore-amrnb.xcframework.zip
           unzip -q -o vendor/amr_xcf/amrnb.zip -d vendor/amr_xcf
-          A=$(find vendor/amr_xcf -path "*ios-arm64*" ! -path "*simulator*" -name "libopencore-amrnb.a" | head -n 1)
-          if [ -z "$A" ]; then A=$(find vendor/amr_xcf -path "*ios-arm64*" ! -path "*simulator*" -name "libopencore-amrnb" | head -n 1); fi
-          if [ -z "$A" ]; then A=$(find vendor/amr_xcf -name "*.a" | grep -v -i simulator | head -n 1); fi
-          if [ -n "$A" ]; then cp "$A" vendor/amr/lib/libopencore-amrnb.a; echo "AMR lib: $A"; else echo "AMR lib not found (will send raw audio)"; fi
+          find vendor/amr_xcf -maxdepth 3 \( -type d -o -type f \) | head -n 40
+          # 只取 iOS(真机) 那一份：排除 simulator / macos / catalyst
+          A=$(find vendor/amr_xcf -type f \( -name "*.a" -o -name "libopencore-amrnb" \) \
+              | grep -i "ios" | grep -v -i "simulator" | grep -v -i "macos" | head -n 1)
+          if [ -z "$A" ]; then
+            A=$(find vendor/amr_xcf -type f -name "*.a" | grep -v -i "simulator" | grep -v -i "macos" | head -n 1)
+          fi
+          if [ -n "$A" ]; then
+            cp "$A" vendor/amr/lib/libopencore-amrnb.a
+            echo "AMR lib: $A"
+            lipo -info vendor/amr/lib/libopencore-amrnb.a || true
+          else
+            echo "AMR lib not found (will send raw audio)"
+          fi
           ls -la vendor/amr/lib || true
 
       - name: Build dylib
