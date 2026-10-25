@@ -11,6 +11,7 @@ LIBRARY_NAME = ShenglinMomo
 ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/SLSettingsPanel.m \
 	Tweak/SLPipeline.m \
+	Tweak/SLEntry.m \
 	Tweak/AWECAUtils.m \
 	Tweak/AWECATTSManager.m \
 	Tweak/AWECATOSUploader.m \
