@@ -71,3 +71,17 @@ void SLEnsureFloatButton(void) {
     }
 }
 
+
+// 不用 hook UIViewController：主队列定时检查并挂载（低侵入，避免 Logos 多 hook 嵌套坑）
+void SLStartEntryWatcher(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, (uint64_t)(2.0 * NSEC_PER_SEC), (uint64_t)(1.0 * NSEC_PER_SEC));
+        dispatch_source_set_event_handler(timer, ^{
+            @try { SLEnsureFloatButton(); } @catch (NSException *e) {}
+        });
+        dispatch_resume(timer);
+        @try { SLEnsureFloatButton(); } @catch (NSException *e) {}
+    });
+}

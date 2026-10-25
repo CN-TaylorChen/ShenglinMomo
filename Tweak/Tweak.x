@@ -126,22 +126,9 @@ static NSString *SLSnapshotPathFor(NSString *srcPath) {
 
 %end
 
-// 进入聊天页后确保按钮存在
-%hook UIViewController
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSString *cls = NSStringFromClass([self class]);
-    if ([cls hasPrefix:@"MD"] && ([cls containsString:@"Chat"] || [cls containsString:@"Conversation"])) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            @try { SLEnsureFloatButton(); } @catch (NSException *e) {}
-        });
-    }
-}
-%end
-
 %ctor {
     NSLog(@"SL-MOMO: ShenglinMomo v%@ loaded into bundle=%@", SLVersion, [[NSBundle mainBundle] bundleIdentifier]);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        @try { [AWECAUtils ensureDirectoriesExist]; SLEnsureFloatButton(); } @catch (NSException *e) {}
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @try { [AWECAUtils ensureDirectoriesExist]; SLStartEntryWatcher(); } @catch (NSException *e) {}
     });
 }
