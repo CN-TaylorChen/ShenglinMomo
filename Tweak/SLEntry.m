@@ -51,11 +51,27 @@
 }
 @end
 
-void SLEnsureFloatButton(void) {
-    UIWindow *w = nil;
-    for (UIWindow *win in [UIApplication sharedApplication].windows) {
-        if (win.isKeyWindow) { w = win; break; }
+// iOS15 SDK 起 -[UIApplication windows] 被弃用，工程开了 -Werror，这里局部抑制并优先走场景 API
+static UIWindow *SLKeyWindow(void) {
+    if (@available(iOS 15.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            for (UIWindow *w in ws.windows) {
+                if (w.isKeyWindow) return w;
+            }
+            if (ws.windows.count) return ws.windows.firstObject;
+        }
     }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+}
+
+void SLEnsureFloatButton(void) {
+    UIWindow *w = SLKeyWindow();
     if (!w) return;
     SLFloatButton *btn = (SLFloatButton *)[w viewWithTag:SLBtnTag];
     if (!btn) {
