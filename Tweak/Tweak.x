@@ -72,10 +72,17 @@ static NSString *SLSnapshotPathFor(NSString *srcPath) {
         return;
     }
 
-    if (!src.length || !SLIsEnabled()) { %orig; return; }
+    // Logos 对单行 `{ %orig; return; }` 展开会吞掉闭合花括号，这里一律用多行写法
+    if (!src.length || !SLIsEnabled()) {
+        %orig;
+        return;
+    }
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:src]) { %orig; return; }
+    if (![fm fileExistsAtPath:src]) {
+        %orig;
+        return;
+    }
 
     NSString *snap = SLSnapshotPathFor(src);
     NSError *err = nil;
