@@ -25,10 +25,6 @@ static BOOL SLIsEnabled(void) {
     id v = [d objectForKey:kSLEnabledKey];
     return v ? [v boolValue] : YES;   // 默认开
 }
-static void SLSetEnabled(BOOL on) {
-    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kSLEnabledKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-}
 
 // 等待记账：key=原始路径（已处理、正准备重放的），钩子再见一次就直接放行
 static NSMutableSet<NSString *> *SLPendingPaths(void) {
