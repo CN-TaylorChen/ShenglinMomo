@@ -13,7 +13,6 @@
 #define kASRQueryInterval     3.0
 #define kASRMaxQueryRounds    30
 #define kASRSubmitRetries     2
-#define kAWECAASRResourceId   @"AWECAASRResourceId"
 
 static NSString *SLTrim(NSString *s) {
     if (![s isKindOfClass:[NSString class]]) return @"";

@@ -10,6 +10,8 @@
 #define kAWECAReplacementEnabled @"AWECAReplacementEnabled"
 #define kAWECAReplacementAudioPath @"AWECAReplacementAudioPath"
 
+#define kAWECAASRResourceId @"AWECAASRResourceId"   // 识别资源 ID（默认 volc.seedasr.auc）
+
 @interface AWECAUtils : NSObject
 
 + (NSString *)documentsPath;
