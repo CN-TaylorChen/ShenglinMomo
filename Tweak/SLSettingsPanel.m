@@ -13,7 +13,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLUseAMRKey  @"SLUseAMR"
-#define SLVersion @"0.3.9"
+#define SLVersion @"0.4.0"
 
 @interface SLSettingsPanel ()
 @property (nonatomic, strong) UISegmentedControl *engineSeg;
