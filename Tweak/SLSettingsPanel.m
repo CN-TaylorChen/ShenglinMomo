@@ -19,7 +19,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.1"
+#define SLVersion @"0.4.9.2"
 
 #pragma mark - 多行 footer
 
@@ -40,6 +40,25 @@ static UIView *SLMakeFooter(NSString *text) {
         [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
         [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
         [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
+    ]];
+    return box;
+}
+
+// v0.4.9.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
+// 统一改成贴底小 label 的自定义视图，间距由我们说了算。
+static UIView *SLMakeHeader(NSString *text) {
+    if (!text.length) return nil;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
+    UILabel *lab = [[UILabel alloc] init];
+    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    lab.font = [UIFont systemFontOfSize:12];
+    lab.textColor = [UIColor secondaryLabelColor];
+    lab.text = text;
+    [box addSubview:lab];
+    [NSLayoutConstraint activateConstraints:@[
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:32],
+        [lab.trailingAnchor constraintLessThanOrEqualToAnchor:box.trailingAnchor constant:-32],
+        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-3],
     ]];
     return box;
 }
@@ -66,31 +85,7 @@ static UIView *SLMakeFooter(NSString *text) {
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.estimatedSectionFooterHeight = 28;
     self.tableView.estimatedSectionHeaderHeight = 26;
-    self.tableView.tableHeaderView = [self sl_header];
-}
-
-// 顶部说明：两行讲完，高度按实际文本算，避免压字
-- (UIView *)sl_header {
-    CGFloat w = self.view.bounds.size.width;
-    if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
-    // v0.4.9.1 文案规范：中英之间加空格、分号处换行、句末不加句号
-    NSString *text = [NSString stringWithFormat:@"输入框发「%@ 要说的话」，会自动换成 AI 合成语音发出\n失败时退回原文", [self sl_command]];
-    CGFloat textW = w - 36;
-    UIFont *font = [UIFont systemFontOfSize:12];
-    CGRect r = [text boundingRectWithSize:CGSizeMake(textW, CGFLOAT_MAX)
-                                  options:NSStringDrawingUsesLineFragmentOrigin
-                               attributes:@{NSFontAttributeName: font}
-                                  context:nil];
-    CGFloat h = ceil(r.size.height);
-    // v0.4.8：上下留白 24 -> 8，顶栏不再占一大截
-    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h + 8)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(18, 4, textW, h)];
-    lab.numberOfLines = 0;
-    lab.font = font;
-    lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = text;
-    [v addSubview:lab];
-    return v;
+    // v0.4.9.2：删掉顶部说明（tableHeaderView），首个分组直接跟标题栏
 }
 
 - (NSString *)sl_command {
@@ -104,7 +99,6 @@ static UIView *SLMakeFooter(NSString *text) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    self.tableView.tableHeaderView = [self sl_header];
     [self.tableView reloadData];
 }
 
@@ -124,9 +118,19 @@ static UIView *SLMakeFooter(NSString *text) {
     return 1;                     // 运行日志
 }
 
-- (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
-    (void)tv;
+- (NSString *)sl_headerForSection:(NSInteger)section {
     return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"诊断"][section];
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
+    (void)tv;
+    return SLMakeHeader([self sl_headerForSection:section]);
+}
+
+// 中文一行 12pt 足够；首个分组离标题栏留 10pt，其余分组靠上一个 footer 自然撑开
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
+    (void)tv;
+    return section == 0 ? 26 : 22;
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
