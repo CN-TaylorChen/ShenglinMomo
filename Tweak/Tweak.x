@@ -26,7 +26,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.3"
+#define SLVersion @"0.3.4"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -341,6 +341,39 @@ static id SLFindAudioHandlerNear(UIView *view) {
 }
 
 
+#pragma mark - 假录音机（让陌陌读取我们合成的音频，而不是它自己的原声）
+
+@interface SLFakeRecorder : NSObject
+@property (nonatomic, copy) NSString *slAudioPath;
+@property (nonatomic) double slDuration;
+@end
+
+@implementation SLFakeRecorder
+
+- (NSURL *)url { SLLog(@"fakeRec url -> %@", self.slAudioPath); return [NSURL fileURLWithPath:self.slAudioPath]; }
+- (NSURL *)fileURL { return [self url]; }
+- (NSURL *)recordFileURL { return [self url]; }
+- (NSURL *)audioFileURL { return [self url]; }
+- (NSString *)filePath { return self.slAudioPath; }
+- (NSString *)recordFilePath { return self.slAudioPath; }
+- (NSString *)audioFilePath { return self.slAudioPath; }
+- (NSString *)path { return self.slAudioPath; }
+- (NSTimeInterval)currentTime { return self.slDuration; }
+- (NSTimeInterval)duration { return self.slDuration; }
+- (BOOL)isRecording { return NO; }
+- (BOOL)recording { return NO; }
+- (BOOL)isMeteringEnabled { return NO; }
+- (BOOL)prepareToRecord { return YES; }
+- (BOOL)record { SLLog(@"fakeRec record (ignored)"); return NO; }
+- (void)stop { SLLog(@"fakeRec stop (ignored)"); }
+- (void)pause {}
+- (BOOL)deleteRecording { SLLog(@"fakeRec deleteRecording (ignored, keep our file)"); return NO; }
+- (void)updateMeters {}
+- (float)averagePowerForChannel:(NSUInteger)channel { (void)channel; return -160.0f; }
+- (float)peakPowerForChannel:(NSUInteger)channel { (void)channel; return -160.0f; }
+
+@end
+
 #pragma mark - #tts 处理
 
 static void SLHandleTTS(id handler,
@@ -365,7 +398,13 @@ static void SLHandleTTS(id handler,
             SEL recSel = @selector(audioRecorder:recordSucessStoreAt:audioTime:);
             if ([handler respondsToSelector:recSel]) {
                 @try {
-                    ((void(*)(id,SEL,id,id,double))objc_msgSend)(handler, recSel, nil, outPath, dur);
+                    // 关键修复：之前 audioRecorder: 传 nil，陌陌回退读「自己的录音机」原声文件 → 发出去是真人声音。
+                    // 现在造一个假 recorder，把 url 指向我们合成的音频，陌陌就会读我们的文件来发语音。
+                    SLFakeRecorder *fake = [[SLFakeRecorder alloc] init];
+                    fake.slAudioPath = outPath;
+                    fake.slDuration = dur;
+                    SLLog(@"fakeRecord use SLFakeRecorder path=%@ dur=%.2f", outPath, dur);
+                    ((void(*)(id,SEL,id,id,double))objc_msgSend)(handler, recSel, fake, outPath, dur);
                     sent = YES;
                     SLLog(@"fakeRecord ok path=%@ dur=%.2f fmt=%@", outPath, dur, [outPath pathExtension]);
                 } @catch (NSException *e) {
@@ -373,6 +412,12 @@ static void SLHandleTTS(id handler,
                 }
             } else {
                 SLLog(@"handler 无 audioRecorder:recordSucessStoreAt:audioTime: 方法");
+            }
+            // 诊断：发完后看我们的文件是否还在（若被陌陌删/覆盖，说明它读的是自己的录音机文件而非我们的）
+            {
+                BOOL ex = [[NSFileManager defaultManager] fileExistsAtPath:outPath];
+                NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:outPath error:nil];
+                SLLog(@"afterSend outPath exists=%d size=%lld", ex, (long long)[attrs fileSize]);
             }
             SLLog(@"audio sent=%d path=%@ dur=%.2f", sent, outPath, dur);
             if (!sent) {
@@ -483,6 +528,41 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
     SLHandleTTS(self, content, ^{ if (orig) orig(self, _cmd, text, targetID, isSingle); }, ^{ SLClearInputBars(); });
 }
 
+#pragma mark - 钩子 4：MDChatBaseHander -sendAudioMessage:audioTime:audioFileSize:（诊断用，抓语音 model 结构）
+
+static int SLAudioModelDumped = 0;
+
+static void SLSendAudioMessageHook(id self, SEL _cmd, id model, double t, double size) {
+    void (*orig)(id, SEL, id, double, double) = (void (*)(id, SEL, id, double, double))SLGetOrigIMP(self, _cmd);
+    if (!SLAudioModelDumped) {
+        SLAudioModelDumped = 1;
+        Class mc = [model class];
+        NSMutableArray *ivs = [NSMutableArray array];
+        unsigned int pc = 0;
+        Ivar *list = class_copyIvarList(mc, &pc);
+        for (unsigned i = 0; i < pc; i++) {
+            const char *tn = ivar_getTypeEncoding(list[i]);
+            [ivs addObject:[NSString stringWithFormat:@"%s:%s", ivar_getName(list[i]), tn ?: ""]];
+        }
+        free(list);
+        SLLog(@"AUDIO-MODEL class=%@ ivars=%@", NSStringFromClass(mc), [ivs componentsJoinedByString:@", "]);
+    }
+    if (orig) orig(self, _cmd, model, t, size);
+}
+
+static BOOL SLInstallSendAudioHook(Class cls) {
+    if (!cls) return NO;
+    SEL sel = @selector(sendAudioMessage:audioTime:audioFileSize:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return NO;
+    const char *t = method_getTypeEncoding(m);
+    NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
+    if (!sig || sig.numberOfArguments < 5) return NO;
+    const char *a2 = [sig getArgumentTypeAtIndex:2];
+    if (!a2 || a2[0] != '@') return NO;
+    return SLRegisterMethod(cls, sel, (IMP)SLSendAudioMessageHook);
+}
+
 #pragma mark - 安装
 
 static BOOL SLInstallSendTextMessageHook(Class cls) {
@@ -546,6 +626,9 @@ static void SLInstallHooks(void) {
     SLInstallSendTextMessageHook(NSClassFromString(@"MDChatBaseHander"));
     SLInstallSendTextMessageHook(NSClassFromString(@"MDChatUniverseHandler"));
     SLInstallSendTextMessageHook(NSClassFromString(@"MDChatSingleHandler"));
+    SLInstallSendAudioHook(NSClassFromString(@"MDChatBaseHander"));
+    SLInstallSendAudioHook(NSClassFromString(@"MDChatUniverseHandler"));
+    SLInstallSendAudioHook(NSClassFromString(@"MDChatSingleHandler"));
     SLInstallServiceHook();
 }
 
