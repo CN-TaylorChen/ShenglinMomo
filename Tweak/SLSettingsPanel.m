@@ -18,7 +18,7 @@
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
-#define SLVersion @"0.4.5"
+#define SLVersion @"0.4.6"
 
 #pragma mark - 多行 footer
 
@@ -35,8 +35,8 @@ static UIView *SLMakeFooter(NSString *text) {
     lab.text = text;
     [box addSubview:lab];
     [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:18],
-        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-18],
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:16],
+        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
         [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
         [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
     ]];
@@ -48,6 +48,13 @@ static UIView *SLMakeFooter(NSString *text) {
 @end
 
 @implementation SLSettingsPanel
+
+// v0.4.6：改成 insetGrouped —— UITableViewController 默认走 Plain，行直通屏幕两边、方角，
+// 看着像草稿。insetGrouped 自带 16pt 边距 + 每组首尾行圆角，等于系统原生「设置卡片」。
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -145,7 +152,7 @@ static UIView *SLMakeFooter(NSString *text) {
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)section {
     NSString *text = [self sl_footerForSection:section];
     if (!text.length) return 0;
-    CGFloat w = tv.bounds.size.width - 36;
+    CGFloat w = tv.bounds.size.width - 64;   // insetGrouped：分组左右各 16 + 文本左右各 16
     if (w <= 0) return UITableViewAutomaticDimension;
     CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
                                   options:NSStringDrawingUsesLineFragmentOrigin
@@ -157,7 +164,11 @@ static UIView *SLMakeFooter(NSString *text) {
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *rid = @"slcell";
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:rid];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:rid];
+    // Value1：标题左、状态右、同一条基线（Subtitle 会把状态压到第二行左对齐，看着就错位）
+    cell.detailTextLabel.textAlignment = NSTextAlignmentRight;
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:15];
+    cell.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
 
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
@@ -196,7 +207,7 @@ static UIView *SLMakeFooter(NSString *text) {
             NSString *voice = mgr.fishEngine
                 ? (mgr.fishVoiceName.length ? mgr.fishVoiceName : @"未选择，点这里添加")
                 : (mgr.voiceName.length ? mgr.voiceName : @"未选择");
-            cell.textLabel.text = mgr.fishEngine ? @"Fish Audio 音色库" : @"火山音色库";
+            cell.textLabel.text = @"音色库";
             cell.detailTextLabel.text = voice;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
