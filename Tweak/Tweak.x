@@ -30,7 +30,7 @@
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 
-#define SLVersion @"0.4.9.5"
+#define SLVersion @"0.4.9.6"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -57,17 +57,29 @@ static NSString *SLPackCommand(void) {
     return v;
 }
 
-// 前缀匹配（不区分大小写，兼容全角井号）
-static BOOL SLHasPrefixCommand(NSString *text, NSString *cmd) {
-    if (![text isKindOfClass:[NSString class]] || !text.length || !cmd.length) return NO;
-    NSRange r = [text rangeOfString:cmd options:NSCaseInsensitiveSearch | NSAnchoredSearch];
-    if (r.location == 0) return YES;
-    NSString *alt = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@"＃"];
-    if (![alt isEqualToString:cmd]) {
-        r = [text rangeOfString:alt options:NSCaseInsensitiveSearch | NSAnchoredSearch];
-        if (r.location == 0) return YES;
+// v0.4.9.6：口令严格匹配 —— 只认用户设置的那一条，不再生成「去掉井号」的变体。
+// 口令本身可以自定义，靠猜出来的变体只会让「到底哪条生效」变得不可预测。
+// 唯一的容错是半角/全角井号互认：中文输入法下「＃」和「#」肉眼一样，属于输入法问题不是口误。
+static NSString *SLNormHash(NSString *s) {
+    return [s stringByReplacingOccurrencesOfString:@"＃" withString:@"#"];
+}
+
+// 命中返回口令占用的字符数（0 = 未命中）；口令以英文字母结尾时要求右边界不是字母
+static NSUInteger SLCommandPrefixLength(NSString *text, NSString *cmd) {
+    if (![text isKindOfClass:[NSString class]] || ![cmd isKindOfClass:[NSString class]]) return 0;
+    if (!text.length || !cmd.length || text.length < cmd.length) return 0;
+    if ([SLNormHash([text substringToIndex:cmd.length]) caseInsensitiveCompare:SLNormHash(cmd)] != NSOrderedSame) return 0;
+    unichar last = [cmd characterAtIndex:cmd.length - 1];
+    BOOL latinEnd = (last < 128) && ((last >= 'a' && last <= 'z') || (last >= 'A' && last <= 'Z'));
+    if (latinEnd && text.length > cmd.length) {
+        unichar next = [text characterAtIndex:cmd.length];
+        if ((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z')) return 0;   // yybxx 不算命中
     }
-    return NO;
+    return cmd.length;
+}
+
+static BOOL SLHasPrefixCommand(NSString *text, NSString *cmd) {
+    return SLCommandPrefixLength(text, cmd) > 0;
 }
 
 #pragma mark - 原实现记账（key = 类名#selector）
@@ -232,40 +244,17 @@ static NSString *SLTextFromArgument(id arg) {
     return nil;
 }
 
-// 口令变体：原样、去掉井号、全角井号 —— 用户手打「tts 你好」也能命中，不强制带 #
-static NSArray<NSString *> *SLCommandVariants(NSString *cmd) {
-    NSMutableArray *out = [NSMutableArray array];
-    if (!cmd.length) return out;
-    [out addObject:cmd];
-    NSString *noHash = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@""];
-    noHash = [noHash stringByReplacingOccurrencesOfString:@"＃" withString:@""];
-    if (noHash.length && ![out containsObject:noHash]) [out addObject:noHash];
-    NSString *fullHash = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@"＃"];
-    if (![out containsObject:fullHash]) [out addObject:fullHash];
-    return out;
-}
-
-// 命中口令时把「去掉口令后的正文」写进 outRest；无井号变体要求后一位不是英文字母（防 ttsabc 误判）
+// 命中口令时把「去掉口令后的正文」写进 outRest
 static BOOL SLMatchCommand(NSString *text, NSString **outRest) {
-    if (![text isKindOfClass:[NSString class]] || text.length == 0) return NO;
-    for (NSString *cmd in SLCommandVariants(SLCommand())) {
-        NSRange r = [text rangeOfString:cmd options:NSCaseInsensitiveSearch | NSAnchoredSearch];
-        if (r.location != 0) continue;
-        BOOL hasHash = ([cmd rangeOfString:@"#"].location != NSNotFound)
-                    || ([cmd rangeOfString:@"＃"].location != NSNotFound);
-        if (!hasHash && text.length > r.length) {
-            unichar c = [text characterAtIndex:r.length];
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) continue;
-        }
-        if (outRest) {
-            NSString *rest = [text substringFromIndex:r.length];
-            rest = [rest stringByTrimmingCharactersInSet:
-                    [NSCharacterSet characterSetWithCharactersInString:@" :：\t"]];
-            *outRest = [rest stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        }
-        return YES;
+    NSUInteger n = SLCommandPrefixLength(text, SLCommand());
+    if (!n) return NO;
+    if (outRest) {
+        NSString *rest = [text substringFromIndex:n];
+        rest = [rest stringByTrimmingCharactersInSet:
+                [NSCharacterSet characterSetWithCharactersInString:@" :：\t"]];
+        *outRest = [rest stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     }
-    return NO;
+    return YES;
 }
 
 static BOOL SLTextHasCommand(NSString *text) {
