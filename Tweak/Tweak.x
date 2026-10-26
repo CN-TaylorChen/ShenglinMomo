@@ -28,8 +28,9 @@
 #import "SLSettingsPanel.h"
 #import "SLLogViewController.h"
 #import "SLEntry.h"
+#import "SLVoicePack.h"
 
-#define SLVersion @"0.4.9.2"
+#define SLVersion @"0.4.9.3"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -842,6 +843,44 @@ static void SLArmTTS(id handler,
                      NSString *content,
                      void (^fallback)(void)) {
     (void)handler;
+
+    // v0.4.9.3：语音包优先 —— 开着就直接装填所选音频，不联网合成
+    if ([SLVoicePack isEnabled]) {
+        NSDictionary *pack = [SLVoicePack activePack];
+        NSString *packPath = pack ? [SLVoicePack pathOfPack:pack] : nil;
+        double packDur = packPath.length ? [AWECAUtils audioDurationAtPath:packPath] : 0;
+        if (packPath.length && packDur > 0.05) {
+            if (packDur > 60.0) packDur = 60.0;   // 陌陌语音条上限
+            gSLTTSAudioPath = [packPath copy];
+            gSLTTSAudioDur = packDur;
+            gSLArmedAt = [[NSDate date] timeIntervalSince1970];
+            NSData *pcm = [SLAMREncoder pcmMono16AtPath:packPath sampleRate:16000.0];
+            NSUInteger cap = (NSUInteger)(60.0 * 16000.0) * 2;
+            if (pcm.length > cap) pcm = [pcm subdataWithRange:NSMakeRange(0, cap)];
+            if (pcm.length > 1600) {
+                gSLTTSPCM16k = pcm;
+                gSLTTSPCM16kDur = (double)(pcm.length / 2) / 16000.0;
+            } else {
+                gSLTTSPCM16k = nil;
+                gSLTTSPCM16kDur = 0;
+            }
+            SLLog(@"armed pack %@ dur=%.2f pcm=%lu — 等待用户录音替换",
+                  packPath.lastPathComponent, packDur, (unsigned long)pcm.length);
+            [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 语音包「%@」（%.1fs）",
+                                   pack[@"name"] ?: @"", packDur]
+                         duration:2.0];
+            NSString *armedPack = [gSLTTSAudioPath copy];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armedPack]) {
+                    gSLTTSAudioPath = nil;
+                    SLLog(@"armed pack expired (60s), cleared");
+                }
+            });
+            return;
+        }
+        SLLog(@"pack enabled but selection unusable, fallback to tts");
+    }
+
     [AWECAUtils showToast:@"合成中..." duration:2.0];
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
