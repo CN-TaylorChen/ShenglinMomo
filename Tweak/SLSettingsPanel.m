@@ -18,12 +18,14 @@
 #import "SLVoicePack.h"
 #import "SLVoicePackController.h"
 #import "SLAlignBox.h"
+#import "SLVirtualLocation.h"
+#import "SLMapPickerController.h"
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.9"
+#define SLVersion @"0.4.10"
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 
@@ -58,6 +60,12 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 @interface SLSettingsPanel ()
 @property (nonatomic, strong) UISegmentedControl *engineSeg;
 @property (nonatomic, assign) CGFloat slLeading;
+
+// 前置声明：这些方法定义在 didSelect 之后，先声明免得 -Werror 因「方法未找到」中断构建
+- (void)sl_virtualLocSwitchChanged:(UISwitch *)sw;
+- (void)sl_applyVirtualLoc:(BOOL)on;
+- (void)sl_pickLocation;
+- (void)sl_clearLocation;
 @end
 
 @implementation SLSettingsPanel
@@ -113,7 +121,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    return 5;
+    return 6;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
@@ -122,11 +130,12 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
     if (section == 2) return 3;   // 触发口令 + 语音包口令 + 短录音补全
     if (section == 3) return 1;   // API 凭证
+    if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
     return 1;                     // 运行日志
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
-    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"诊断"][section];
+    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断"][section];
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
@@ -156,7 +165,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪";
     if (section == 2) return @"合成口令：以这个口令开头发的文字才会转语音\n语音包口令：单独一条，命中后直接发所选语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
     if (section == 3) return @"Key 只保存在本机，不会上传";
-    if (section == 4) return @"没反应时先看这里";
+    if (section == 4) return @"开启后陌陌上报的坐标会替换为你选的点\n只影响本机陌陌，不改系统定位\n坐标与 IP 归属地差太远时可能触发风控，建议固定一个常用位置";
+    if (section == 5) return @"没反应时先看这里";
     return nil;
 }
 
@@ -190,6 +200,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.detailTextLabel.text = nil;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    // 复用池里上一行可能把颜色改过（比如「清除位置」置灰），这里必须复位
+    cell.textLabel.textColor = [UIColor labelColor];
 
     AWECATTSManager *mgr = [AWECATTSManager shared];
 
@@ -285,6 +297,31 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return cell;
     }
 
+    if (ip.section == 4) {
+        if (ip.row == 0) {
+            cell.textLabel.text = @"虚拟定位";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = [SLVirtualLocation isOn];
+            [sw addTarget:self action:@selector(sl_virtualLocSwitchChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
+        if (ip.row == 1) {
+            cell.textLabel.text = @"选择位置";
+            cell.detailTextLabel.text = [SLVirtualLocation coordinateText] ?: @"未设置";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            return cell;
+        }
+        cell.textLabel.text = @"清除位置";
+        BOOL has = [SLVirtualLocation hasCoordinate];
+        cell.detailTextLabel.text = has ? @"恢复真实定位" : @"—";
+        cell.textLabel.textColor = has ? [UIColor labelColor] : [UIColor tertiaryLabelColor];
+        cell.selectionStyle = has ? UITableViewCellSelectionStyleDefault : UITableViewCellSelectionStyleNone;
+        return cell;
+    }
+
     cell.textLabel.text = @"运行日志";
     cell.detailTextLabel.text = @"点此查看";
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -336,9 +373,78 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return;
     }
     if (ip.section == 4) {
+        if (ip.row == 0) {
+            [self sl_applyVirtualLoc:![SLVirtualLocation isOn]];
+            return;
+        }
+        if (ip.row == 1) {
+            [self sl_pickLocation];
+            return;
+        }
+        [self sl_clearLocation];
+        return;
+    }
+    if (ip.section == 5) {
         SLLogViewController *vc = [[SLLogViewController alloc] init];
         [self.navigationController pushViewController:vc animated:YES];
     }
+}
+
+#pragma mark - 虚拟定位
+
+- (void)sl_virtualLocSwitchChanged:(UISwitch *)sw {
+    [self sl_applyVirtualLoc:sw.on];
+}
+
+- (void)sl_applyVirtualLoc:(BOOL)on {
+    // 只有开关没有坐标等于没开，先引导去选点，别让用户以为生效了
+    if (on && ![SLVirtualLocation hasCoordinate]) {
+        [AWECAUtils showToast:@"请先选择一个位置" duration:1.8];
+        [self.tableView reloadData];
+        [self sl_pickLocation];
+        return;
+    }
+    [SLVirtualLocation setOn:on];
+    [AWECAUtils showToast:on ? @"虚拟定位已开启" : @"虚拟定位已关闭" duration:1.5];
+    [self.tableView reloadData];
+}
+
+- (void)sl_pickLocation {
+    SLMapPickerController *vc =
+        [[SLMapPickerController alloc] initWithCoordinate:[SLVirtualLocation coordinate]
+                                              hasInitial:[SLVirtualLocation hasCoordinate]];
+    __weak typeof(self) weakSelf = self;
+    vc.onPick = ^(CLLocationCoordinate2D coord, NSString *name) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [SLVirtualLocation setCoordinate:coord];
+        if (![SLVirtualLocation isOn]) [SLVirtualLocation setOn:YES];   // 选完直接开，省一步
+        [self.tableView reloadData];
+        NSString *shown = name.length ? name : [SLVirtualLocation coordinateText];
+        [AWECAUtils showToast:[NSString stringWithFormat:@"已设为 %@", shown] duration:2.0];
+    };
+    [self.navigationController pushViewController:vc animated:YES];
+}
+
+- (void)sl_clearLocation {
+    if (![SLVirtualLocation hasCoordinate]) {
+        [AWECAUtils showToast:@"还没有设置过位置" duration:1.5];
+        return;
+    }
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"清除位置"
+                                                               message:@"清除后陌陌会恢复使用真实定位"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [ac addAction:[UIAlertAction actionWithTitle:@"清除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        [SLVirtualLocation clearCoordinate];
+        [SLVirtualLocation setOn:NO];
+        [self.tableView reloadData];
+        [AWECAUtils showToast:@"已恢复真实定位" duration:1.8];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 #pragma mark - Actions
