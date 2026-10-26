@@ -1216,7 +1216,21 @@ static void SLEncodePcmDataHook(id self, SEL _cmd, id data) {
     BOOL handled = NO;
     if (SLIsEnabled() && gSLTTSAudioPath && [data isKindOfClass:[NSData class]] && [data length] > 0) {
         AudioStreamBasicDescription a;
-        if (SLReadASBDValue(self, &a)) {
+        BOOL gotASBD = SLReadASBDValue(self, &a);
+        if (!gotASBD) {
+            // 读不到就按陌陌录音机的默认格式兜底（Recorder 的 _sampleRate 就是 16000 单声道 16bit）
+            memset(&a, 0, sizeof(a));
+            a.mSampleRate = 16000.0;
+            a.mFormatID = kAudioFormatLinearPCM;
+            a.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+            a.mBitsPerChannel = 16;
+            a.mChannelsPerFrame = 1;
+            a.mBytesPerFrame = 2;
+            a.mBytesPerPacket = 2;
+            a.mFramesPerPacket = 1;
+            if (gSLFunnelLog++ < 3) SLLog(@"ENC asbd 读不到，按 16k/mono/s16 兜底");
+        }
+        {
             SLFeedArm(self, a, @"MDOpusEncoder.encodePcm");
             if (gSLBusActive) {
                 NSData *chunk = SLBusNextChunk([data length]);
