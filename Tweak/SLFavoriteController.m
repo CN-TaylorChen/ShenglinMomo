@@ -49,16 +49,18 @@ static UIColor *SLFavAccent(void) {
                             onSave:(void (^)(NSString *))onSave
                           onDelete:(void (^)(void))onDelete {
     UIWindow *win = nil;
-    if (@available(iOS 13.0, *)) {
-        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-                if (w.isKeyWindow) { win = w; break; }
-            }
-            if (win) break;
+    for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+        if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (!w.hidden) { win = w; break; }
         }
     }
-    if (!win) win = [UIApplication sharedApplication].keyWindow;
     if (!win) return nil;
 
     SLFavoriteEditor *v = [[SLFavoriteEditor alloc] initWithFrame:win.bounds];
@@ -189,10 +191,14 @@ static UIColor *SLFavAccent(void) {
 - (UIButton *)sl_pill:(NSString *)title {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
     [b setTitle:title forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont systemFontOfSize:13];
-    b.contentEdgeInsets = UIEdgeInsetsMake(0, 16, 0, 16);
+    UIFont *font = [UIFont systemFontOfSize:13];
+    b.titleLabel.font = font;
     b.layer.cornerRadius = 16;
     b.layer.cornerCurve = kCACornerCurveContinuous;
+    // contentEdgeInsets 在 iOS 15 起标记废弃（配合 UIButtonConfiguration 时被忽略），
+    // 这里直接按文字宽度 + 左右留白算宽度，绕开这个属性。
+    CGSize ts = [title sizeWithAttributes:@{NSFontAttributeName: font}];
+    [b.widthAnchor constraintEqualToConstant:ceil(ts.width) + 32].active = YES;
     [b.heightAnchor constraintEqualToConstant:32].active = YES;
     [self sl_refreshPill:b selected:NO];
     return b;
@@ -283,7 +289,7 @@ static UIColor *SLFavAccent(void) {
 - (void)sl_observeKeyboard {
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(sl_keyboard:)
-                                                 name:UIResponder.keyboardWillChangeFrameNotification
+                                                 name:UIKeyboardWillChangeFrameNotification
                                                object:nil];
     dispatch_async(dispatch_get_main_queue(), ^{
         [self->_field becomeFirstResponder];
@@ -291,7 +297,7 @@ static UIColor *SLFavAccent(void) {
 }
 
 - (void)sl_keyboard:(NSNotification *)n {
-    CGRect kb = [n.userInfo[UIResponder.keyboardFrameEndUserInfoKey] CGRectValue];
+    CGRect kb = [n.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
     CGRect inSelf = [self convertRect:kb fromView:nil];
     CGFloat overlap = CGRectGetMaxY(self.bounds) - CGRectGetMinY(inSelf);
     CGFloat dy = overlap > 0 ? -(overlap / 2.0) : 0;

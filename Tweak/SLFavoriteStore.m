@@ -63,7 +63,6 @@ static const NSUInteger kSLFavMax = 50;
 
 + (void)sl_writeRaw:(NSArray<NSDictionary *> *)arr {
     [[NSUserDefaults standardUserDefaults] setObject:arr forKey:kSLFavKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
     [[NSNotificationCenter defaultCenter] postNotificationName:SLFavoriteStoreChanged object:nil];
 }
 
@@ -142,7 +141,7 @@ static const NSUInteger kSLFavMax = 50;
         if (![arr[i][@"uid"] isEqual:item.uid]) continue;
         NSMutableDictionary *d = [arr[i] mutableCopy];
         d[@"name"] = n;
-        arr[i] = d;
+        [arr replaceObjectAtIndex:i withObject:d];
         break;
     }
     [self sl_writeRaw:arr];
