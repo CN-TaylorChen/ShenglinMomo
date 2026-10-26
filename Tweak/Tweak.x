@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.16"
+#define SLVersion @"0.4.17"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -452,6 +452,8 @@ static BOOL gSLBusFed = NO;             // 至少喂过一块 → 文件里已�
 static int gSLBusSwallowLog = 0;
 // v0.4.16：本次录音写进去的那个 opus 路径（BUS-PREP 打印的那个），用来精确认领消息体
 static NSString *gSLBusOpusPath = nil;
+// v0.4.17：音波入口扫描函数定义在文件后半段，装填时要提前调用，先声明
+static void SLInstallWaveMsgHooks(void);
 // —— v0.4.3：通用 PCM 漏斗（编码器入口兜底）——
 static BOOL gSLPcmArmed = NO;
 static double gSLArmRate = 0;
@@ -972,6 +974,7 @@ static BOOL SLArmPackNow(void) {
     }
     SLLog(@"armed pack %@ dur=%.2f pcm=%lu — 等待用户录音替换",
           packPath.lastPathComponent, packDur, (unsigned long)pcm.length);
+    @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}   // v0.4.17：装填时再扫一次
     [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 语音包「%@」（%.1fs）",
                            pack[@"name"] ?: @"", packDur]
                  duration:2.0];
@@ -1007,6 +1010,7 @@ static void SLArmTTS(id handler,
             gSLTTSAudioDur = dur;
             gSLArmedAt = [[NSDate date] timeIntervalSince1970];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
+            @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}   // v0.4.17：装填时再扫一次
 
             // —— v0.4.2：不再自己造 Opus 文件 ——
             // v0.4.1 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
@@ -2602,22 +2606,36 @@ static BOOL SLInstallAudioTimeProbe(void) {
 }
 
 static void SLInstallWaveMsgHooks(void) {
-    static BOOL done = NO;
-    if (done) return;
-    done = YES;
+    // v0.4.17：不再只扫一次。启动时 objc_getClassList 只返回「已经 realize」的类，
+    // 音波那套东西很可能是懒加载的（第一次进音波页才 realize），所以启动那次扫描
+    // 根本看不到它 —— 这就是为什么 buildSingleWaveHandMessage: 一直装不上。
+    // 改成：启动扫一次，5 秒 / 20 秒后再扫，并且每次装填音频时也顺带扫一次。
+    // 重复扫描没有副作用：SLRegisterMethod / SLRegisterClassMethod 都做了去重。
+    static int scanNo = 0;
+    scanNo++;
 
     int total = objc_getClassList(NULL, 0);
     if (total <= 0) return;
     Class *buf = (Class *)malloc(sizeof(Class) * (size_t)total);
     if (!buf) return;
     total = objc_getClassList(buf, total);
-    int hits = 0;
+    int hits = 0, appOwned = 0;
     for (int i = 0; i < total; i++) {
         if (!SLClassIsAppOwned(buf[i])) continue;
+        appOwned++;
         if (SLInstallWaveMsgHooksOnClass(buf[i])) hits++;
     }
     free(buf);
-    if (hits == 0) SLLog(@"WAVE-HOOK 两个音波入口一个都没找到");
+    SLLog(@"WAVE-SCAN 第 %d 次：陌陌的类 %d 个，本次装上 %d 个音波入口", scanNo, appOwned, hits);
+}
+
+static void SLScheduleWaveRescan(void) {
+    for (int sec = 5; sec <= 20; sec += 15) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}
+        });
+    }
 }
 
 static BOOL SLInstallBodyNetHook(void) {
@@ -2706,6 +2724,7 @@ static void SLInstallHooks(void) {
     // v0.4.15：不再依赖发送入口，改为盯消息体赋值 + 音波消息的两个构造/处理入口
     @try { SLInstallBodyNetHook(); } @catch (NSException *e) {}
     @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}
+    @try { SLScheduleWaveRescan(); } @catch (NSException *e) {}
     @try { SLInstallAudioTimeProbe(); } @catch (NSException *e) {}
     // v0.4.11：音波探针默认关。0.4.10 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
     if (SLWaveProbeEnabled()) {
