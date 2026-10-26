@@ -30,7 +30,7 @@
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 
-#define SLVersion @"0.4.9.6"
+#define SLVersion @"0.4.9.7"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -1294,6 +1294,25 @@ static void SLPcmFeedRaw(id self, SEL _cmd, void *data, unsigned long long size)
     if (orig) orig(self, _cmd, data, size);
 }
 
+// sendPcm:byteSize: —— 参数是裸指针 + uint32 长度
+// v0.4.9.7：陌陌真实签名是 v32@0:8^v16I24（长度是 32 位而非 64 位），
+// 旧代码只认 'Q'，所以这条逐块喂 PCM 的主通道从装上起就没生效过，AI 语音全靠收尾点一次性灌。
+static void SLPcmFeedRaw32(id self, SEL _cmd, void *data, uint32_t size) {
+    void (*orig)(id, SEL, void *, uint32_t) =
+        (void (*)(id, SEL, void *, uint32_t))SLGetOrigIMP(self, _cmd);
+    if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
+        if (size > 0) gSLBusChunkSize = (NSUInteger)size;
+        NSData *d = SLBusNextChunk((NSUInteger)size);
+        if (!d) {
+            if (gSLBusSwallowLog++ < 3) SLLog(@"BUS-FEED AI 语音已喂完，吞掉后续 %u 字节", size);
+            return;
+        }
+        if (orig) orig(self, _cmd, (void *)d.bytes, (uint32_t)d.length);
+        return;
+    }
+    if (orig) orig(self, _cmd, data, size);
+}
+
 static NSMethodSignature *SLSigOf(Class cls, SEL sel) {
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return nil;
@@ -1396,6 +1415,7 @@ static BOOL SLInstallBusPCMHooks(void) {
         SLLog(@"BUS sig feed arg2=%s arg3=%s", a2 ?: "(null)", a3 ?: "(null)");
         if (a2 && a2[0] == '@' && a3 && a3[0] == 'Q') SLRegisterMethod(cls, feed, (IMP)SLPcmFeedObjC);
         else if (a2 && a2[0] == '^' && a3 && a3[0] == 'Q') SLRegisterMethod(cls, feed, (IMP)SLPcmFeedRaw);
+        else if (a2 && a2[0] == '^' && a3 && a3[0] == 'I') SLRegisterMethod(cls, feed, (IMP)SLPcmFeedRaw32);
         else SLLog(@"BUS feed 参数类型不认识，不装");
     } else {
         SLLog(@"BUS 没有 sendPcm:byteSize:");
