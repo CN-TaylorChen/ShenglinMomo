@@ -85,8 +85,8 @@ static UIView *AWECAMakeFooter(NSString *text) {
     lab.text = text;
     [box addSubview:lab];
     [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:18],
-        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-18],
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:16],
+        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
         [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
         [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
     ]];
@@ -94,8 +94,15 @@ static UIView *AWECAMakeFooter(NSString *text) {
 }
 
 @implementation AWECAAPISettingsController {
+
     AWECATTSManager *_mgr;
     BOOL _advancedExpanded;   // v0.4.5：TOS 与识别资源 ID 合并成一组，共用这个折叠开关
+}
+
+// v0.4.6：跟主面板一致，改用 insetGrouped 圆角卡片样式
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
 }
 
 - (void)viewDidLoad {
@@ -103,7 +110,7 @@ static UIView *AWECAMakeFooter(NSString *text) {
     _mgr = [AWECATTSManager shared];
     self.title = @"API 凭证";
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.tableView.separatorInset = UIEdgeInsetsZero;
+    self.tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 0);
     self.tableView.estimatedSectionFooterHeight = 28;
     self.tableView.estimatedSectionHeaderHeight = 26;
     [self.tableView registerClass:[AWECAAPIFieldCell class] forCellReuseIdentifier:@"field"];
@@ -248,7 +255,7 @@ static NSString *AWECATrimStr(NSString *s) {
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSString *text = [self aweca_footerForSection:section];
     if (!text.length) return 0;
-    CGFloat w = tableView.bounds.size.width - 36;
+    CGFloat w = tableView.bounds.size.width - 64;   // insetGrouped：分组左右各 16 + 文本左右各 16
     if (w <= 0) return UITableViewAutomaticDimension;
     CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
                                   options:NSStringDrawingUsesLineFragmentOrigin
