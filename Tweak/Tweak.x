@@ -29,7 +29,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.4.2"
+#define SLVersion @"0.4.3"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -359,6 +359,12 @@ static NSUInteger gSLBusOffset = 0;     // 已喂字节数
 static BOOL gSLBusActive = NO;          // 正在接管
 static BOOL gSLBusFed = NO;             // 至少喂过一块 → 文件里已经是 AI 语音
 static int gSLBusSwallowLog = 0;
+// —— v0.4.3：通用 PCM 漏斗（编码器入口兜底）——
+static BOOL gSLPcmArmed = NO;
+static double gSLArmRate = 0;
+static unsigned gSLArmCh = 0;
+static int gSLFunnelLog = 0;
+static NSMutableSet *gSLHookedSels = nil;
 static NSTimeInterval gSLArmedAt = 0;   // #tts 装填时刻（锁定“本次录音刚写的文件”）
 static int gSLRecDump = 0;
 static int gSLModelDump = 0;
@@ -1019,9 +1025,14 @@ static void SLBusArmWithASBD(id bus, AudioStreamBasicDescription asbd) {
     gSLBusSwallowLog = 0;
     gSLBusRef = bus;
     gSLBusActive = YES;
-    SLLog(@"BUS-PREP rate=%.0f ch=%u bits=%u aiPcm=%lu feedBytes=%lu（开始接管 PCM 流）",
+    gSLPcmArmed = YES;
+    gSLArmRate = asbd.mSampleRate;
+    gSLArmCh = asbd.mChannelsPerFrame;
+    NSString *opusPath = nil;
+    @try { opusPath = [bus valueForKey:@"opusFilePath"]; } @catch (NSException *e) {}
+    SLLog(@"BUS-PREP rate=%.0f ch=%u bits=%u aiPcm=%lu feedBytes=%lu opus=%@（开始接管 PCM 流）",
           asbd.mSampleRate, (unsigned)asbd.mChannelsPerFrame, (unsigned)asbd.mBitsPerChannel,
-          (unsigned long)gSLTTSPCM16k.length, (unsigned long)gSLBusPCM.length);
+          (unsigned long)gSLTTSPCM16k.length, (unsigned long)gSLBusPCM.length, opusPath ?: @"(nil)");
 }
 
 // sendPcmPrepareWithASBD: 结构体按值传
@@ -1045,7 +1056,7 @@ static void SLPcmPrepareByPointer(id self, SEL _cmd, AudioStreamBasicDescription
 static void SLPcmFeedObjC(id self, SEL _cmd, id data, unsigned long long size) {
     void (*orig)(id, SEL, id, unsigned long long) =
         (void (*)(id, SEL, id, unsigned long long))SLGetOrigIMP(self, _cmd);
-    if (gSLBusActive && self == gSLBusRef) {
+    if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
         NSData *d = SLBusNextChunk((NSUInteger)size);
         if (!d) {
             if (gSLBusSwallowLog++ < 3) SLLog(@"BUS-FEED AI 语音已喂完，吞掉后续 %llu 字节", size);
@@ -1061,7 +1072,7 @@ static void SLPcmFeedObjC(id self, SEL _cmd, id data, unsigned long long size) {
 static void SLPcmFeedRaw(id self, SEL _cmd, void *data, unsigned long long size) {
     void (*orig)(id, SEL, void *, unsigned long long) =
         (void (*)(id, SEL, void *, unsigned long long))SLGetOrigIMP(self, _cmd);
-    if (gSLBusActive && self == gSLBusRef) {
+    if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
         NSData *d = SLBusNextChunk((NSUInteger)size);
         if (!d) {
             if (gSLBusSwallowLog++ < 3) SLLog(@"BUS-FEED AI 语音已喂完，吞掉后续 %llu 字节", size);
@@ -1122,6 +1133,179 @@ static BOOL SLInstallBusPCMHooks(void) {
         else SLLog(@"BUS feed 参数类型不认识，不装");
     } else {
         SLLog(@"BUS 没有 sendPcm:byteSize:");
+    }
+    return YES;
+}
+
+#pragma mark - 钩子 3.6：通用 PCM 漏斗接管（v0.4.3）
+
+// 为什么要再加一层：
+// v0.4.2 只钩了 MDAudioStreamBus 的 sendPcm*，但如果聊天语音实际上不走这个对象
+// （或被包装成别的类），钩子就永远不触发 —— 表现出来就是「一点没变，还是原声」。
+// 而不管中间绕多少层，语音最终一定要经过 MDOpusEncoder -encodePcm: 才会变成 opus。
+// 所以这里在「编码器入口」再兜一层：谁把 PCM 递给编码器，就在那一刻换成 AI 语音。
+// 编码器、容器、页结构仍然全部由陌陌自己产出，格式一定正确。
+
+static BOOL SLReadASBDValue(id obj, AudioStreamBasicDescription *out) {
+    if (!obj || !out) return NO;
+    memset(out, 0, sizeof(*out));
+    @try {
+        id v = nil;
+        @try { v = [obj valueForKey:@"asbd"]; } @catch (NSException *e) { v = nil; }
+        if ([v isKindOfClass:[NSValue class]]) {
+            NSValue *vv = (NSValue *)v;
+            const char *t = [vv objCType];
+            if (t && t[0] == '{' && strlen(t) > 24) {
+                [vv getValue:out size:sizeof(*out)];
+                return YES;
+            }
+        }
+    } @catch (NSException *e) {}
+    @try {
+        Ivar iv = class_getInstanceVariable([obj class], "asbd");
+        if (!iv) iv = class_getInstanceVariable([obj class], "_asbd");
+        if (iv) {
+            const char *t = ivar_getTypeEncoding(iv);
+            if (t && t[0] == '{' && strlen(t) > 24) {
+                memcpy(out, (char *)(__bridge void *)obj + ivar_getOffset(iv), sizeof(*out));
+                return YES;
+            }
+        }
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+static BOOL SLFeedArm(id obj, AudioStreamBasicDescription asbd, NSString *tag) {
+    if (!SLIsEnabled() || !gSLTTSAudioPath) return NO;
+    if (gSLTTSPCM16k.length == 0) return NO;
+    if (asbd.mFormatID != kAudioFormatLinearPCM || asbd.mBitsPerChannel != 16) {
+        if (gSLFunnelLog++ < 4) {
+            SLLog(@"PCM-ARM %@ 跳过：fmt=%u bits=%u", tag,
+                  (unsigned)asbd.mFormatID, (unsigned)asbd.mBitsPerChannel);
+        }
+        return NO;
+    }
+    // 已经按同格式接管过就别重来（重来会把已喂进度清零 → AI 语音从头再说一遍）
+    if (gSLPcmArmed && gSLBusPCM.length > 0 &&
+        fabs(asbd.mSampleRate - gSLArmRate) < 1.0 && asbd.mChannelsPerFrame == gSLArmCh) {
+        return YES;
+    }
+    NSData *pcm = [SLPCMTool convertPCM16kMono:gSLTTSPCM16k
+                                        toRate:asbd.mSampleRate
+                                      channels:asbd.mChannelsPerFrame];
+    if (pcm.length == 0) return NO;
+    gSLBusPCM = pcm;
+    gSLBusOffset = 0;
+    gSLBusFed = NO;
+    gSLBusSwallowLog = 0;
+    gSLBusActive = YES;
+    gSLBusRef = obj;
+    gSLPcmArmed = YES;
+    gSLArmRate = asbd.mSampleRate;
+    gSLArmCh = asbd.mChannelsPerFrame;
+    SLLog(@"PCM-ARM %@ rate=%.0f ch=%u bits=%u aiPcm=%lu feed=%lu（开始接管）",
+          tag, asbd.mSampleRate, (unsigned)asbd.mChannelsPerFrame,
+          (unsigned)asbd.mBitsPerChannel, (unsigned long)gSLTTSPCM16k.length,
+          (unsigned long)pcm.length);
+    return YES;
+}
+
+// MDOpusEncoder -encodePcm:（参数 NSData*）
+static void SLEncodePcmDataHook(id self, SEL _cmd, id data) {
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
+    BOOL handled = NO;
+    if (SLIsEnabled() && gSLTTSAudioPath && [data isKindOfClass:[NSData class]] && [data length] > 0) {
+        AudioStreamBasicDescription a;
+        if (SLReadASBDValue(self, &a)) {
+            SLFeedArm(self, a, @"MDOpusEncoder.encodePcm");
+            if (gSLBusActive) {
+                NSData *chunk = SLBusNextChunk([data length]);
+                if (chunk) {
+                    if (orig) orig(self, _cmd, chunk);
+                } else if (gSLBusSwallowLog++ < 3) {
+                    SLLog(@"PCM-FEED 编码器：AI 语音已喂完，丢弃后续 %lu 字节",
+                          (unsigned long)[data length]);
+                }
+                handled = YES;
+            }
+        }
+    }
+    if (!handled && orig) orig(self, _cmd, data);
+}
+
+// 给任意「录音总线类」装 PCM 钩子：凡是方法名带 pcm、且形如 xxx:byteSize: 的都接管
+static void SLInstallPcmHooksOnClass(Class cls) {
+    if (!cls) return;
+    if (!gSLHookedSels) gSLHookedSels = [NSMutableSet set];
+    unsigned int mc = 0;
+    Method *ms = class_copyMethodList(cls, &mc);
+    NSMutableArray *hits = [NSMutableArray array];
+    for (unsigned i = 0; i < mc; i++) {
+        SEL sel = method_getName(ms[i]);
+        NSString *sn = NSStringFromSelector(sel);
+        if ([sn rangeOfString:@"pcm" options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
+        NSMethodSignature *sig = nil;
+        @try {
+            const char *t = method_getTypeEncoding(ms[i]);
+            if (t) sig = [NSMethodSignature signatureWithObjCTypes:t];
+        } @catch (NSException *e) { sig = nil; }
+        if (!sig || sig.numberOfArguments < 4) continue;
+        const char *a2 = [sig getArgumentTypeAtIndex:2];
+        const char *a3 = [sig getArgumentTypeAtIndex:3];
+        if (!a2 || !a3 || a3[0] != 'Q') continue;
+        IMP imp = NULL;
+        if (a2[0] == '@') imp = (IMP)SLPcmFeedObjC;
+        else if (a2[0] == '^') imp = (IMP)SLPcmFeedRaw;
+        if (!imp) continue;
+        NSString *key = [NSString stringWithFormat:@"%s|%s", class_getName(cls), sel_getName(sel)];
+        if ([gSLHookedSels containsObject:key]) continue;
+        [gSLHookedSels addObject:key];
+        if (SLRegisterMethod(cls, sel, imp)) [hits addObject:sn];
+    }
+    if (ms) free(ms);
+    if (hits.count) {
+        SLLog(@"PCM-HOOK %s -> %@", class_getName(cls), [hits componentsJoinedByString:@" "]);
+    }
+}
+
+// 录音机 addBus: —— 亲眼看看它到底把哪些对象塞进了 busArray
+static void SLAddBusHook(id self, SEL _cmd, id bus) {
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
+    if (bus && gSLFunnelLog++ < 8) {
+        SLLog(@"ADD-BUS %@ <- %@",
+              NSStringFromClass([bus class]), NSStringFromClass([self class]));
+        SLInstallPcmHooksOnClass([bus class]);
+    }
+    if (orig) orig(self, _cmd, bus);
+}
+
+static BOOL SLInstallFunnelHooks(void) {
+    Class enc = NSClassFromString(@"MDOpusEncoder");
+    if (enc) {
+        Method m = class_getInstanceMethod(enc, NSSelectorFromString(@"encodePcm:"));
+        if (m) {
+            const char *t = method_getTypeEncoding(m);
+            NSMethodSignature *sig = nil;
+            @try { if (t) sig = [NSMethodSignature signatureWithObjCTypes:t]; } @catch (NSException *e) {}
+            const char *a2 = (sig && sig.numberOfArguments > 2) ? [sig getArgumentTypeAtIndex:2] : NULL;
+            SLLog(@"ENC sig encodePcm arg2=%s", a2 ?: "(null)");
+            if (a2 && a2[0] == '@') {
+                SLRegisterMethod(enc, NSSelectorFromString(@"encodePcm:"), (IMP)SLEncodePcmDataHook);
+            } else {
+                SLLog(@"ENC encodePcm: 参数不是对象，跳过（%s）", a2 ?: "(null)");
+            }
+        } else {
+            SLLog(@"ENC 没有 encodePcm:");
+        }
+    } else {
+        SLLog(@"ENC 没有 MDOpusEncoder 类");
+    }
+
+    NSArray *names = @[@"MDAudioRecorder", @"MLAudioRecorder", @"MLVoiceMessageRecorder", @"Recorder"];
+    for (NSString *n in names) {
+        Class c = NSClassFromString(n);
+        if (!c) continue;
+        SLRegisterMethod(c, NSSelectorFromString(@"addBus:"), (IMP)SLAddBusHook);
     }
     return YES;
 }
@@ -1189,6 +1373,9 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
             gSLBusPCM = nil;
             gSLBusOffset = 0;
             gSLBusFed = NO;
+            gSLPcmArmed = NO;
+            gSLArmRate = 0;
+            gSLArmCh = 0;
         } @catch (NSException *e) {
             SLLog(@"AUDIO-SEND exception %@", e);
         }
@@ -1377,6 +1564,7 @@ static void SLInstallHooks(void) {
     SLInstallTempPathHook(NSClassFromString(@"MDAudioRecorder"));
     // v0.4.2 核心：接管陌陌录音的 PCM 流（AI 语音替换的落地位置）
     SLInstallBusPCMHooks();
+    SLInstallFunnelHooks();
     SLInstallServiceHook();
 }
 
