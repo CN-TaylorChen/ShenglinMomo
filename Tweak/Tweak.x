@@ -14,6 +14,7 @@
 // 日志：SLLog 同时写 NSLog 与 /var/mobile/Documents/ShenglinMomo/slmomo.log，设置里有「运行日志」页。
 
 #import <UIKit/UIKit.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "AWECATTSManager.h"
@@ -22,13 +23,13 @@
 #import <math.h>
 #import "SLLog.h"
 #import "SLAMREncoder.h"
-#import "SLOpusBridge.h"
+#import "SLPCMTool.h"
 #import "SLPipeline.h"
 #import "SLSettingsPanel.h"
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.4.1"
+#define SLVersion @"0.4.2"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -349,8 +350,15 @@ static id SLFindAudioHandlerNear(UIView *view) {
 
 static NSString *gSLTTSAudioPath = nil;
 static double gSLTTSAudioDur = 0;
-static NSData *gSLTTSPCM16k = nil;      // 合成音频解出来的 16k/mono/s16le PCM（Opus 编码原料）
+static NSData *gSLTTSPCM16k = nil;      // 合成音频解出来的 16k/mono/s16le PCM
 static double gSLTTSPCM16kDur = 0;
+// —— v0.4.2：接管陌陌录音的 PCM 流（MDAudioStreamBus → MDOpusEncoder）——
+static id gSLBusRef = nil;              // 本次录音的 bus 实例（身份校验，别喂错对象）
+static NSData *gSLBusPCM = nil;         // 按 bus 的 ASBD 预处理好的 PCM
+static NSUInteger gSLBusOffset = 0;     // 已喂字节数
+static BOOL gSLBusActive = NO;          // 正在接管
+static BOOL gSLBusFed = NO;             // 至少喂过一块 → 文件里已经是 AI 语音
+static int gSLBusSwallowLog = 0;
 static NSTimeInterval gSLArmedAt = 0;   // #tts 装填时刻（锁定“本次录音刚写的文件”）
 static int gSLRecDump = 0;
 static int gSLModelDump = 0;
@@ -452,7 +460,7 @@ static BOOL SLTypeIsSafeObj(const char *te) {
 }
 
 // 这个字符串像不像一条录音文件
-static BOOL SLIsAudioPath(NSString *p) {
+__attribute__((unused)) static BOOL SLIsAudioPath(NSString *p) {
     if (![p isKindOfClass:[NSString class]] || p.length == 0) return NO;
     if ([p hasPrefix:@"file://"]) p = [p stringByReplacingOccurrencesOfString:@"file://" withString:@""];
     if (![p hasPrefix:@"/var/mobile"] && ![p hasPrefix:@"/private/var/mobile"]) return NO;
@@ -473,7 +481,7 @@ static BOOL SLIsOurOwnFile(NSString *p) {
 }
 
 // 文件是否「在 armed（#tts 装填）之后」被写过 —— 这条能精准锁定本次录音刚写的那个文件
-static BOOL SLFileFreshSince(NSString *p, NSTimeInterval since) {
+__attribute__((unused)) static BOOL SLFileFreshSince(NSString *p, NSTimeInterval since) {
     if (![p isKindOfClass:[NSString class]] || p.length == 0) return NO;
     NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
     if (!a) return NO;
@@ -483,7 +491,7 @@ static BOOL SLFileFreshSince(NSString *p, NSTimeInterval since) {
 }
 
 // AMR-NB 自己数帧算时长（AVFoundation 对 .amr 经常返回 0 或 nan，不能依赖）
-static double SLAMRDurationAtPath(NSString *p) {
+__attribute__((unused)) static double SLAMRDurationAtPath(NSString *p) {
     NSData *d = [NSData dataWithContentsOfFile:p];
     if (d.length < 7) return 0;
     const unsigned char *b = (const unsigned char *)d.bytes;
@@ -504,7 +512,7 @@ static double SLAMRDurationAtPath(NSString *p) {
 }
 
 // 在对象里（含 _innerRecorder 递归）找「本次录音刚写好的音频文件路径」
-static NSString *SLFindRecordPathInObject(id obj, NSTimeInterval armedAt, int depth) {
+__attribute__((unused)) static NSString *SLFindRecordPathInObject(id obj, NSTimeInterval armedAt, int depth) {
     if (!obj || depth > 3) return nil;
 
     // 1) 常见 getter
@@ -610,7 +618,7 @@ static void SLDumpRecorderDeep(id rec) {
 }
 
 // 兜底：在沙盒里找「armed 之后才写」的音频文件（排除我们自己产出的）
-static NSString *SLNewestRecordFileSince(NSTimeInterval since) {
+__attribute__((unused)) static NSString *SLNewestRecordFileSince(NSTimeInterval since) {
     static NSArray *exts = nil;
     if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav",@"opus",@"ogg"];
     NSString *home = NSHomeDirectory();
@@ -690,7 +698,7 @@ static NSString *SLFindFileByToken(NSString *token) {
 }
 
 // 在指定目录里找「since 之后被写过」的最新音频文件（录音临时目录）
-static NSString *SLNewestAudioInDir(NSString *dir, NSTimeInterval since) {
+__attribute__((unused)) static NSString *SLNewestAudioInDir(NSString *dir, NSTimeInterval since) {
     if (![dir isKindOfClass:[NSString class]] || dir.length == 0) return nil;
     static NSArray *exts = nil;
     if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav",@"opus",@"ogg"];
@@ -778,7 +786,7 @@ static NSString *SLMagicAtPath(NSString *path) {
 
 // 把 AI 音频原地写进陌陌的真实录音文件（必须 atomically:NO：换 inode 陌陌读到的还是旧内容）
 // outSize 返回写入的字节数（要同步给 sendAudioMessage 的 audioFileSize）
-static BOOL SLOverwriteWithAI(NSString *target, NSUInteger *outSize) {
+__attribute__((unused)) static BOOL SLOverwriteWithAI(NSString *target, NSUInteger *outSize) {
     if (![target isKindOfClass:[NSString class]] || target.length == 0) return NO;
     if (![gSLTTSAudioPath isKindOfClass:[NSString class]] || gSLTTSAudioPath.length == 0) return NO;
     NSData *payload = [NSData dataWithContentsOfFile:gSLTTSAudioPath];
@@ -836,42 +844,23 @@ static void SLArmTTS(id handler,
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
             [AWECAUtils showToast:@"声临已就绪：现在录音将发 AI 语音" duration:2.0];
 
-            // —— v0.4.1 关键修复：把合成音频重新编成陌陌真正使用的 Ogg Opus ——
-            // 真机日志证明陌陌录音落盘是 Chat_Audios_Temp/<token>.opus（Ogg Opus 容器）。
-            // v0.4.0 直接往这个文件里写 AMR 字节 → 陌陌/对端解码失败 → 0 秒空白语音。
-            // 这里借陌陌自己的 MDAudioStreamBus 编码，容器/页结构/OpusHead 与原生录音完全一致。
+            // —— v0.4.2：不再自己造 Opus 文件 ——
+            // v0.4.1 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
+            // 陌陌内部才有的 opus 配置，外部 alloc 出来的实例跑不通）。
+            // 改成：录音时接管陌陌自己的 PCM 流（见 SLPcmPrepareHook / SLPcmFeedHook），
+            // 编码器和容器全部由陌陌自己做 —— 格式必然正确。
+            // 这里只把合成音频解码成 16k/mono/s16le 的 PCM 备好。
             NSString *rawPath = [SLPipeline shared].lastRawAudioPath ?: outPath;
             NSData *pcm = [SLAMREncoder pcmMono16AtPath:rawPath sampleRate:16000.0];
-            if (pcm.length > 1600 && [SLOpusBridge available]) {
+            if (pcm.length > 1600) {
                 gSLTTSPCM16k = pcm;
                 gSLTTSPCM16kDur = (double)(pcm.length / 2) / 16000.0;
-                NSString *outDir = [[AWECAUtils documentsPath] stringByAppendingPathComponent:@"ShenglinMomo/out"];
-                [[NSFileManager defaultManager] createDirectoryAtPath:outDir
-                                          withIntermediateDirectories:YES attributes:nil error:nil];
-                NSString *opusPath = [outDir stringByAppendingPathComponent:
-                                      [NSString stringWithFormat:@"%@.opus", [[NSUUID UUID] UUIDString]]];
-                NSString *amrPath = [outPath copy];
-                SLLog(@"opus encode start pcm=%lu dur=%.2f raw=%@", (unsigned long)pcm.length, gSLTTSPCM16kDur, rawPath);
-                [SLOpusBridge encodePCM:pcm sampleRate:16000.0 channels:1 toOpusPath:opusPath
-                             completion:^(BOOL ok, NSString *p, double d, unsigned long long bytes) {
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        if (!ok || p.length == 0) {
-                            SLLog(@"OPUS 编码失败，本次仍用 AMR（对端可能解不出来）");
-                            return;
-                        }
-                        if (!(gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:amrPath])) {
-                            SLLog(@"OPUS ready 但装填已变化，丢弃 %@", p);
-                            return;
-                        }
-                        gSLTTSAudioPath = p;
-                        if (d > 0) gSLTTSAudioDur = d;
-                        SLLog(@"OPUS ready %@ bytes=%llu dur=%.2f（录音将被覆盖成 Ogg Opus）",
-                              p, bytes, gSLTTSAudioDur);
-                    });
-                }];
+                SLLog(@"pcm16k ready bytes=%lu dur=%.2f（录音时接管 PCM 流替换）",
+                      (unsigned long)pcm.length, gSLTTSPCM16kDur);
             } else {
-                SLLog(@"opus 不可用 pcm=%lu bus=%d，退回 AMR",
-                      (unsigned long)pcm.length, (int)[SLOpusBridge available]);
+                gSLTTSPCM16k = nil;
+                gSLTTSPCM16kDur = 0;
+                SLLog(@"pcm16k 解码失败 bytes=%lu，本次无法接管", (unsigned long)pcm.length);
             }
             // 60s 内未录音则自动解除，避免误替换普通语音
             NSString *armed = outPath;
@@ -988,6 +977,155 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
     return;
 }
 
+#pragma mark - 钩子 3.5：MDAudioStreamBus 的 PCM 流接管（v0.4.2 核心）
+
+// 陌陌录音链路：MDAudioRecorder → MDAudioStreamBus
+//   -sendPcmPrepareWithASBD:（开场）→ -sendPcm:byteSize:（逐块喂 PCM）→ -sendPcmOver（收尾）
+//   → MDOpusEncoder → Ogg Opus 文件（Library/Application Support/Chat_Audios_Temp/<token>.opus）
+//
+// 为什么不在外面自己造 .opus：陌陌语音是 Ogg Opus，AMR 写进去对端解码失败 = 0 秒空语音；
+// 而 v0.4.1 试过直接 alloc 陌陌的 MDAudioStreamBus 来自编码，会在 init 阶段闪退
+// （它依赖陌陌内部才有的 opus 配置）。所以改成接管「陌陌自己正在用的这条流」：
+// 编码器、容器、页结构全部由陌陌自己产出，我们只把 PCM 换成 AI 语音。
+// AI 语音喂完就把后续的块全吞掉，等陌陌自己 sendPcmOver 收尾 ——
+// 文件时长正好是 AI 语音时长，不需要截断、也不需要补静音。
+
+// 取一块要喂给 bus 的数据：null 表示「AI 语音已喂完，这一块要吞掉」
+static NSData *SLBusNextChunk(NSUInteger size) {
+    if (!gSLBusActive || gSLBusPCM.length == 0 || size == 0) return nil;
+    if (gSLBusOffset >= gSLBusPCM.length) return nil;
+    NSUInteger n = MIN(size, gSLBusPCM.length - gSLBusOffset);
+    NSMutableData *d = [NSMutableData dataWithLength:size];   // 尾部补零，保持帧对齐
+    memcpy(d.mutableBytes, (const char *)gSLBusPCM.bytes + gSLBusOffset, n);
+    gSLBusOffset += n;
+    gSLBusFed = YES;
+    return d;
+}
+
+static void SLBusArmWithASBD(id bus, AudioStreamBasicDescription asbd) {
+    if (!bus) return;
+    if (!SLIsEnabled() || !gSLTTSAudioPath) return;
+    if (gSLTTSPCM16k.length == 0) { SLLog(@"BUS-PREP 没有 AI PCM，本次不接管"); return; }
+    if (asbd.mFormatID != kAudioFormatLinearPCM || asbd.mBitsPerChannel != 16) {
+        SLLog(@"BUS-PREP 跳过：非 16bit PCM fmt=%u bits=%u",
+              (unsigned)asbd.mFormatID, (unsigned)asbd.mBitsPerChannel);
+        return;
+    }
+    gSLBusPCM = [SLPCMTool convertPCM16kMono:gSLTTSPCM16k
+                                      toRate:asbd.mSampleRate
+                                    channels:asbd.mChannelsPerFrame];
+    gSLBusOffset = 0;
+    gSLBusFed = NO;
+    gSLBusSwallowLog = 0;
+    gSLBusRef = bus;
+    gSLBusActive = YES;
+    SLLog(@"BUS-PREP rate=%.0f ch=%u bits=%u aiPcm=%lu feedBytes=%lu（开始接管 PCM 流）",
+          asbd.mSampleRate, (unsigned)asbd.mChannelsPerFrame, (unsigned)asbd.mBitsPerChannel,
+          (unsigned long)gSLTTSPCM16k.length, (unsigned long)gSLBusPCM.length);
+}
+
+// sendPcmPrepareWithASBD: 结构体按值传
+static void SLPcmPrepareByValue(id self, SEL _cmd, AudioStreamBasicDescription asbd) {
+    void (*orig)(id, SEL, AudioStreamBasicDescription) =
+        (void (*)(id, SEL, AudioStreamBasicDescription))SLGetOrigIMP(self, _cmd);
+    if (orig) orig(self, _cmd, asbd);
+    @try { SLBusArmWithASBD(self, asbd); } @catch (NSException *e) { SLLog(@"BUS-PREP 异常 %@", e); }
+}
+
+// sendPcmPrepareWithASBD: 结构体按指针传（兜底）
+static void SLPcmPrepareByPointer(id self, SEL _cmd, AudioStreamBasicDescription *asbd) {
+    void (*orig)(id, SEL, AudioStreamBasicDescription *) =
+        (void (*)(id, SEL, AudioStreamBasicDescription *))SLGetOrigIMP(self, _cmd);
+    if (orig) orig(self, _cmd, asbd);
+    if (!asbd) return;
+    @try { SLBusArmWithASBD(self, *asbd); } @catch (NSException *e) { SLLog(@"BUS-PREP 异常 %@", e); }
+}
+
+// sendPcm:byteSize: —— 参数是 NSData*
+static void SLPcmFeedObjC(id self, SEL _cmd, id data, unsigned long long size) {
+    void (*orig)(id, SEL, id, unsigned long long) =
+        (void (*)(id, SEL, id, unsigned long long))SLGetOrigIMP(self, _cmd);
+    if (gSLBusActive && self == gSLBusRef) {
+        NSData *d = SLBusNextChunk((NSUInteger)size);
+        if (!d) {
+            if (gSLBusSwallowLog++ < 3) SLLog(@"BUS-FEED AI 语音已喂完，吞掉后续 %llu 字节", size);
+            return;
+        }
+        if (orig) orig(self, _cmd, d, (unsigned long long)d.length);
+        return;
+    }
+    if (orig) orig(self, _cmd, data, size);
+}
+
+// sendPcm:byteSize: —— 参数是裸指针
+static void SLPcmFeedRaw(id self, SEL _cmd, void *data, unsigned long long size) {
+    void (*orig)(id, SEL, void *, unsigned long long) =
+        (void (*)(id, SEL, void *, unsigned long long))SLGetOrigIMP(self, _cmd);
+    if (gSLBusActive && self == gSLBusRef) {
+        NSData *d = SLBusNextChunk((NSUInteger)size);
+        if (!d) {
+            if (gSLBusSwallowLog++ < 3) SLLog(@"BUS-FEED AI 语音已喂完，吞掉后续 %llu 字节", size);
+            return;
+        }
+        if (orig) orig(self, _cmd, (void *)d.bytes, (unsigned long long)d.length);
+        return;
+    }
+    if (orig) orig(self, _cmd, data, size);
+}
+
+static NSMethodSignature *SLSigOf(Class cls, SEL sel) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return nil;
+    const char *t = method_getTypeEncoding(m);
+    if (!t) return nil;
+    @try { return [NSMethodSignature signatureWithObjCTypes:t]; } @catch (NSException *e) { return nil; }
+}
+
+static BOOL SLInstallBusPCMHooks(void) {
+    Class cls = NSClassFromString(@"MDAudioStreamBus");
+    if (!cls) { SLLog(@"BUS 没有 MDAudioStreamBus 类"); return NO; }
+
+    static int dumped = 0;
+    if (dumped++ < 1) {
+        NSMutableArray *names = [NSMutableArray array];
+        unsigned int mc = 0;
+        Method *ms = class_copyMethodList(cls, &mc);
+        for (unsigned i = 0; i < mc && names.count < 120; i++) {
+            [names addObject:NSStringFromSelector(method_getName(ms[i]))];
+        }
+        if (ms) free(ms);
+        SLLog(@"BUS-METHODS %@", [names componentsJoinedByString:@" "]);
+    }
+
+    // ① sendPcmPrepareWithASBD:
+    SEL prep = NSSelectorFromString(@"sendPcmPrepareWithASBD:");
+    NSMethodSignature *psig = SLSigOf(cls, prep);
+    if (psig) {
+        const char *a2 = psig.numberOfArguments > 2 ? [psig getArgumentTypeAtIndex:2] : NULL;
+        SLLog(@"BUS sig prep arg2=%s", a2 ?: "(null)");
+        if (a2 && a2[0] == '{') SLRegisterMethod(cls, prep, (IMP)SLPcmPrepareByValue);
+        else if (a2 && a2[0] == '^') SLRegisterMethod(cls, prep, (IMP)SLPcmPrepareByPointer);
+        else SLLog(@"BUS prep 参数类型不认识，不装");
+    } else {
+        SLLog(@"BUS 没有 sendPcmPrepareWithASBD:");
+    }
+
+    // ② sendPcm:byteSize:
+    SEL feed = NSSelectorFromString(@"sendPcm:byteSize:");
+    NSMethodSignature *fsig = SLSigOf(cls, feed);
+    if (fsig) {
+        const char *a2 = fsig.numberOfArguments > 2 ? [fsig getArgumentTypeAtIndex:2] : NULL;
+        const char *a3 = fsig.numberOfArguments > 3 ? [fsig getArgumentTypeAtIndex:3] : NULL;
+        SLLog(@"BUS sig feed arg2=%s arg3=%s", a2 ?: "(null)", a3 ?: "(null)");
+        if (a2 && a2[0] == '@' && a3 && a3[0] == 'Q') SLRegisterMethod(cls, feed, (IMP)SLPcmFeedObjC);
+        else if (a2 && a2[0] == '^' && a3 && a3[0] == 'Q') SLRegisterMethod(cls, feed, (IMP)SLPcmFeedRaw);
+        else SLLog(@"BUS feed 参数类型不认识，不装");
+    } else {
+        SLLog(@"BUS 没有 sendPcm:byteSize:");
+    }
+    return YES;
+}
+
 #pragma mark - 钩子 4：MDChatBaseHander -sendAudioMessage:audioTime:audioFileSize:（诊断用，抓语音 model 结构）
 
 // 注意：真实签名是 v40@0:8@16Q24Q32 —— audioTime / audioFileSize 都是 Q（unsigned long long）。
@@ -1004,61 +1142,53 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
         SLDumpModelDeep(model);
     }
 
-    // 「录音替换」的真正落地位置：body 里的 file token 就是陌陌这段录音的文件名，
-    // 此刻还没上传，按 token 找到文件覆盖成 AI 音频即可；顺手把 audiotime 改成真实时长。
+    // 发送前的最后一步（v0.4.2）：录音阶段已把陌陌的 PCM 流换成 AI 语音，
+    // 这里只需要把时长（气泡秒数）改成 AI 语音的真实时长。
+    // bus 没接管成功时绝不覆盖文件 —— 往 .opus 里写 AMR 只会得到「0 秒空语音」，比原声更糟。
     if (gSLTTSAudioPath) {
         @try {
             NSString *body = nil;
             @try { body = [model valueForKey:@"body"]; } @catch (NSException *e) {}
             if (![body isKindOfClass:[NSString class]] || body.length == 0) body = nil;
             NSString *token = SLBodyValue(body, @"file");
-            SLLog(@"AUDIO-SEND model=%@ t=%llu size=%llu token=%@ armedDur=%.2f payloadExt=%@ pcm16k=%lu/%.2fs",
-                  NSStringFromClass([model class]), t, size, token ?: @"(nil)", gSLTTSAudioDur,
-                  [gSLTTSAudioPath pathExtension] ?: @"(nil)",
-                  (unsigned long)gSLTTSPCM16k.length, gSLTTSPCM16kDur);
+            SLLog(@"AUDIO-SEND model=%@ t=%llu size=%llu token=%@ busFed=%d busOn=%d aiDur=%.2f",
+                  NSStringFromClass([model class]), t, size, token ?: @"(nil)",
+                  (int)gSLBusFed, (int)gSLBusActive, gSLTTSAudioDur);
 
-            NSString *target = nil;
-            if (token.length) target = SLFindFileByToken(token);
-            if (!target) {
-                NSTimeInterval since = gSLArmedAt > 0 ? gSLArmedAt
-                                                     : ([[NSDate date] timeIntervalSince1970] - 180.0);
-                target = SLNewestRecordFileSince(since);
-            }
-            if (target) {
-                NSUInteger aiSize = 0;
-                if (SLOverwriteWithAI(target, &aiSize)) {
-                    if (aiSize > 0) newSize = (unsigned long long)aiSize;
-                    if (gSLTTSAudioDur > 0) {
-                        double nd = gSLTTSAudioDur;
-                        long long secs = (long long)llround(nd);
-                        if (secs < 1) secs = 1;
-                        newT = (unsigned long long)secs;
-                        if (body) {
-                            NSString *nb = SLBodySetAudioTime(body, nd);
-                            BOOL set = NO;
-                            SEL bs = NSSelectorFromString(@"setBody:");
-                            if ([model respondsToSelector:bs]) {
-                                @try { ((void(*)(id,SEL,id))objc_msgSend)(model, bs, nb); set = YES; } @catch (NSException *e) {}
-                            }
-                            if (!set) { @try { [model setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {} }
-                            SLLog(@"AUDIO-SEND body audiotime -> %lld set=%d (%@)", secs, set,
-                                  nb.length > 160 ? [nb substringToIndex:160] : nb);
+            if (gSLBusFed) {
+                // 文件内容已由陌陌自己的编码器写成 AI 语音 → 只改 audiotime / audioTime
+                if (gSLTTSAudioDur > 0.1) {
+                    long long secs = (long long)llround(gSLTTSAudioDur);
+                    if (secs < 1) secs = 1;
+                    newT = (unsigned long long)secs;
+                    if (body) {
+                        NSString *nb = SLBodySetAudioTime(body, gSLTTSAudioDur);
+                        BOOL set = NO;
+                        SEL bs = NSSelectorFromString(@"setBody:");
+                        if ([model respondsToSelector:bs]) {
+                            @try { ((void(*)(id,SEL,id))objc_msgSend)(model, bs, nb); set = YES; } @catch (NSException *e) {}
                         }
+                        if (!set) { @try { [model setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {} }
+                        SLLog(@"AUDIO-SEND body audiotime -> %lld set=%d (%@)", secs, set,
+                              nb.length > 160 ? [nb substringToIndex:160] : nb);
                     }
-                    [AWECAUtils showToast:@"已替换为 AI 语音" duration:1.5];
-                    gSLTTSAudioPath = nil;
-                } else {
-                    SLLog(@"AUDIO-SEND overwrite failed, keep armed");
+                    SLLog(@"AUDIO-SEND bus 已接管，时长改成 %lld 秒，不覆盖文件", secs);
                 }
+                [AWECAUtils showToast:@"已发送 AI 语音" duration:1.5];
             } else {
-                SLLog(@"AUDIO-SEND no file for token=%@（未替换）", token ?: @"(nil)");
-                static int diagOnce = 0;
-                if (diagOnce++ < 2) {
-                    NSTimeInterval since = gSLArmedAt > 0 ? gSLArmedAt
-                                                         : ([[NSDate date] timeIntervalSince1970] - 180.0);
-                    SLLog(@"DIAG-AUDIO-RECENT %@", SLDiagRecentFiles(since));
+                SLLog(@"AUDIO-SEND bus 未接管（BUS-PREP 没触发？）——本次不覆盖，避免 0 秒空语音");
+                NSString *target = token.length ? SLFindFileByToken(token) : nil;
+                if (target) {
+                    SLLog(@"AUDIO-SEND 目标文件 ext=%@ magic=%@，跳过覆盖",
+                          [target pathExtension], SLMagicAtPath(target));
                 }
             }
+            gSLTTSAudioPath = nil;
+            gSLBusActive = NO;
+            gSLBusRef = nil;
+            gSLBusPCM = nil;
+            gSLBusOffset = 0;
+            gSLBusFed = NO;
         } @catch (NSException *e) {
             SLLog(@"AUDIO-SEND exception %@", e);
         }
@@ -1138,56 +1268,18 @@ static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path
         SLDumpMethodNames(recorder);
     }
 
-    // 「录音替换」：把本次真实录音文件覆盖成 AI 音频，再让陌陌发送。
+    // v0.4.2：这里不再覆盖文件。
+    // 录音过程中陌陌自己的编码器已经把 AI 语音写进 .opus（见 SLPcmFeedObjC），
+    // 此刻再往 .opus 里写 AMR 反而会把刚生成的好文件毁掉（= 0 秒空语音）。
+    // 只剩诊断：录音结束后 bus 是否真的接管过。
     if (gSLTTSAudioPath) {
-        NSTimeInterval armedAt = gSLArmedAt > 0 ? gSLArmedAt : ([[NSDate date] timeIntervalSince1970] - 300.0);
-        NSString *target = nil;
-        NSString *via = @"(none)";
-        BOOL replaced = NO;
-
-        // ① path 参数（通常是 nil）
-        if (SLIsAudioPath(path) && !SLIsOurOwnFile(path) && SLFileFreshSince(path, armedAt)) {
-            target = path; via = @"pathArg";
-        }
-        // ② 录音机内部（含 _innerRecorder 递归）
-        if (!target) {
-            NSString *p = SLFindRecordPathInObject(recorder, armedAt, 0);
-            if (p) { target = p; via = @"recorder"; }
-        }
-        // ③ setTempAudioPath: 捕获到的临时路径 / 它所在目录
-        if (!target && gSLTempRecPath.length && !SLIsOurOwnFile(gSLTempRecPath)) {
-            if (SLIsAudioPath(gSLTempRecPath) && SLFileFreshSince(gSLTempRecPath, armedAt)) {
-                target = gSLTempRecPath; via = @"tempPath";
-            } else {
-                NSString *p = SLNewestAudioInDir([gSLTempRecPath stringByDeletingLastPathComponent], armedAt);
-                if (p) { target = p; via = @"tempDir"; }
-            }
-        }
-        // ④ 兜底扫描：只接受 armed 之后写的文件
-        if (!target) {
-            NSString *p = SLNewestRecordFileSince(armedAt);
-            if (p) { target = p; via = @"scan"; }
-        }
-
-        double ttsDur = gSLTTSAudioDur;
-        double origDur = 0;
-        if (target) {
-            if ([[target pathExtension].lowercaseString isEqualToString:@"amr"]) origDur = SLAMRDurationAtPath(target);
-            if (origDur <= 0.01) origDur = [AWECAUtils audioDurationAtPath:target];
-        }
-        SLLog(@"REPLACE target=%@ via=%@ origDur=%.2f ttsDur=%.2f timeRaw=%llu",
-              target ?: @"(nil)", via, origDur, ttsDur, time);
-
-        if (target) {
-            replaced = SLOverwriteWithAI(target, NULL);
-            if (replaced) SLLog(@"REPLACE ok via=%@（时长将在 sendAudio 钩子里改成 %.2fs）", via, ttsDur);
-        } else {
-            SLLog(@"REPLACE miss: 这次没定位到录音文件，留给 sendAudio 钩子按 token 再试（armed 保留）");
+        SLLog(@"REC-DONE busFed=%d busOn=%d aiDur=%.2f timeRaw=%llu pathArg=%@",
+              (int)gSLBusFed, (int)gSLBusActive, gSLTTSAudioDur, time, path ?: @"(nil)");
+        if (!gSLBusFed) {
+            NSTimeInterval armedAt = gSLArmedAt > 0 ? gSLArmedAt
+                                                    : ([[NSDate date] timeIntervalSince1970] - 300.0);
             if (gSLRecDump <= 3) SLLog(@"DIAG-RECENT %@", SLDiagRecentFiles(armedAt));
         }
-        // 注意：这里绝不无条件清空装填。
-        // 陌陌紧接着会调 sendAudioMessage:，那里能用 body 的 file token 精确定位文件，
-        // 并顺手把 audiotime 改成 AI 的真实时长 —— 那一步才是真正的落地与收尾。
     }
 
     if (orig) orig(self, _cmd, recorder, path, newTime);
@@ -1283,6 +1375,8 @@ static void SLInstallHooks(void) {
     SLInstallAudioRecordHook(NSClassFromString(@"MDChatUniverseHandler"));
     // 录音机临时路径（拿得到就直接命中真实录音文件）
     SLInstallTempPathHook(NSClassFromString(@"MDAudioRecorder"));
+    // v0.4.2 核心：接管陌陌录音的 PCM 流（AI 语音替换的落地位置）
+    SLInstallBusPCMHooks();
     SLInstallServiceHook();
 }
 
