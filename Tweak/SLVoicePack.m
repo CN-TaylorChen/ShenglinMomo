@@ -12,7 +12,10 @@
 static NSArray<NSString *> *SLAudioExts(void) {    static NSArray<NSString *> *exts = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        exts = @[@"mp3", @"wav", @"m4a", @"aac", @"amr", @"caf", @"ogg", @"flac", @"aiff", @"aif"];
+        // v0.4.9.5：补 oga / opus / webm —— 能被导入和列出（iOS 原生解不了 ogg 系，
+        // 播放/使用时会明确提示转成 m4a 或 wav）
+        exts = @[@"mp3", @"wav", @"m4a", @"aac", @"amr", @"caf",
+                 @"ogg", @"oga", @"opus", @"flac", @"aiff", @"aif", @"webm"];
     });
     return exts;
 }
