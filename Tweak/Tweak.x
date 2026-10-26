@@ -26,7 +26,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.2"
+#define SLVersion @"0.3.3"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -411,7 +411,23 @@ static void SLHandleTTS(id handler,
                 if (fallback) fallback();
                 return;
             }
-            BOOL sent = SLSendAudioMessage(handler, outPath, dur);
+            // 伪装一次「录制完成」：把合成音频当录音文件，交给陌陌自己的
+            // audioRecorder:recordSucessStoreAt:audioTime: 去构造语音消息 model 并发送。
+            // 这样完全绕开 sendAudioMessage:audioTime:audioFileSize: 的私有 model
+            // （它的第一参数是带 cate 属性的消息对象，直接 NSInvocation 调必崩）。
+            BOOL sent = NO;
+            SEL recSel = @selector(audioRecorder:recordSucessStoreAt:audioTime:);
+            if ([handler respondsToSelector:recSel]) {
+                @try {
+                    ((void(*)(id,SEL,id,id,double))objc_msgSend)(handler, recSel, nil, outPath, dur);
+                    sent = YES;
+                    SLLog(@"fakeRecord ok path=%@ dur=%.2f fmt=%@", outPath, dur, [outPath pathExtension]);
+                } @catch (NSException *e) {
+                    SLLog(@"fakeRecord exception %@", e);
+                }
+            } else {
+                SLLog(@"handler 无 audioRecorder:recordSucessStoreAt:audioTime: 方法");
+            }
             SLLog(@"audio sent=%d path=%@ dur=%.2f", sent, outPath, dur);
             if (!sent) {
                 [AWECAUtils showToast:@"发送语音失败，已改发文本" duration:2.5];
