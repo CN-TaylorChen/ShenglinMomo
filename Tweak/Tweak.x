@@ -29,7 +29,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.4.9"
+#define SLVersion @"0.4.9.1"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -858,7 +858,10 @@ static void SLArmTTS(id handler,
             gSLTTSAudioDur = dur;
             gSLArmedAt = [[NSDate date] timeIntervalSince1970];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
-            [AWECAUtils showToast:@"已就绪：现在录音将发送AI语音" duration:2.0];
+            // v0.4.9.1：只留这一条提示（合成成功那条已从 AWECATTSManager 删掉），
+            // 文案带本次 AI 音频的实际时长，让用户知道点录音后发出去多长。
+            [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 现在录音发送 AI 语音（%.1fs）", dur]
+                         duration:2.0];
 
             // —— v0.4.2：不再自己造 Opus 文件 ——
             // v0.4.1 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
