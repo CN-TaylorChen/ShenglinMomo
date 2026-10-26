@@ -21,7 +21,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.3"
+#define SLVersion @"0.4.9.4"
 
 #pragma mark - 多行 footer
 
@@ -47,18 +47,32 @@ static UIView *SLMakeFooter(NSString *text) {
 }
 
 // v0.4.9.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
-// v0.4.9.3：改成与 footer 完全一致的 frame 定位（x = 16），标题 / 行文字 / footer 左边缘对齐。
-static UIView *SLMakeHeader(NSString *text, CGFloat width) {
+// v0.4.9.3：改成与 footer 完全一致的 frame 定位。
+// v0.4.9.4：x 不再写死，直接取白色卡片的实际左边缘，标题严丝合缝贴住框线。
+static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (!text.length) return nil;
     CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
     UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(16, 22 - 19, w - 32, 17)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, w - x - 16, 17)];
     lab.font = [UIFont systemFontOfSize:12];
     lab.textColor = [UIColor secondaryLabelColor];
     lab.text = text;
     lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [box addSubview:lab];
     return box;
+}
+
+// 白色卡片的实际左边缘：优先取可见 cell，取不到再用 insetGrouped 的标准 20pt
+static CGFloat SLHeaderLeading(UITableView *tv) {
+    UITableViewCell *c = tv.visibleCells.firstObject;
+    if (c) return CGRectGetMinX(c.frame);
+    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
+        if ([tv numberOfRowsInSection:s] <= 0) continue;
+        UITableViewCell *first = [tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
+        if (first) return CGRectGetMinX(first.frame);
+        break;
+    }
+    return 20;
 }
 
 @interface SLSettingsPanel ()
@@ -121,7 +135,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat width) {
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
-    return SLMakeHeader([self sl_headerForSection:section], tv.bounds.size.width);
+    return SLMakeHeader([self sl_headerForSection:section], SLHeaderLeading(tv), tv.bounds.size.width);
 }
 
 // 中文一行 12pt 足够；首个分组离标题栏留 10pt，其余分组靠上一个 footer 自然撑开
