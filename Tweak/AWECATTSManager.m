@@ -602,7 +602,8 @@ static int aweca_mapPitchToV3(float ratio) {
             if (completion) {
                 if (ok) {
                     double dur = [AWECAUtils audioDurationAtPath:weakReplacer.replacementAudioPath];
-                    [AWECAUtils showToast:@"成功合成 AI 语音" duration:2.0];
+                    // v0.4.9.1：这里原本弹「成功合成 AI 语音」，与 Tweak 侧的「已就绪…」
+                    // 只隔几十毫秒，两个黑框叠在一起。合成结果统一由调用方提示，这里不再弹。
                     completion(YES, weakReplacer.replacementAudioPath, [NSString stringWithFormat:@"语音合成成功 (%.1f秒)", dur]);
                 } else {
                     completion(NO, savePath, @"合成成功但设置替换失败");
@@ -637,7 +638,7 @@ static int aweca_mapPitchToV3(float ratio) {
             if (completion) {
                 if (ok) {
                     double dur = [AWECAUtils audioDurationAtPath:weakReplacer.replacementAudioPath];
-                    [AWECAUtils showToast:@"成功合成！随意录制语音评论即可自动替换" duration:3.0];
+                    // v0.4.9.1：同上，去掉这条重复提示，避免和「已就绪…」叠在一起
                     completion(YES, weakReplacer.replacementAudioPath, [NSString stringWithFormat:@"语音合成成功 (%.1f秒)", dur]);
                 } else {
                     completion(NO, ttsPath, @"合成成功但设置替换失败");
@@ -797,10 +798,20 @@ static NSString *SLStringOf(id v) {
 + (NSDictionary *)sl_normalizeVoiceItem:(NSDictionary *)raw inheritedCategory:(NSString *)cat skipped:(NSInteger *)skipped {
     if (![raw isKindOfClass:[NSDictionary class]]) { if (skipped) (*skipped)++; return nil; }
 
+    // v0.4.9.1：Fish 官方接口的 type 只有 "tts" / "svc"，旧逻辑「type 不含 fish 就跳过」
+    // 会把整页结果全丢掉（报「接口返回里没有解析到音色」就是这里）。
+    // 改成只排除明确的他家引擎，tts / svc / 没有 type 的一律按 Fish 收。
     NSString *type = SLStringOf(raw[@"type"]) ?: SLStringOf(raw[@"engine"]);
-    if (type.length && [type rangeOfString:@"fish" options:NSCaseInsensitiveSearch].location == NSNotFound) {
-        if (skipped) (*skipped)++;   // fine / kk 等非 Fish 引擎，跳过
-        return nil;
+    if (type.length) {
+        NSString *t = type.lowercaseString;
+        BOOL isFish = [t rangeOfString:@"fish"].location != NSNotFound
+                   || [t isEqualToString:@"tts"] || [t isEqualToString:@"svc"];
+        BOOL isOtherEngine = [t hasPrefix:@"fine"] || [t hasPrefix:@"kk"]
+                          || [t hasPrefix:@"volc"] || [t hasPrefix:@"azure"] || [t hasPrefix:@"edge"];
+        if (isOtherEngine && !isFish) {
+            if (skipped) (*skipped)++;
+            return nil;
+        }
     }
     NSString *vid = SLStringOf(raw[@"vid"]) ?: SLStringOf(raw[@"voice_id"])
                  ?: SLStringOf(raw[@"reference_id"]) ?: SLStringOf(raw[@"_id"])
@@ -815,6 +826,11 @@ static NSString *SLStringOf(id v) {
 
     NSString *img = SLStringOf(raw[@"img"]) ?: SLStringOf(raw[@"avatar"])
                  ?: SLStringOf(raw[@"cover_image"]) ?: SLStringOf(raw[@"cover"]);
+    // cover_image 常是相对路径（coverimage/xxxx），不补域名 NSURL 会建失败、头像永远下不来
+    if (img.length && [img rangeOfString:@"http" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        NSString *p = [img hasPrefix:@"/"] ? [img substringFromIndex:1] : img;
+        img = [@"https://fish.audio/" stringByAppendingString:p];
+    }
     NSString *category = SLStringOf(raw[@"category"]) ?: SLStringOf(raw[@"cat"])
                       ?: SLStringOf(raw[@"group"]) ?: cat ?: @"";
 
