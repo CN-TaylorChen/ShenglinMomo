@@ -30,7 +30,7 @@
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 
-#define SLVersion @"0.4.9.8"
+#define SLVersion @"0.4.9.9"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -50,11 +50,25 @@ static NSString *SLCommand(void) {
 }
 
 // v0.4.9.5：语音包单独一条口令，跟合成口令彻底分开 ——
-// 「yyb」= 直接发所选语音包，「#tts 文字」= 合成，互不抢。
+// 「#yyb」= 直接发所选语音包，「#tts 文字」= 合成，互不抢。
+// v0.4.9.9：默认值从 yyb 改成 #yyb，跟合成口令一样带井号，避免两条口令长得不一样。
 static NSString *SLPackCommand(void) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackCmdKey];
-    if (v.length == 0) v = @"yyb";
+    if (v.length == 0) v = @"#yyb";
     return v;
+}
+
+// 老用户存的是旧默认值 yyb，一次性迁移成 #yyb；自己改成过别的不动。
+static void SLMigratePackCommandDefault(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d boolForKey:@"SLPackCmdMigratedV1"]) return;
+    NSString *v = [d stringForKey:kSLPackCmdKey];
+    if ([v isEqualToString:@"yyb"]) {
+        [d setObject:@"#yyb" forKey:kSLPackCmdKey];
+        SLLog(@"pack command migrated: yyb -> #yyb");
+    }
+    [d setBool:YES forKey:@"SLPackCmdMigratedV1"];
+    [d synchronize];
 }
 
 // v0.4.9.6：口令严格匹配 —— 只认用户设置的那一条，不再生成「去掉井号」的变体。
@@ -1895,6 +1909,7 @@ NSString *SLHookStatusSummary(void) {
 %ctor {
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
     SLLog(@"==== ShenglinMomo v%@ loaded into %@ ====", SLVersion, bid ?: @"(nil)");
+    @try { SLMigratePackCommandDefault(); } @catch (NSException *e) {}
     dispatch_async(dispatch_get_main_queue(), ^{
         @try { [AWECAUtils ensureDirectoriesExist]; } @catch (NSException *e) {}
         @try { SLStartEntryWatcher(); } @catch (NSException *e) {}
