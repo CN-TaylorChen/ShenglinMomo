@@ -45,8 +45,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [self loadCustomVoices];
     [self loadRecommended];
 
-    self.title = self.fishMode ? [NSString stringWithFormat:@"%@ · Fish Audio 音色", AWECAProductName]
-                               : [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];
+    self.title = [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];   // 两个引擎统一叫「音色」
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
     UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(addCustomVoice)];
