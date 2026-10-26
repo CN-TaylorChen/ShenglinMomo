@@ -8,6 +8,9 @@
 #import "AWECATTSManager.h"
 #import "AWECATOSUploader.h"
 #import "AWECAUtils.h"
+#import "SLAlignBox.h"
+#import "SLAPIBackup.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #pragma mark - 输入行 Cell（label + 输入框 + 眼睛按钮）
 
@@ -77,6 +80,15 @@
 // v0.4.9.6：与主页一致，分组标题 / footer / 单元格文字统一到同一条左基线
 // v0.4.9.7：同主页 —— 只读已存在的 cell，不再走 rectForRowAtIndexPath（会和 footer 高度互相递归）
 static CGFloat AWECAMeasureLeading(UITableView *tv) {
+    // v0.4.9.9：本页大部分行是自定义字段 cell（标题在 titleLabel 里，textLabel 是空的），
+    // 先认它；否则会全部落空、退回估算值，标题又跟输入框错开。
+    for (UITableViewCell *c in tv.visibleCells) {
+        if (![c isKindOfClass:[AWECAAPIFieldCell class]]) continue;
+        UILabel *lab = ((AWECAAPIFieldCell *)c).titleLabel;
+        if (!lab || lab.hidden || !lab.text.length) continue;
+        CGFloat x = CGRectGetMinX(c.frame) + CGRectGetMinX([lab convertRect:lab.bounds toView:c]);
+        if (x > 0) return x;
+    }
     for (UITableViewCell *c in tv.visibleCells) {
         UILabel *lab = c.textLabel;
         if (!lab || lab.hidden || !lab.text.length) continue;
@@ -88,39 +100,17 @@ static CGFloat AWECAMeasureLeading(UITableView *tv) {
 }
 
 static UIView *AWECAMakeFooter(NSString *text, CGFloat x, CGFloat width) {
-    if (!text.length) return nil;
-    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 0)];
-    UILabel *lab = [[UILabel alloc] init];
-    lab.translatesAutoresizingMaskIntoConstraints = NO;
-    lab.numberOfLines = 0;
-    lab.font = [UIFont systemFontOfSize:12];
-    lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = text;
-    [box addSubview:lab];
-    [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:MAX(0, x)],
-        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
-        [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
-        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
-    ]];
-    return box;
+    return SLAlignFooter(text, x, width);
 }
 
 // v0.4.9.2：系统分区头会把英文强制全大写（Fish Audio → FISH AUDIO），改成自定义视图。
-// v0.4.9.6：x 与 footer 共用同一个左基线，三者对齐。
+// v0.4.9.9：左基线改由 SLAlignBox 自校正，不再假设盒子摆在表格最左边。
 static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
-    if (!text.length) return nil;
-    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, MAX(0, w - x - 16), 17)];
-    lab.font = [UIFont systemFontOfSize:12];
-    lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = text;
-    lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [box addSubview:lab];
-    return box;
+    return SLAlignHeader(text, x, width);
 }
+
+@interface AWECAAPISettingsController () <UIDocumentPickerDelegate>
+@end
 
 @implementation AWECAAPISettingsController {
 
@@ -256,12 +246,15 @@ static NSString *AWECATrimStr(NSString *s) {
 #pragma mark - 表格数据
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return 3;
+    (void)tableView;
+    return 4;   // 火山 / Fish / 语音转音色（高级）/ 备份
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    (void)tableView;
     if (section == 0) return 2;                       // 火山：App ID + API Key
     if (section == 1) return 1;                       // Fish：API Key
+    if (section == 3) return 2;                       // 备份：导出 / 还原
     return 1 + (_advancedExpanded ? 5 : 0);   // 高级：1 个折叠行 + 5 个字段（TOS 4 个 + 识别资源 ID）
 }
 
@@ -269,6 +262,7 @@ static NSString *AWECATrimStr(NSString *s) {
 - (NSString *)aweca_headerForSection:(NSInteger)section {
     if (section == 0) return @"火山引擎（豆包音色）";
     if (section == 1) return @"Fish Audio";
+    if (section == 3) return @"备份";
     return @"语音转音色";
 }
 
@@ -290,6 +284,7 @@ static NSString *AWECATrimStr(NSString *s) {
 - (NSString *)aweca_footerForSection:(NSInteger)section {
     if (section == 0) return @"控制台 → API Key 管理获取，仅存本机";
     if (section == 1) return @"Fish Audio 官网 → 左侧「开发者」 → 创建 API 密钥";
+    if (section == 3) return @"备份含密钥与当前音色，不含音色库与情绪勾选\n还原只覆盖同名字段，其他设置保持不变";
     // v0.4.9.1：原句用「；」串了三件事，一行读不下来；按分号拆行，句末不再加句号
     return @"对象存储（TOS）用于「语音转音色」功能的音频存储\n音频上传至存储桶后，再执行音色替换处理\n识别资源 ID 留空即标准版，一般不需要修改";
 }
@@ -312,6 +307,26 @@ static NSString *AWECATrimStr(NSString *s) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    // v0.4.9.9：备份分组 —— 导出到文件 / 从文件还原
+    if (indexPath.section == 3) {
+        static NSString *backupId = @"backup";
+        UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:backupId];
+        if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:backupId];
+        cell.textLabel.font = [UIFont systemFontOfSize:15];
+        cell.textLabel.textColor = [UIColor labelColor];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:13];
+        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        if (indexPath.row == 0) {
+            cell.textLabel.text = @"导出备份";
+            cell.detailTextLabel.text = @"存到文件";
+        } else {
+            cell.textLabel.text = @"从文件还原";
+            cell.detailTextLabel.text = @"选 .json";
+        }
+        return cell;
+    }
+
     // 高级区的折叠入口行（TOS 上传 + 识别资源 ID 合成一组，一次展开）
     if (indexPath.section == 2 && indexPath.row == 0) {
         static NSString *foldId = @"fold";
@@ -376,11 +391,74 @@ static NSString *AWECATrimStr(NSString *s) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (indexPath.section == 3) {
+        if (indexPath.row == 0) [self aweca_exportBackup];
+        else [self aweca_pickBackup];
+        return;
+    }
     if (indexPath.section == 2 && indexPath.row == 0) {
         _advancedExpanded = !_advancedExpanded;
         [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
                       withRowAnimation:UITableViewRowAnimationAutomatic];
     }
+}
+
+#pragma mark - 备份 / 还原
+
+- (void)aweca_exportBackup {
+    NSString *err = nil;
+    NSString *path = [SLAPIBackup exportToFileError:&err];
+    if (!path.length) {
+        [AWECAUtils showToast:[NSString stringWithFormat:@"导出失败：%@", err ?: @"未知原因"] duration:2.4];
+        return;
+    }
+
+    NSURL *url = [NSURL fileURLWithPath:path];
+    UIActivityViewController *ac = [[UIActivityViewController alloc] initWithActivityItems:@[url]
+                                                                   applicationActivities:nil];
+    if (ac.popoverPresentationController) {
+        ac.popoverPresentationController.sourceView = self.view;
+        ac.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds),
+                                                                 CGRectGetMidY(self.view.bounds), 1, 1);
+    }
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)aweca_pickBackup {
+    UIDocumentPickerViewController *p =
+        [[UIDocumentPickerViewController alloc] initWithContentTypes:@[UTTypeJSON] asCopy:YES];
+    p.delegate = self;
+    p.allowsMultipleSelection = NO;
+    [self presentViewController:p animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    (void)controller;
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+
+    NSString *err = nil;
+    NSDictionary *snap = [SLAPIBackup readFileAtURL:url error:&err];
+    if (!snap) {
+        [AWECAUtils showToast:[NSString stringWithFormat:@"还原失败：%@", err ?: @"文件无法识别"] duration:2.4];
+        return;
+    }
+
+    NSString *msg = [NSString stringWithFormat:@"%@\n同名字段会被覆盖，其他设置不动", [SLAPIBackup summaryOfSnapshot:snap]];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"还原 API 设置"
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"还原" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+        NSString *applyErr = nil;
+        BOOL ok = [SLAPIBackup applySnapshot:snap error:&applyErr];
+        [weakSelf.tableView reloadData];
+        [AWECAUtils showToast:ok ? @"API 设置已还原"
+                                : [NSString stringWithFormat:@"还原失败：%@", applyErr ?: @"未知原因"]
+                             duration:2.0];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 @end
