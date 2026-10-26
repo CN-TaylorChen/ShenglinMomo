@@ -340,60 +340,6 @@ static id SLFindAudioHandlerNear(UIView *view) {
     return nil;
 }
 
-#pragma mark - 发送语音消息（按真实签名填参）
-
-static BOOL SLSendAudioMessage(id handler, NSString *path, double duration) {
-    if (!handler || path.length == 0) return NO;
-    SEL sel = @selector(sendAudioMessage:audioTime:audioFileSize:);
-    NSMethodSignature *sig = [handler methodSignatureForSelector:sel];
-    if (!sig) {
-        SLLog(@"%@ 无 sendAudioMessage:audioTime:audioFileSize:", NSStringFromClass([handler class]));
-        return NO;
-    }
-    NSUInteger n = sig.numberOfArguments;
-    SLLog(@"sendAudioMessage sig=%@ args=%lu", sig, (unsigned long)n);
-    if (n < 5) return NO;
-    if ([sig getArgumentTypeAtIndex:2][0] != '@') return NO;
-
-    NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
-    unsigned long long size = attr ? [attr fileSize] : 0;
-
-    NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
-    inv.target = handler;
-    inv.selector = sel;
-
-    id p = path;
-    [inv setArgument:&p atIndex:2];
-
-    for (NSUInteger i = 3; i < n; i++) {
-        const char *ty = [sig getArgumentTypeAtIndex:i];
-        char c = ty[0];
-        if (c == '@') {
-            id o = nil;
-            [inv setArgument:&o atIndex:i];
-        } else if (c == 'd') {
-            double v = (i == 3) ? duration : (double)size;
-            [inv setArgument:&v atIndex:i];
-        } else if (c == 'f') {
-            float v = (float)((i == 3) ? duration : (double)size);
-            [inv setArgument:&v atIndex:i];
-        } else if (c == 'q' || c == 'Q' || c == 'l' || c == 'L') {
-            long long v = (i == 3) ? (long long)llround(duration) : (long long)size;
-            [inv setArgument:&v atIndex:i];
-        } else {
-            int v = (int)((i == 3) ? (long long)llround(duration) : (long long)size);
-            [inv setArgument:&v atIndex:i];
-        }
-    }
-
-    @try {
-        [inv invoke];
-    } @catch (NSException *e) {
-        SLLog(@"sendAudioMessage exception %@", e);
-        return NO;
-    }
-    return YES;
-}
 
 #pragma mark - #tts 处理
 
