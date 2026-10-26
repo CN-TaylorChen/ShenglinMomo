@@ -95,8 +95,7 @@ static UIView *AWECAMakeFooter(NSString *text) {
 
 @implementation AWECAAPISettingsController {
     AWECATTSManager *_mgr;
-    BOOL _tosExpanded;
-    BOOL _asrExpanded;
+    BOOL _advancedExpanded;   // v0.4.5：TOS 与识别资源 ID 合并成一组，共用这个折叠开关
 }
 
 - (void)viewDidLoad {
@@ -110,8 +109,7 @@ static UIView *AWECAMakeFooter(NSString *text) {
     [self.tableView registerClass:[AWECAAPIFieldCell class] forCellReuseIdentifier:@"field"];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
         target:self action:@selector(aweca_saveAll)];
-    _tosExpanded = NO;
-    _asrExpanded = NO;
+    _advancedExpanded = NO;
 }
 
 #pragma mark - 字段读写
@@ -154,14 +152,10 @@ static NSString *AWECATrimStr(NSString *s) {
 
 // 扩展区的第 idx 个字段 -> 全局字段编号（无则 -1）
 - (NSInteger)aweca_fieldIndexInExtraRow:(NSInteger)row {
-    NSInteger base = 2;   // 两个折叠行
-    if (_tosExpanded) {
-        if (row >= base && row < base + 4) return 3 + (row - base);   // AK/SK/Bucket/Region
-        base += 4;
-    }
-    if (_asrExpanded) {
-        if (row == base) return 7;                                     // 识别资源 ID
-    }
+    if (!_advancedExpanded) return -1;
+    if (row < 1) return -1;                 // 第 0 行是折叠行本身
+    if (row <= 4) return 3 + (row - 1);     // 1..4 → AK / SK / Bucket / Region
+    if (row == 5) return 7;                 // 5 → 识别资源 ID
     return -1;
 }
 
@@ -224,7 +218,7 @@ static NSString *AWECATrimStr(NSString *s) {
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (section == 0) return 2;                       // 火山：App ID + API Key
     if (section == 1) return 1;                       // Fish：API Key
-    return 2 + (_tosExpanded ? 4 : 0) + (_asrExpanded ? 1 : 0);   // 高级
+    return 1 + (_advancedExpanded ? 5 : 0);   // 高级：1 个折叠行 + 5 个字段（TOS 4 个 + 识别资源 ID）
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
@@ -242,7 +236,7 @@ static NSString *AWECATrimStr(NSString *s) {
 - (NSString *)aweca_footerForSection:(NSInteger)section {
     if (section == 0) return @"控制台 → API Key 管理获取，仅存本机";
     if (section == 1) return @"fish.audio → 右上角头像 → API Keys 创建。免费模型 s2.1-pro-free 不消耗余额。";
-    return @"TOS 供「录音转音色」上传，资源 ID 留空即标准版";
+    return @"TOS 私有桶用于「录音转音色」上传；识别资源 ID 留空即标准版。日常无需展开。";
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
@@ -264,15 +258,14 @@ static NSString *AWECATrimStr(NSString *s) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 高级区的折叠入口行
-    if (indexPath.section == 2 && indexPath.row < 2) {
+    // 高级区的折叠入口行（TOS 上传 + 识别资源 ID 合成一组，一次展开）
+    if (indexPath.section == 2 && indexPath.row == 0) {
         static NSString *foldId = @"fold";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:foldId];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:foldId];
-        BOOL isTOS = (indexPath.row == 0);
-        BOOL expanded = isTOS ? _tosExpanded : _asrExpanded;
+        BOOL expanded = _advancedExpanded;
         // 标题只留主干，箭头交给右侧系统 chevron（不再把「›」写进文字里）
-        cell.textLabel.text = isTOS ? @"录音转豆包上传" : @"语音识别资源 ID";
+        cell.textLabel.text = @"录音转音色上传";
         cell.textLabel.font = [UIFont systemFontOfSize:14];
         cell.textLabel.textColor = [UIColor labelColor];
         cell.accessoryView = nil;
@@ -329,9 +322,8 @@ static NSString *AWECATrimStr(NSString *s) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.section == 2 && indexPath.row < 2) {
-        if (indexPath.row == 0) _tosExpanded = !_tosExpanded;
-        else _asrExpanded = !_asrExpanded;
+    if (indexPath.section == 2 && indexPath.row == 0) {
+        _advancedExpanded = !_advancedExpanded;
         [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:2]
                       withRowAnimation:UITableViewRowAnimationAutomatic];
     }
