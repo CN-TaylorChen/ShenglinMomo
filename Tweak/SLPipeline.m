@@ -6,6 +6,7 @@
 #import "AWECAUtils.h"
 #import "AWECATOSUploader.h"
 #import "SLAMREncoder.h"
+#import "SLLog.h"
 
 #define kASRSubmitURL         @"https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
 #define kASRQueryURL          @"https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
@@ -158,8 +159,11 @@ static NSString *SLASRCodeHint(NSString *code) {
         return;
     }
 
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    SLLog(@"tts start engine=%@ text=%@", mgr.fishEngine ? @"fish" : @"volcano", clean);
     [[AWECATTSManager shared] synthesizeText:clean completion:^(BOOL ok, NSString *audioPath, NSString *err) {
         if (done) return;
+        SLLog(@"tts done ok=%d path=%@ err=%@", ok, audioPath, err ?: @"");
         if (!ok || !audioPath.length) {
             done = YES;
             if (completion) completion(NO, nil, 0, err.length ? err : @"合成失败");
@@ -174,9 +178,9 @@ static NSString *SLASRCodeHint(NSString *code) {
             if ([SLAMREncoder encodeFileAtPath:audioPath toAMRPath:amrPath duration:&amrDur]) {
                 finalPath = amrPath;
                 if (amrDur > 0) dur = amrDur;
-                NSLog(@"SL-MOMO: amr ready %@ dur=%.2f", finalPath, dur);
+                SLLog(@"amr ready %@ dur=%.2f", finalPath, dur);
             } else {
-                NSLog(@"SL-MOMO: amr encode failed, send raw audio instead");
+                SLLog(@"amr encode failed, send raw audio instead");
             }
         }
         done = YES;
