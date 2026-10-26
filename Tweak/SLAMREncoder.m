@@ -2,6 +2,7 @@
 // 依赖：AudioToolbox(ExtAudioFile) + opencore-amrnb 静态库（可选，未链接时降级）
 
 #import "SLAMREncoder.h"
+#import "SLLog.h"
 #import <AudioToolbox/AudioToolbox.h>
 #import <AVFoundation/AVFoundation.h>
 
@@ -27,7 +28,7 @@
     NSURL *url = [NSURL fileURLWithPath:inPath];
     ExtAudioFileRef f = NULL;
     if (ExtAudioFileOpenURL((__bridge CFURLRef)url, &f) != noErr || !f) {
-        NSLog(@"SL-MOMO: ExtAudioFileOpenURL failed %@", inPath);
+        SLLog(@"ExtAudioFileOpenURL failed %@", inPath);
         return nil;
     }
 
@@ -43,7 +44,7 @@
     cf.mBytesPerPacket = 2;
 
     if (ExtAudioFileSetProperty(f, kExtAudioFileProperty_ClientDataFormat, sizeof(cf), &cf) != noErr) {
-        NSLog(@"SL-MOMO: set client format failed");
+        SLLog(@"set client format failed");
         ExtAudioFileDispose(f);
         return nil;
     }
@@ -67,7 +68,7 @@
 
     free(abl.mBuffers[0].mData);
     ExtAudioFileDispose(f);
-    NSLog(@"SL-MOMO: pcm bytes=%lu (%.2fs)", (unsigned long)out.length, (double)(out.length / 2) / 8000.0);
+    SLLog(@"pcm bytes=%lu (%.2fs)", (unsigned long)out.length, (double)(out.length / 2) / 8000.0);
     return out.length ? out : nil;
 }
 
@@ -75,7 +76,7 @@
 #ifdef SL_HAS_AMR
     NSData *pcm = [self pcm8kMono16AtPath:inPath];
     if (pcm.length < SL_AMR_FRAME_SAMPLES * 2) {
-        NSLog(@"SL-MOMO: pcm too short");
+        SLLog(@"pcm too short");
         return NO;
     }
     const short *samples = (const short *)pcm.bytes;
@@ -84,7 +85,7 @@
 
     void *st = Encoder_Interface_init(0);
     if (!st) {
-        NSLog(@"SL-MOMO: amr encoder init failed");
+        SLLog(@"amr encoder init failed");
         return NO;
     }
 
@@ -105,11 +106,11 @@
     if (durOut) *durOut = (double)written * 0.02;
     NSError *err = nil;
     BOOL ok = [out writeToFile:outPath options:NSDataWritingAtomic error:&err];
-    NSLog(@"SL-MOMO: amr frames=%lu bytes=%lu dur=%.2f ok=%d", (unsigned long)written,
+    SLLog(@"amr frames=%lu bytes=%lu dur=%.2f ok=%d", (unsigned long)written,
           (unsigned long)out.length, (double)written * 0.02, ok);
     return ok;
 #else
-    NSLog(@"SL-MOMO: amr encoder not linked in this build");
+    SLLog(@"amr encoder not linked in this build");
     return NO;
 #endif
 }
