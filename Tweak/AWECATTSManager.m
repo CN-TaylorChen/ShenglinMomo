@@ -580,23 +580,20 @@ static int aweca_mapPitchToV3(float ratio) {
 
         NSString *vName = (self.voiceName.length > 0) ? self.voiceName : @"未知音色";
 
-        BOOL hasNormalAudio = replacer.enabled && replacer.replacementAudioPath.length > 0 && !replacer.isUsingTTS;
-        if (hasNormalAudio) {
-            [self showTTSConflictAlertWithPath:savePath text:text voiceName:vName completion:completion];
-        } else {
-            __weak AWECAAudioReplacer *weakReplacer = replacer;
-            [replacer setReplacementFromTTSPath:savePath text:text voiceName:vName completion:^(BOOL ok) {
-                if (completion) {
-                    if (ok) {
-                        double dur = [AWECAUtils audioDurationAtPath:weakReplacer.replacementAudioPath];
-                        [AWECAUtils showToast:@"成功合成！随意录制语音评论即可自动替换" duration:3.0];
-                        completion(YES, weakReplacer.replacementAudioPath, [NSString stringWithFormat:@"语音合成成功 (%.1f秒)", dur]);
-                    } else {
-                        completion(NO, savePath, @"合成成功但设置替换失败");
-                    }
+        // 陌陌版：永远走 Ai 合成路径，不再弹「是否切换为Ai」冲突框
+        // （那是抖音“普通语音替换”逻辑，在陌陌里无意义，且每次 #tts 都会挡住自动发送）
+        __weak AWECAAudioReplacer *weakReplacer = replacer;
+        [replacer setReplacementFromTTSPath:savePath text:text voiceName:vName completion:^(BOOL ok) {
+            if (completion) {
+                if (ok) {
+                    double dur = [AWECAUtils audioDurationAtPath:weakReplacer.replacementAudioPath];
+                    [AWECAUtils showToast:@"成功合成 AI 语音" duration:2.0];
+                    completion(YES, weakReplacer.replacementAudioPath, [NSString stringWithFormat:@"语音合成成功 (%.1f秒)", dur]);
+                } else {
+                    completion(NO, savePath, @"合成成功但设置替换失败");
                 }
-            }];
-        }
+            }
+        }];
     });
 }
 
