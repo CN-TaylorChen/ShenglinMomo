@@ -26,7 +26,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.5"
+#define SLVersion @"0.3.6"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -448,9 +448,31 @@ static void SLDumpSelfIvars(id selfObj) {
     }
 }
 
-// 找陌陌即将发送的录音文件路径：优先 self 内部音频 ivar，其次 recorder.url，最后 path 参数
-static NSString *SLAudioRecordTargetPath(id selfObj, id recorder, NSString *pathArg) {
+// 收集所有可能的「陌陌即将读取的录音文件路径」（self 内部录音机文件优先）
+static NSArray *SLAudioCandidatePaths(id selfObj, id recorder, NSString *pathArg) {
+    NSMutableArray *arr = [NSMutableArray array];
     NSArray *exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"mp4",@"aac"];
+    void (^addStr)(NSString *) = ^(NSString *s){
+        if (![s isKindOfClass:[NSString class]] || s.length == 0) return;
+        if ([s hasPrefix:@"/var/mobile"] || [s hasPrefix:@"/private/var/mobile"]) {
+            if ([exts containsObject:s.pathExtension.lowercaseString]) [arr addObject:s];
+        }
+    };
+    void (^addRec)(id) = ^(id r){
+        if (!r) return;
+        for (NSString *sel in @[@"url",@"filePath",@"recordFilePath",@"audioFileURL",@"fileURL",@"recordFileURL",@"currentPath",@"audioFilePath"]) {
+            SEL s = NSSelectorFromString(sel);
+            if (![r respondsToSelector:s]) continue;
+            @try {
+                id u = ((id(*)(id,SEL))objc_msgSend)(r, s);
+                if ([u isKindOfClass:[NSURL class]]) addStr([u path]);
+                else if ([u isKindOfClass:[NSString class]]) addStr(u);
+            } @catch (NSException *e) {}
+        }
+    };
+    addStr(pathArg);
+    addRec(recorder);
+    // self 的全部对象/字符串 ivar（含父类），优先命中真正的录音机文件
     Class c = [selfObj class];
     while (c && c != [NSObject class]) {
         unsigned int pc = 0;
@@ -460,21 +482,13 @@ static NSString *SLAudioRecordTargetPath(id selfObj, id recorder, NSString *path
             if (!te || te[0] != '@') continue;
             id v = nil;
             @try { v = object_getIvar(selfObj, list[i]); } @catch (NSException *e) { continue; }
-            if ([v isKindOfClass:[NSString class]]) {
-                NSString *s = (NSString *)v;
-                if ([s hasPrefix:@"/var/mobile"] || [s hasPrefix:@"/private/var/mobile"]) {
-                    if ([exts containsObject:s.pathExtension.lowercaseString]) return s;
-                }
-            }
+            if ([v isKindOfClass:[NSString class]]) addStr((NSString *)v);
+            else if (v) addRec(v);
         }
         free(list);
         c = class_getSuperclass(c);
     }
-    if (recorder && [recorder respondsToSelector:@selector(url)]) {
-        @try { NSURL *u = [recorder url]; if (u) return [u path]; } @catch (NSException *e) {}
-    }
-    if (pathArg.length && [[NSFileManager defaultManager] fileExistsAtPath:pathArg]) return pathArg;
-    return nil;
+    return arr;
 }
 
 #pragma mark - #tts 处理
@@ -509,7 +523,7 @@ static void SLHandleTTS(id handler,
                     gSLTTSAudioPath = [outPath copy];
                     gSLTTSAudioDur = dur;
                     SLLog(@"fakeRecord use SLFakeRecorder path=%@ dur=%.2f", outPath, dur);
-                    ((void(*)(id,SEL,id,id,double))objc_msgSend)(handler, recSel, fake, outPath, dur);
+                    ((void(*)(id,SEL,id,id,unsigned long long))objc_msgSend)(handler, recSel, fake, outPath, (unsigned long long)(dur * 1000.0));
                     sent = YES;
                     SLLog(@"fakeRecord ok path=%@ dur=%.2f fmt=%@", outPath, dur, [outPath pathExtension]);
                 } @catch (NSException *e) {
@@ -659,9 +673,9 @@ static BOOL SLInstallSendAudioHook(Class cls) {
 
 #pragma mark - 钩子 5：audioRecorder:recordSucessStoreAt:audioTime:（覆盖陌陌即将发送的录音文件为合成音）
 
-static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path, double time) {
-    void (*orig)(id, SEL, id, id, double) = (void (*)(id, SEL, id, id, double))SLGetOrigIMP(self, _cmd);
-    if (gSLRecDump < 3) {
+static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path, unsigned long long time) {
+    void (*orig)(id, SEL, id, id, unsigned long long) = (void (*)(id, SEL, id, id, unsigned long long))SLGetOrigIMP(self, _cmd);
+    if (gSLRecDump < 4) {
         gSLRecDump++;
         NSString *recUrl = (recorder && [recorder respondsToSelector:@selector(url)]) ? [[recorder url] path] : @"(?)";
         SLLog(@"REC-DONE self=%@ recorderClass=%@ recorderUrl=%@ pathArg=%@",
@@ -670,16 +684,22 @@ static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path
         SLDumpSelfIvars(self);
     }
     if (gSLTTSAudioPath) {
-        NSString *target = SLAudioRecordTargetPath(self, recorder, path);
         NSData *d = [NSData dataWithContentsOfFile:gSLTTSAudioPath];
-        if (target.length && d.length) {
-            BOOL ok = [d writeToFile:target atomically:YES];
-            SLLog(@"TTS write target=%@ ok=%d size=%lu", target, ok, (unsigned long)d.length);
-        } else {
-            SLLog(@"TTS no target (recorderUrl=%@ pathArg=%@) size=%lu",
-                  (recorder && [recorder respondsToSelector:@selector(url)]) ? [[recorder url] path] : @"(?)",
-                  path, (unsigned long)d.length);
+        NSArray *cands = SLAudioCandidatePaths(self, recorder, path);
+        SLLog(@"TTS candidates=%lu size=%lu", (unsigned long)cands.count, (unsigned long)d.length);
+        BOOL anyOk = NO;
+        for (NSString *tp in cands) {
+            // 只覆盖「已存在」的录音文件（陌陌真实录音机此刻应已写好的那个）
+            if ([[NSFileManager defaultManager] fileExistsAtPath:tp]) {
+                BOOL ok = [d writeToFile:tp atomically:YES];
+                SLLog(@"TTS write target=%@ ok=%d", tp, ok);
+                if (ok) anyOk = YES;
+            } else {
+                SLLog(@"TTS skip(not exist) %@", tp);
+            }
         }
+        if (!anyOk) SLLog(@"TTS NO EXISTING TARGET recorderClass=%@ pathArg=%@",
+                          recorder ? NSStringFromClass([recorder class]) : @"(nil)", path);
         gSLTTSAudioPath = nil;
     }
     if (orig) orig(self, _cmd, recorder, path, time);
@@ -696,7 +716,8 @@ static BOOL SLInstallAudioRecordHook(Class cls) {
     const char *a2 = [sig getArgumentTypeAtIndex:2];
     const char *a3 = [sig getArgumentTypeAtIndex:3];
     const char *a4 = [sig getArgumentTypeAtIndex:4];
-    if (!a2 || a2[0] != '@' || !a3 || a3[0] != '@' || !a4 || a4[0] != 'd') {
+    // audioTime: 在陌陌里是 Q/q（无符号长整型，毫秒），也兼容 d（double）
+    if (!a2 || a2[0] != '@' || !a3 || a3[0] != '@' || !a4 || (a4[0] != 'd' && a4[0] != 'Q' && a4[0] != 'q')) {
         SLLog(@"skip %@ audioRecorder:recordSucessStoreAt: (types %s %s %s)", cls, a2 ?: "", a3 ?: "", a4 ?: "");
         return NO;
     }
