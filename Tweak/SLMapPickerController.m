@@ -57,7 +57,7 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) UILabel *subLabel;
 @property (nonatomic, strong) UIView *coordChip;
 @property (nonatomic, strong) UILabel *coordLabel;
-@property (nonatomic, strong) UIButton *copyBtn;
+@property (nonatomic, strong) UIButton *coordCopyBtn;
 @property (nonatomic, strong) UIButton *confirmBtn;
 @property (nonatomic, strong) UIButton *starBtn;
 @property (nonatomic, strong) UIButton *tuneBtn;
@@ -204,7 +204,7 @@ static UIColor *SLHairline(void) {
     self.subLabel.frame = CGRectMake(68, 52, pw - 68 - pad, 18);
     self.coordChip.frame = CGRectMake(pad, 78, 216, 32);
     self.coordLabel.frame = CGRectMake(10, 0, 216 - 10 - 46, 32);
-    self.copyBtn.frame = CGRectMake(216 - 46, 0, 42, 32);
+    self.coordCopyBtn.frame = CGRectMake(216 - 46, 0, 42, 32);
 
     self.confirmBtn.frame = CGRectMake(pad, 126, mainW, 50);
     self.starBtn.frame = CGRectMake(pad + mainW + gap, 126, side, 50);
@@ -361,12 +361,12 @@ static UIColor *SLHairline(void) {
     self.coordLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [self.coordChip addSubview:self.coordLabel];
 
-    self.copyBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [self.copyBtn setTitle:@"复制" forState:UIControlStateNormal];
-    [self.copyBtn setTitleColor:SLAccent() forState:UIControlStateNormal];
-    self.copyBtn.titleLabel.font = [UIFont systemFontOfSize:12.5];
-    [self.copyBtn addTarget:self action:@selector(sl_copyCoord) forControlEvents:UIControlEventTouchUpInside];
-    [self.coordChip addSubview:self.copyBtn];
+    self.coordCopyBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    [self.coordCopyBtn setTitle:@"复制" forState:UIControlStateNormal];
+    [self.coordCopyBtn setTitleColor:SLAccent() forState:UIControlStateNormal];
+    self.coordCopyBtn.titleLabel.font = [UIFont systemFontOfSize:12.5];
+    [self.coordCopyBtn addTarget:self action:@selector(sl_copyCoord) forControlEvents:UIControlEventTouchUpInside];
+    [self.coordChip addSubview:self.coordCopyBtn];
 
     self.confirmBtn = [UIButton buttonWithType:UIButtonTypeCustom];
     self.confirmBtn.backgroundColor = SLAccent();
