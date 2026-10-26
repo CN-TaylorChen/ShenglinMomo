@@ -4,6 +4,11 @@ typedef void(^SLPipelineResult)(BOOL ok, NSString *outPath, double duration, NSS
 
 @interface SLPipeline : NSObject
 + (instancetype)shared;
+
+// 最近一次 TTS 的「原始合成音频」（m4a/mp3，未转 AMR）。
+// 因为 AMR 无法再解回 PCM，Opus 编码必须从这份原音频取 PCM。
+@property (nonatomic, copy, readonly) NSString *lastRawAudioPath;
+
 // 输入：陌陌录音文件；输出：可写回原路径的合成音频 + 新时长
 - (void)enhanceRecordedAudioAtPath:(NSString *)path
                  originalDuration:(double)origDuration
