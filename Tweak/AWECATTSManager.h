@@ -107,4 +107,19 @@
 - (void)saveConfig;
 - (void)loadConfig;
 
+#pragma mark - 内置情绪 / 音色导入（v0.4.9）
+
+// 内置情绪：@[ @[英文标签, 中文备注], ... ]（30 条，Fish Audio 体系）
++ (NSArray<NSArray<NSString *> *> *)sl_defaultFishEmotions;
+
+// 解析音色列表 JSON：支持纯数组 / {items|voices|data|list|models} / {voicesByCat:{分类:[...]}}
+// 返回 @{@"name", @"voiceType", @"img", @"category"} 数组；skipped 回传被跳过的非 Fish / 无效条目数
++ (NSArray<NSDictionary *> *)sl_parseVoiceJSONText:(NSString *)text skipped:(NSInteger *)skipped;
+
+// 合并到本地 Fish 音色库（按 voiceType 去重，已存在则更新名称），返回 @{@"added", @"updated"}
++ (NSDictionary *)sl_importFishVoices:(NSArray<NSDictionary *> *)items;
+
+// 下载网络头像 → 裁剪 256 JPEG 落盘（异步，失败静默）
++ (void)sl_downloadAvatarForVoice:(NSString *)vid fromURL:(NSString *)urlString;
+
 @end
