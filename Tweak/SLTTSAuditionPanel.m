@@ -33,6 +33,13 @@ static NSString *SLFmtTime(double t) {
 @property (nonatomic, weak) UIButton *playButton;
 @property (nonatomic, assign) BOOL chosen;
 @property (nonatomic, assign) BOOL speakerOverridden;
+// v0.4.12：进面板前记下陌陌正在用的音频会话，退出时原样还回去
+@property (nonatomic, assign) BOOL sessionSaved;
+@property (nonatomic, copy) NSString *savedCategory;
+@property (nonatomic, copy) NSString *savedMode;
+@property (nonatomic, assign) AVAudioSessionCategoryOptions savedOptions;
+@property (nonatomic, assign) double tickStart;
+@property (nonatomic, assign) BOOL failed;
 @end
 
 @implementation SLTTSAuditionViewController
@@ -173,31 +180,100 @@ static NSString *SLFmtTime(double t) {
         [[AVAudioSession sharedInstance] overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:nil];
         self.speakerOverridden = NO;
     }
+    // v0.4.12：把会话还给陌陌。不还的话陌陌下次录音会「录不进去」或音量异常。
+    if (self.sessionSaved) {
+        AVAudioSession *s = [AVAudioSession sharedInstance];
+        [s setActive:NO withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation error:nil];
+        NSError *e = nil;
+        BOOL ok = [s setCategory:self.savedCategory ?: AVAudioSessionCategorySoloAmbient
+                            mode:self.savedMode ?: AVAudioSessionModeDefault
+                         options:self.savedOptions
+                           error:&e];
+        SLLog(@"AUDITION 还原会话 cat=%@/%d %@", self.savedCategory, ok, e.localizedDescription ?: @"");
+        self.sessionSaved = NO;
+    }
 }
 
 #pragma mark - 播放
 
+// 陌陌刚录完音，会话往往停在 PlayAndRecord/Record 甚至是「已停用」状态；
+// 这时直接 play 会返回 NO（声音出不来、进度条也不动）。
+// 必须先把 category 切到 Playback 并且 setActive:YES。
+- (BOOL)sl_activateSession {
+    AVAudioSession *s = [AVAudioSession sharedInstance];
+    if (!self.sessionSaved) {
+        self.savedCategory = s.category;
+        self.savedMode = s.mode;
+        self.savedOptions = s.categoryOptions;
+        self.sessionSaved = YES;
+        SLLog(@"AUDITION 原会话 cat=%@ mode=%@ opt=%lu otherAudio=%d",
+              self.savedCategory, self.savedMode, (unsigned long)self.savedOptions,
+              (int)s.otherAudioPlaying);
+    }
+    NSError *e = nil;
+    BOOL ok = [s setCategory:AVAudioSessionCategoryPlayback
+                        mode:AVAudioSessionModeDefault
+                     options:AVAudioSessionCategoryOptionDuckOthers
+                       error:&e];
+    if (!ok) SLLog(@"AUDITION setCategory 失败 %@", e.localizedDescription ?: @"");
+    e = nil;
+    BOOL act = [s setActive:YES
+                withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+                      error:&e];
+    if (!act) {
+        e = nil;
+        act = [s setActive:YES error:&e];
+    }
+    if (!act) SLLog(@"AUDITION 激活会话失败 %@", e.localizedDescription ?: @"");
+    return act;
+}
+
+- (void)sl_markFailed:(NSString *)why {
+    self.failed = YES;
+    [self sl_stopTicker];
+    self.bar.progress = 0;
+    [self.playButton setTitle:@"▶ 重听" forState:UIControlStateNormal];
+    self.timeLabel.text = why.length ? why : @"播放失败";
+    SLLog(@"AUDITION 播放失败：%@", why ?: @"");
+}
+
 - (void)sl_play {
-    if (!self.audioPath.length) return;
+    if (!self.audioPath.length) {
+        [self sl_markFailed:@"没有音频文件"];
+        return;
+    }
+    self.failed = NO;
+    BOOL sessionOK = [self sl_activateSession];
     if (!self.player) {
         NSError *err = nil;
         self.player = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:self.audioPath]
                                                             error:&err];
         if (!self.player) {
-            SLLog(@"AUDITION 打开失败 %@", err.localizedDescription ?: @"");
-            [self.timeLabel setText:@"音频打不开"];
+            SLLog(@"AUDITION 打开失败 %@ file=%@", err.localizedDescription ?: @"", self.audioPath);
+            [self sl_markFailed:@"音频打不开"];
             return;
         }
         self.player.delegate = self;
-        [self.player prepareToPlay];
-        // 录音/播放会话常常默认走听筒，试听要能听清 → 临时切扬声器
-        if ([[AVAudioSession sharedInstance] overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker
-                                                              error:nil]) {
-            self.speakerOverridden = YES;
-        }
+        self.player.volume = 1.0;
+        BOOL prep = [self.player prepareToPlay];
+        NSDictionary *attr = [[NSFileManager defaultManager] attributesOfItemAtPath:self.audioPath error:nil];
+        SLLog(@"AUDITION ready session=%d prepare=%d dur=%.2f size=%llu file=%@",
+              sessionOK, prep, self.player.duration,
+              [attr[NSFileSize] unsignedLongLongValue], self.audioPath.lastPathComponent);
     }
-    [self.player play];
+    BOOL ok = [self.player play];
+    if (!ok) {
+        // 会话可能在这一瞬间被陌陌重新抢走，重激活后再试一次
+        [self sl_activateSession];
+        ok = [self.player play];
+    }
+    if (!ok) {
+        SLLog(@"AUDITION play 返回 NO dur=%.2f cur=%.2f", self.player.duration, self.player.currentTime);
+        [self sl_markFailed:@"无法播放（音频被占用）"];
+        return;
+    }
     [self.playButton setTitle:@"⟳ 播放中" forState:UIControlStateNormal];
+    self.tickStart = CFAbsoluteTimeGetCurrent();
     [self sl_startTicker];
 }
 
@@ -229,6 +305,12 @@ static NSString *SLFmtTime(double t) {
     double c = self.player.currentTime;
     if (d > 0) self.bar.progress = (float)(c / d);
     self.timeLabel.text = [NSString stringWithFormat:@"%@ / %@", SLFmtTime(c), SLFmtTime(d)];
+    // 看门狗：play 返回 YES 但实际不出声（路由被抢）时，进度会一直钉在 0；
+    // 1 秒还没动就当作失败，别让界面永远停在「播放中」。
+    if (!self.failed && c < 0.001 && !self.player.isPlaying &&
+        CFAbsoluteTimeGetCurrent() - self.tickStart > 1.0) {
+        [self sl_markFailed:@"无法播放（音频被占用）"];
+    }
 }
 
 - (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
