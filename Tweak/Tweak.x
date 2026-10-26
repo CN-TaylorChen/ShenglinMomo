@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.14"
+#define SLVersion @"0.4.15"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -2359,6 +2359,188 @@ static void SLInstallWaveHandHook(void) {
     if (!found) SLLog(@"WAVE-HOOK 没找到 chatCell:handleSendWaveHandMessage: 的宿主");
 }
 
+// ---------------------------------------------------------------------------
+// v0.4.15：音波时长兜底层（不再猜发送入口）
+//
+// 0.4.14 把 chatCell:handleSendWaveHandMessage: 装上了（日志确认 owner=MDChatSingleHandler），
+// 但两次实测在录音结束后的 30~40 秒里没有任何 WAVE-MSG，说明音波发送没走这个入口，
+// 或者走的是 Swift 侧另一条链（MDVoiceWavePublishVoiceManager 没有 OC 方法表可钩）。
+//
+// 于是换一层盯：音频消息的时长只存在于消息体里（语音实测 audiotime=18 就显示 1.8 秒），
+// 不管哪条路发出去，最终都得把 body 写到消息对象上。这里同时盯三个点：
+//   1) -setBody:                        赋值瞬间改写（最通用，不关心谁在发）
+//   2) -handleWaveHandMessage:handler:  音波消息处理入口
+//   3) -buildSingleWaveHandMessage:     音波消息构造入口（改它的返回值）
+// 只在「刚替换过 PCM 的 60 秒装填窗口内」生效，窗口外一行都不改。
+// ---------------------------------------------------------------------------
+static CFAbsoluteTime gSLBodyLogWin = 0;
+static int gSLBodyLogCnt = 0;
+
+static void SLBodyLogOnce(NSString *body, const char *tag) {
+    if (body.length == 0) return;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - gSLBodyLogWin > 60.0) { gSLBodyLogWin = now; gSLBodyLogCnt = 0; }
+    if (gSLBodyLogCnt >= 8) return;
+    gSLBodyLogCnt++;
+    SLLog(@"BODY-SEE %s len=%lu %@", tag, (unsigned long)body.length,
+          body.length > 240 ? [body substringToIndex:240] : body);
+}
+
+// 待发状态的消息体特征：语音消息实测是 filesize=0 ... dummy=1；
+// 历史消息/收到的消息带真实 filesize，靠这个把两者分开，避免改到旧消息。
+static BOOL SLBodyIsPending(NSString *b) {
+    if (b.length == 0) return NO;
+    return [b rangeOfString:@"dummy=1"].location != NSNotFound ||
+           [b rangeOfString:@"filesize=0"].location != NSNotFound;
+}
+
+// 对任意「像消息」的对象尝试把时长改成实际喂进去的长度
+static BOOL SLTryFixMessageBody(id msg, const char *where) {
+    if (!SLIsEnabled() || msg == nil || gSLTTSAudioPath == nil) return NO;
+
+    NSString *body = nil;
+    @try { body = [msg valueForKey:@"body"]; } @catch (NSException *e) {}
+    if (![body isKindOfClass:[NSString class]] || body.length == 0) {
+        SLLog(@"WAVE-FIX %s 参数里没有 body（%s）", where, object_getClassName(msg));
+        return NO;
+    }
+    SLBodyLogOnce(body, where);
+
+    double d = SLFedDuration();
+    if (d < 0.05) d = gSLTTSAudioDur;
+    if (d < 0.05) return NO;
+
+    if ([body rangeOfString:@"audiotime="].location == NSNotFound) {
+        SLLog(@"WAVE-FIX %s body 里没有 audiotime（时长 %.2f 秒）", where, d);
+        return NO;
+    }
+    if (!SLBodyIsPending(body)) {
+        SLLog(@"WAVE-FIX %s 看着不是待发消息，不动", where);
+        return NO;
+    }
+
+    NSString *nb = SLBodySetAudioTime(body, d);
+    if (nb.length == 0 || [nb isEqualToString:body]) return NO;
+
+    BOOL set = NO;
+    @try { [msg setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {}
+    SLLog(@"WAVE-FIX %s audiotime -> %.2f 秒 set=%d (%@)", where, d, set,
+          nb.length > 200 ? [nb substringToIndex:200] : nb);
+    return set;
+}
+
+static void SLSetMessageBodyHook(id self, SEL _cmd, NSString *body) {
+    void (*orig)(id, SEL, NSString *) = (void (*)(id, SEL, NSString *))SLGetOrigIMP(self, _cmd);
+    NSString *use = body;
+
+    if (SLIsEnabled() && gSLTTSAudioPath != nil &&
+        [body isKindOfClass:[NSString class]] && body.length > 0) {
+        SLBodyLogOnce(body, "setBody:");
+        if ([body rangeOfString:@"audiotime="].location != NSNotFound && SLBodyIsPending(body)) {
+            double d = SLFedDuration();
+            if (d < 0.05) d = gSLTTSAudioDur;
+            if (d >= 0.05) {
+                NSString *nb = SLBodySetAudioTime(body, d);
+                if (nb.length && ![nb isEqualToString:body]) {
+                    use = nb;
+                    SLLog(@"BODY-NET %s audiotime -> %.2f 秒", object_getClassName(self), d);
+                }
+            }
+        }
+    }
+    if (orig) orig(self, _cmd, use);
+}
+
+static void SLWaveHandleMessageHook(id self, SEL _cmd, id msg, id handler) {
+    void (*orig)(id, SEL, id, id) = (void (*)(id, SEL, id, id))SLGetOrigIMP(self, _cmd);
+    @try { SLTryFixMessageBody(msg, "handleWaveHandMessage:"); } @catch (NSException *e) {}
+    if (orig) orig(self, _cmd, msg, handler);
+}
+
+static id SLBuildWaveMessageHook(id self, SEL _cmd) {
+    id (*orig)(id, SEL) = NULL;
+    @try { orig = (id (*)(id, SEL))SLGetOrigIMP(self, _cmd); } @catch (NSException *e) {}
+    id msg = orig ? orig(self, _cmd) : nil;
+    @try { SLTryFixMessageBody(msg, "buildSingleWaveHandMessage:"); } @catch (NSException *e) {}
+    return msg;
+}
+
+// 签名不符一律跳过：宁可不动，也不猜调用约定
+static BOOL SLInstallWaveMsgHooksOnClass(Class c) {
+    if (!c) return NO;
+    BOOL any = NO;
+
+    SEL h = NSSelectorFromString(@"handleWaveHandMessage:handler:");
+    Method mh = class_getInstanceMethod(c, h);
+    if (mh) {
+        const char *t = method_getTypeEncoding(mh);
+        NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
+        if (sig && sig.numberOfArguments == 4 &&
+            [sig getArgumentTypeAtIndex:2][0] == '@' && [sig getArgumentTypeAtIndex:3][0] == '@') {
+            if (SLRegisterMethod(c, h, (IMP)SLWaveHandleMessageHook)) {
+                SLLog(@"WAVE-HOOK 装上 %@ handleWaveHandMessage:handler: type=%s",
+                      NSStringFromClass(c), t ?: "?");
+                any = YES;
+            }
+        }
+    }
+
+    SEL b = NSSelectorFromString(@"buildSingleWaveHandMessage:");
+    Method mb = class_getInstanceMethod(c, b);
+    if (mb) {
+        const char *t = method_getTypeEncoding(mb);
+        NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
+        const char *ret = (sig != nil) ? [sig methodReturnType] : NULL;
+        if (sig && sig.numberOfArguments == 2 && ret && ret[0] == '@') {
+            if (SLRegisterMethod(c, b, (IMP)SLBuildWaveMessageHook)) {
+                SLLog(@"WAVE-HOOK 装上 %@ buildSingleWaveHandMessage: type=%s",
+                      NSStringFromClass(c), t ?: "?");
+                any = YES;
+            }
+        }
+    }
+    return any;
+}
+
+static void SLInstallWaveMsgHooks(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)total);
+    if (!buf) return;
+    total = objc_getClassList(buf, total);
+    int hits = 0;
+    for (int i = 0; i < total; i++) {
+        if (!SLClassIsAppOwned(buf[i])) continue;
+        if (SLInstallWaveMsgHooksOnClass(buf[i])) hits++;
+    }
+    free(buf);
+    if (hits == 0) SLLog(@"WAVE-HOOK 两个音波入口一个都没找到");
+}
+
+static BOOL SLInstallBodyNetHook(void) {
+    Class c = NSClassFromString(@"MDSingleMessage");
+    if (!c) c = NSClassFromString(@"MDBaseMessage");
+    if (!c) { SLLog(@"BODY-NET 找不到消息类，跳过"); return NO; }
+
+    SEL sel = @selector(setBody:);
+    Method m = class_getInstanceMethod(c, sel);
+    if (!m) { SLLog(@"BODY-NET %@ 没有 setBody:，跳过", NSStringFromClass(c)); return NO; }
+
+    const char *t = method_getTypeEncoding(m);
+    NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
+    if (!sig || sig.numberOfArguments != 3 || [sig getArgumentTypeAtIndex:2][0] != '@') {
+        SLLog(@"BODY-NET setBody: 签名 %s 不符，跳过", t ?: "?");
+        return NO;
+    }
+    if (!SLRegisterMethod(c, sel, (IMP)SLSetMessageBodyHook)) return NO;
+    SLLog(@"BODY-NET 装上 %@ setBody: type=%s", NSStringFromClass(c), t ?: "?");
+    return YES;
+}
+
 // v0.4.12：音波发布后闪退的兜底。
 // iOS 15 起，给「老式构造」的 UIButton（buttonWithType:）设 configurationUpdateHandler
 // 会直接 NSAssert：Invalid parameter not satisfying: configuration != nil。
@@ -2422,6 +2604,9 @@ static void SLInstallHooks(void) {
     @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
     // v0.4.14：音波消息发送前补时长（音波不走 sendAudioMessage:）
     @try { SLInstallWaveHandHook(); } @catch (NSException *e) {}
+    // v0.4.15：不再依赖发送入口，改为盯消息体赋值 + 音波消息的两个构造/处理入口
+    @try { SLInstallBodyNetHook(); } @catch (NSException *e) {}
+    @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}
     // v0.4.11：音波探针默认关。0.4.10 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
     if (SLWaveProbeEnabled()) {
         @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
