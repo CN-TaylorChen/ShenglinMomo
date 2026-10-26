@@ -19,7 +19,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.7"
+#define SLVersion @"0.4.8"
 
 #pragma mark - 多行 footer
 
@@ -73,7 +73,7 @@ static UIView *SLMakeFooter(NSString *text) {
 - (UIView *)sl_header {
     CGFloat w = self.view.bounds.size.width;
     if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
-    NSString *text = [NSString stringWithFormat:@"输入框发「%@ 要说的话」，会自动换成 AI 音色语音发出；失败退回原文。", [self sl_command]];
+    NSString *text = [NSString stringWithFormat:@"输入框发「%@ 要说的话」，会自动换成AI合成语音发出；失败退回原文。", [self sl_command]];
     CGFloat textW = w - 36;
     UIFont *font = [UIFont systemFontOfSize:12];
     CGRect r = [text boundingRectWithSize:CGSizeMake(textW, CGFLOAT_MAX)
@@ -81,8 +81,9 @@ static UIView *SLMakeFooter(NSString *text) {
                                attributes:@{NSFontAttributeName: font}
                                   context:nil];
     CGFloat h = ceil(r.size.height);
-    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h + 24)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(18, 12, textW, h)];
+    // v0.4.8：上下留白 24 -> 8，顶栏不再占一大截
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h + 8)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(18, 4, textW, h)];
     lab.numberOfLines = 0;
     lab.font = font;
     lab.textColor = [UIColor secondaryLabelColor];
@@ -116,7 +117,7 @@ static UIView *SLMakeFooter(NSString *text) {
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
     if (section == 0) return 3;   // 开关 + 引擎 + 悬浮球图标
-    if (section == 1) return 2;   // 音色库 + 情绪
+    if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
     if (section == 2) return 2;   // 口令 + 短录音补全
     if (section == 3) return 1;   // API 凭证
     return 1;                     // 运行日志
@@ -124,7 +125,7 @@ static UIView *SLMakeFooter(NSString *text) {
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    return @[@"基本", @"音色与情绪", @"发送方式", @"凭证", @"诊断"][section];
+    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"诊断"][section];
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
@@ -138,9 +139,9 @@ static UIView *SLMakeFooter(NSString *text) {
 - (NSString *)sl_footerForSection:(NSInteger)section {
     if (section == 0) return @"切换引擎后需要在下方重新选择音色";
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪标签";
-    if (section == 2) return @"以该口令开头才转语音；关闭「短录音补全」时只发录到的那一段";
+    if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音；短录音补全：录音比AI语音短时自动补足全长，不必录完。";
     if (section == 3) return @"Key 只保存在本机，不会上传";
-    if (section == 4) return @"#tts 没反应时先看这里";
+    if (section == 4) return @"没反应时先看这里";
     return nil;
 }
 
@@ -180,7 +181,7 @@ static UIView *SLMakeFooter(NSString *text) {
 
     if (ip.section == 0) {
         if (ip.row == 0) {
-            cell.textLabel.text = @"启用转换";
+            cell.textLabel.text = @"文字转语音";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
             sw.on = [d objectForKey:kSLEnabledKey] ? [d boolForKey:kSLEnabledKey] : YES;
@@ -211,11 +212,19 @@ static UIView *SLMakeFooter(NSString *text) {
             cell.textLabel.text = @"音色库";
             cell.detailTextLabel.text = voice;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        } else {
+        } else if (ip.row == 1) {
             cell.textLabel.text = @"情绪标签";
             cell.detailTextLabel.text = mgr.fishEmotionSel.count
                 ? [NSString stringWithFormat:@"已选 %lu 个", (unsigned long)mgr.fishEmotionSel.count]
                 : @"未启用";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else if (ip.row == 2) {
+            cell.textLabel.text = @"语速";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%.2fx", mgr.speedRatio];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else {
+            cell.textLabel.text = @"音量";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%.2fx", mgr.volumeRatio];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
         return cell;
@@ -272,6 +281,14 @@ static UIView *SLMakeFooter(NSString *text) {
         [self.navigationController pushViewController:vc animated:YES];
         return;
     }
+    if (ip.section == 1 && ip.row == 2) {
+        [self sl_editRatio:YES];
+        return;
+    }
+    if (ip.section == 1 && ip.row == 3) {
+        [self sl_editRatio:NO];
+        return;
+    }
     if (ip.section == 2 && ip.row == 0) {
         [self sl_editCommand];
         return;
@@ -291,7 +308,7 @@ static UIView *SLMakeFooter(NSString *text) {
 
 - (void)sl_editCommand {
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"触发口令"
-                                                               message:@"输入框以这个口令开头时，文字会被转成语音消息发送"
+                                                               message:@"以这个口令开头时，文字会被转成语音消息发送"
                                                         preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [self sl_command];
@@ -307,6 +324,35 @@ static UIView *SLMakeFooter(NSString *text) {
         [[NSUserDefaults standardUserDefaults] synchronize];
         [weakSelf.tableView reloadData];
         [AWECAUtils showToast:[NSString stringWithFormat:@"口令已改为 %@", v] duration:1.5];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+// 语速/音量：0.5~2.0 倍，1.0 = 原声。
+// 火山走 speech_rate/loudness_rate（已在 AWECATTSManager 映射），Fish 走 prosody.speed/volume
+- (void)sl_editRatio:(BOOL)speed {
+    NSString *title = speed ? @"语速" : @"音量";
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    float cur = speed ? mgr.speedRatio : mgr.volumeRatio;
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+                                                               message:@"范围 0.5 ~ 2.0，填 1.0 恢复原声"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = [NSString stringWithFormat:@"%.2f", cur];
+        tf.keyboardType = UIKeyboardTypeDecimalPad;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *t = [ac.textFields.firstObject.text stringByReplacingOccurrencesOfString:@"x" withString:@""];
+        float v = t.floatValue;
+        if (v < 0.01f) v = 1.0f;   // 空输入 / 0 回默认
+        if (v < 0.5f) v = 0.5f;
+        if (v > 2.0f) v = 2.0f;
+        if (speed) mgr.speedRatio = v; else mgr.volumeRatio = v;
+        [mgr saveConfig];
+        [weakSelf.tableView reloadData];
+        [AWECAUtils showToast:[NSString stringWithFormat:@"%@已改为 %.2fx", title, v] duration:1.5];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
