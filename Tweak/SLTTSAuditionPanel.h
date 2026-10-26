@@ -6,6 +6,10 @@
 //  用户听不到结果。这里在装填之后、启动 60 秒倒计时之前插一张卡片：
 //  先听，确认了才进入「去录音替换」，不满意就取消或重新合成。
 //
+//  v0.4.13：试听不再播发给陌陌的 .amr —— AVAudioPlayer 对 AMR 的 prepareToPlay
+//  会返回 NO（play 也跟着失败，界面就卡在「无法播放」）。改用内存里的 16k PCM
+//  现场写一个 WAV 来播，PCM 是最稳的路径，不需要任何解码器。
+//
 
 #import <UIKit/UIKit.h>
 
@@ -15,8 +19,10 @@
 + (BOOL)isEnabled;
 + (void)setEnabled:(BOOL)on;
 
-// 播放器用独立 AVAudioPlayer，不碰陌陌自己的播放器实例。
+// audioPath：最终发给陌陌的音频（.amr），仅作为兜底与展示用
+// pcm16k   ：16kHz / mono / s16le 的裸 PCM，有值就用它生成 WAV 试听
 + (void)presentWithAudioPath:(NSString *)path
+                      pcm16k:(NSData *)pcm16k
                     duration:(double)duration
                         text:(NSString *)text
                        onUse:(void (^)(void))onUse
