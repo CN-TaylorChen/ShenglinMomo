@@ -426,7 +426,7 @@ static NSString *AWECATrimStr(NSString *s) {
 
 - (void)aweca_pickBackup {
     UIDocumentPickerViewController *p =
-        [[UIDocumentPickerViewController alloc] initWithContentTypes:@[UTTypeJSON] asCopy:YES];
+        [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeJSON] asCopy:YES];
     p.delegate = self;
     p.allowsMultipleSelection = NO;
     [self presentViewController:p animated:YES completion:nil];
