@@ -15,11 +15,13 @@
 #import "AWECATTSVoiceListController.h"
 #import "SLLogViewController.h"
 #import "SLEntry.h"
+#import "SLVoicePack.h"
+#import "SLVoicePackController.h"
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.2"
+#define SLVersion @"0.4.9.3"
 
 #pragma mark - 多行 footer
 
@@ -45,21 +47,17 @@ static UIView *SLMakeFooter(NSString *text) {
 }
 
 // v0.4.9.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
-// 统一改成贴底小 label 的自定义视图，间距由我们说了算。
-static UIView *SLMakeHeader(NSString *text) {
+// v0.4.9.3：改成与 footer 完全一致的 frame 定位（x = 16），标题 / 行文字 / footer 左边缘对齐。
+static UIView *SLMakeHeader(NSString *text, CGFloat width) {
     if (!text.length) return nil;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
-    UILabel *lab = [[UILabel alloc] init];
-    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(16, 22 - 19, w - 32, 17)];
     lab.font = [UIFont systemFontOfSize:12];
     lab.textColor = [UIColor secondaryLabelColor];
     lab.text = text;
+    lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [box addSubview:lab];
-    [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:32],
-        [lab.trailingAnchor constraintLessThanOrEqualToAnchor:box.trailingAnchor constant:-32],
-        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-3],
-    ]];
     return box;
 }
 
@@ -111,7 +109,7 @@ static UIView *SLMakeHeader(NSString *text) {
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return 3;   // 开关 + 引擎 + 悬浮球图标
+    if (section == 0) return 4;   // 开关 + 引擎 + 语音包 + 悬浮球图标
     if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
     if (section == 2) return 2;   // 口令 + 短录音补全
     if (section == 3) return 1;   // API 凭证
@@ -123,8 +121,7 @@ static UIView *SLMakeHeader(NSString *text) {
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
-    (void)tv;
-    return SLMakeHeader([self sl_headerForSection:section]);
+    return SLMakeHeader([self sl_headerForSection:section], tv.bounds.size.width);
 }
 
 // 中文一行 12pt 足够；首个分组离标题栏留 10pt，其余分组靠上一个 footer 自然撑开
@@ -142,7 +139,7 @@ static UIView *SLMakeHeader(NSString *text) {
 // footer 文案集中在一处，view 和高度用同一份，保证不压字
 // 每组都带 footer：既解释状态，也撑出分组间距（footer 高度为 0 时分组会粘在一起）
 - (NSString *)sl_footerForSection:(NSInteger)section {
-    if (section == 0) return @"切换引擎后需要在下方重新选择音色";
+    if (section == 0) return @"语音包开启后，发「#tts」直接发出所选语音，不再走合成\n切换引擎后需要在下方重新选择音色";
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪";
     if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
     if (section == 3) return @"Key 只保存在本机，不会上传";
@@ -201,6 +198,17 @@ static UIView *SLMakeHeader(NSString *text) {
             [seg addTarget:self action:@selector(sl_engineChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = seg;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if (ip.row == 2) {
+            cell.textLabel.text = @"语音包";
+            NSDictionary *active = [SLVoicePack activePack];
+            if (!active) {
+                cell.detailTextLabel.text = @"未启用";
+            } else if ([SLVoicePack isEnabled]) {
+                cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · 已启用", active[@"name"] ?: @""];
+            } else {
+                cell.detailTextLabel.text = [NSString stringWithFormat:@"%@ · 已关闭", active[@"name"] ?: @""];
+            }
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             cell.textLabel.text = @"悬浮球图标";
             cell.detailTextLabel.text = SLFloatIconSummary();
@@ -271,6 +279,10 @@ static UIView *SLMakeHeader(NSString *text) {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
     if (ip.section == 0 && ip.row == 2) {
+        [self.navigationController pushViewController:[[SLVoicePackController alloc] init] animated:YES];
+        return;
+    }
+    if (ip.section == 0 && ip.row == 3) {
         [self.navigationController pushViewController:[[SLFloatIconController alloc] init] animated:YES];
         return;
     }
