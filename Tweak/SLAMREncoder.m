@@ -72,6 +72,30 @@
     return out.length ? out : nil;
 }
 
++ (NSData *)amrSilenceForFrames:(NSUInteger)frames {
+#ifdef SL_HAS_AMR
+    if (frames == 0) return nil;
+    // 上限 5 分钟，避免异常参数撑爆内存
+    NSUInteger maxFrames = MIN(frames, (NSUInteger)(60 * 50 * 5));
+    void *st = Encoder_Interface_init(0);
+    if (!st) return nil;
+    short zeros[SL_AMR_FRAME_SAMPLES];
+    memset(zeros, 0, sizeof(zeros));
+    NSMutableData *out = [NSMutableData dataWithCapacity:maxFrames * 32];
+    unsigned char buf[128];
+    for (NSUInteger i = 0; i < maxFrames; i++) {
+        int n = Encoder_Interface_Encode(st, MR122, zeros, buf, 0);
+        if (n > 0) [out appendBytes:buf length:(NSUInteger)n];
+    }
+    Encoder_Interface_exit(st);
+    SLLog(@"amr silence frames=%lu bytes=%lu", (unsigned long)maxFrames, (unsigned long)out.length);
+    return out.length ? out : nil;
+#else
+    (void)frames;
+    return nil;
+#endif
+}
+
 + (BOOL)encodeFileAtPath:(NSString *)inPath toAMRPath:(NSString *)outPath duration:(double *)durOut {
 #ifdef SL_HAS_AMR
     NSData *pcm = [self pcm8kMono16AtPath:inPath];
