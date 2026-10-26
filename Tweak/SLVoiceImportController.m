@@ -15,6 +15,7 @@
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, copy) NSString *status;
 @property (nonatomic, strong) UITextView *pasteView;
+@property (nonatomic, strong) UISegmentedControl *sourceSeg;
 @end
 
 @implementation SLVoiceImportController
@@ -83,11 +84,24 @@
     return MAX((NSInteger)self.items.count, 1);   // 空列表占一行显示状态
 }
 
+- (UISegmentedControl *)sourceSeg {
+    if (!_sourceSeg) {
+        _sourceSeg = [[UISegmentedControl alloc] initWithItems:@[@"我的音色", @"搜公开库", @"粘贴 JSON"]];
+        _sourceSeg.selectedSegmentIndex = 0;
+        [_sourceSeg addTarget:self action:@selector(sl_modeChanged:) forControlEvents:UIControlEventValueChanged];
+    }
+    return _sourceSeg;
+}
+
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return @"来源";
+    if (section == 0) return nil;   // 卡片里只有一个控件，小标题多余
     if (self.mode == SLImportModePaste) return @"粘贴音色列表 JSON";
-    if (self.mode == SLImportModeMine) return @"我的音色（默认全选，点行取消）";
+    if (self.mode == SLImportModeMine) {
+        return self.items.count
+            ? [NSString stringWithFormat:@"我的音色 · 共 %lu 个（默认全选）", (unsigned long)self.items.count]
+            : @"我的音色";
+    }
     return self.searchText.length ? [NSString stringWithFormat:@"搜索结果「%@」", self.searchText] : @"搜索结果";
 }
 
@@ -102,6 +116,7 @@
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section == 0) return 52;   // 分段控件 32 + 上下各 10，不贴边
     if (ip.section == 1 && self.mode == SLImportModePaste) return 240;
     return 44;
 }
@@ -124,14 +139,28 @@
 
     if (ip.section == 0) {
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"seg"];
-        if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"seg"];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        cell.textLabel.text = nil;
-        UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"我的音色", @"搜公开库", @"粘贴 JSON"]];
-        seg.frame = CGRectMake(0, 0, 286, 32);
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"seg"];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.backgroundColor = [UIColor clearColor];
+            cell.contentView.backgroundColor = [UIColor clearColor];
+        }
+        // v0.4.9.1：原来挂在 accessoryView 上，系统会把 accessoryView 强制靠右，
+        // 分段控件贴着右边缘甚至溢出卡片。改成放进 contentView 用约束居中。
+        UISegmentedControl *seg = self.sourceSeg;
         seg.selectedSegmentIndex = self.mode;
-        [seg addTarget:self action:@selector(sl_modeChanged:) forControlEvents:UIControlEventValueChanged];
-        cell.accessoryView = seg;
+        if (seg.superview != cell.contentView) {
+            [seg removeFromSuperview];
+            seg.translatesAutoresizingMaskIntoConstraints = NO;
+            [cell.contentView addSubview:seg];
+            [NSLayoutConstraint activateConstraints:@[
+                [seg.centerXAnchor constraintEqualToAnchor:cell.contentView.centerXAnchor],
+                [seg.centerYAnchor constraintEqualToAnchor:cell.contentView.centerYAnchor],
+                [seg.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+                [seg.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+                [seg.heightAnchor constraintEqualToConstant:32],
+            ]];
+        }
         return cell;
     }
 
@@ -257,7 +286,12 @@
             NSInteger skipped = 0;
             NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
             parsed = [AWECATTSManager sl_parseVoiceJSONText:text skipped:&skipped];
-            if (!parsed.count) msg = @"接口返回里没有解析到音色";
+            // 带数字的报错：能直接看出是「没数据」还是「数据被过滤掉了」
+            if (!parsed.count) {
+                msg = skipped > 0
+                    ? [NSString stringWithFormat:@"返回 %ld 条，但都不符合 Fish 格式（已全部跳过）", (long)skipped]
+                    : @"接口返回里没有音色";
+            }
         } else {
             msg = @"服务器没有返回内容";
         }
