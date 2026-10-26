@@ -32,8 +32,9 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 #import "SLVoicePack.h"
+#import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.10"
+#define SLVersion @"0.4.11"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -112,6 +113,29 @@ static NSString *SLKey(Class cls, SEL sel) {
     return [NSString stringWithFormat:@"%@#%@", NSStringFromClass(cls), NSStringFromSelector(sel)];
 }
 
+// 找到「真正定义」这个方法的类。
+// class_getInstanceMethod 会沿父链返回父类那个 Method，而 method_setImplementation 改的
+// 也是父类那份实现。之前拿调用方 cls 做记账 key，埋了两个雷：
+//   ① 兄弟子类（同父不同类）走同一份 IMP，沿链查不到 key → orig=NULL → 原实现被静默吞掉；
+//   ② 同一个 Method 被二次注册时，第二次读到的 cur 已经是「上一次的钩子」，
+//      于是 key 被改写成钩子自己 → 钩子调钩子 → 无限递归爆栈（0.4.10 语音/音波闪退的真因）。
+static Class SLClassOwningMethod(Class cls, SEL sel) {
+    Class c = cls;
+    while (c) {
+        unsigned int n = 0;
+        Method *ms = class_copyMethodList(c, &n);
+        for (unsigned int i = 0; i < n; i++) {
+            if (method_getName(ms[i]) == sel) {
+                free(ms);
+                return c;
+            }
+        }
+        if (ms) free(ms);
+        c = class_getSuperclass(c);
+    }
+    return cls;
+}
+
 static IMP SLGetOrigIMP(id obj, SEL sel) {
     Class c = object_getClass(obj);
     while (c) {
@@ -130,14 +154,26 @@ static BOOL SLRegisterMethod(Class cls, SEL sel, IMP replacement) {
         return NO;
     }
     const char *t = method_getTypeEncoding(m) ?: "";
+
+    // ① 同一个 Method 只允许装一次：沿 owner 的父链检查是否已登记。
+    Class owner = SLClassOwningMethod(cls, sel);
+    for (Class c = owner; c; c = class_getSuperclass(c)) {
+        if (SLOrigIMPs()[SLKey(c, sel)]) {
+            SLLog(@"probe %@ %@：已装过（owner=%@），跳过", cls, NSStringFromSelector(sel), owner);
+            return NO;
+        }
+    }
+
     IMP cur = method_getImplementation(m);
     if (cur == replacement) {
-        SLLog(@"probe %@ %@：已装过（继承自父类）", cls, NSStringFromSelector(sel));
+        SLLog(@"probe %@ %@：已装过（同 IMP）", cls, NSStringFromSelector(sel));
         return NO;
     }
-    SLOrigIMPs()[SLKey(cls, sel)] = [NSValue valueWithPointer:cur];
+
+    // ② 记账 key 用「定义类」，任何子类实例沿父链都能查到，不会再出现 orig=NULL
+    SLOrigIMPs()[SLKey(owner, sel)] = [NSValue valueWithPointer:cur];
     method_setImplementation(m, replacement);
-    SLLog(@"hook ok %@ %@ type=%s", cls, NSStringFromSelector(sel), t);
+    SLLog(@"hook ok %@ %@ type=%s owner=%@", cls, NSStringFromSelector(sel), t, owner);
     return YES;
 }
 
@@ -969,10 +1005,6 @@ static void SLArmTTS(id handler,
             gSLTTSAudioDur = dur;
             gSLArmedAt = [[NSDate date] timeIntervalSince1970];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
-            // v0.4.9.1：只留这一条提示（合成成功那条已从 AWECATTSManager 删掉），
-            // 文案带本次 AI 音频的实际时长，让用户知道点录音后发出去多长。
-            [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 现在录音发送 AI 语音（%.1fs）", dur]
-                         duration:2.0];
 
             // —— v0.4.2：不再自己造 Opus 文件 ——
             // v0.4.1 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
@@ -992,14 +1024,50 @@ static void SLArmTTS(id handler,
                 gSLTTSPCM16kDur = 0;
                 SLLog(@"pcm16k 解码失败 bytes=%lu，本次无法接管", (unsigned long)pcm.length);
             }
-            // 60s 内未录音则自动解除，避免误替换普通语音
+
+            // 60s 内未录音则自动解除，避免误替换普通语音。
+            // v0.4.11：倒计时改成「确认使用之后」才启动 —— 否则用户在里面反复试听，
+            // 还没听完装填就过期了。
             NSString *armed = outPath;
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armed]) {
-                    gSLTTSAudioPath = nil;
-                    SLLog(@"armed tts expired (60s), cleared");
+            void (^startDisarmTimer)(void) = ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armed]) {
+                        gSLTTSAudioPath = nil;
+                        SLLog(@"armed tts expired (60s), cleared");
+                    }
+                });
+            };
+
+            if ([SLTTSAuditionPanel isEnabled]) {
+                // 试听期间不清空装填：用户点「用这条」才算数，点「取消」才撤销。
+                [SLTTSAuditionPanel presentWithAudioPath:outPath
+                                                duration:dur
+                                                    text:content
+                                                   onUse:^{
+                    [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 现在录音发送 AI 语音（%.1fs）", dur]
+                                 duration:2.0];
+                    startDisarmTimer();
                 }
-            });
+                                                onCancel:^{
+                    // 只有这次装的还是这条才清，避免误清掉用户已经换成新的一条
+                    if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armed]) {
+                        gSLTTSAudioPath = nil;
+                        gSLTTSAudioDur = 0;
+                        gSLTTSPCM16k = nil;
+                        gSLTTSPCM16kDur = 0;
+                    }
+                    SLLog(@"tts audition cancelled, disarmed");
+                }
+                                                 onRetry:^{
+                    SLLog(@"tts audition retry");
+                    SLArmTTS(nil, content, fallback);
+                }];
+            } else {
+                [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 现在录音发送 AI 语音（%.1fs）", dur]
+                             duration:2.0];
+                startDisarmTimer();
+            }
         });
     }];
 }
@@ -1962,14 +2030,18 @@ static NSMutableDictionary *SLProbeLastLog(void) {
     return d;
 }
 
-// 同一个「类.方法」5 秒内只记一次，避免录音回调刷爆日志
+// 同一个「类.方法」5 秒内只记一次，避免录音回调刷爆日志。
+// 探针会在 CloudKit / AVFoundation 的后台队列上被并发调用，裸 NSMutableDictionary
+// 并发写会破坏哈希表（0.4.10 随机闪退的来源之一），这里必须加锁。
 static BOOL SLProbeShouldLog(NSString *key) {
     NSMutableDictionary *d = SLProbeLastLog();
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    NSNumber *last = d[key];
-    if (last && (now - last.doubleValue) < 5.0) return NO;
-    d[key] = @(now);
-    return YES;
+    @synchronized (d) {
+        NSNumber *last = d[key];
+        if (last && (now - last.doubleValue) < 5.0) return NO;
+        d[key] = @(now);
+        return YES;
+    }
 }
 
 static BOOL SLProbeSelWanted(NSString *sel) {
@@ -1986,7 +2058,14 @@ static BOOL SLProbeSelWanted(NSString *sel) {
 }
 
 static void SLProbeSchedScan(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 一次发送会连打几十次 stop/finish 回调，原来每次都排一次全盘目录遍历，
+    // 主线程被扫目录堵死 → 卡顿甚至被系统 watchdog 杀掉。这里 8 秒内只扫一次。
+    static NSTimeInterval lastScan = 0;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now - lastScan < 8.0) return;
+    lastScan = now;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         @try { SLProbeScanAudioFiles(); } @catch (NSException *e) {}
     });
 }
@@ -2061,10 +2140,41 @@ static void SLProbeScanAudioFiles(void) {
     SLLog(@"SWAVE 扫描到 %lu 个新文件：%@", (unsigned long)found.count, [head componentsJoinedByString:@"  |  "]);
 }
 
+// v0.4.11：探针默认关闭，只在设置页手动打开时安装。
+// 0.4.10 那版无条件扫全表（603 个方法，含 CloudKit / LaunchServices / _DPDataRecorder 这些
+// 系统高频方法），启动要遍历全部类 → 卡；而且会把已有功能钩子二次覆盖 → 自递归闪退。
+static NSString *const kSLWaveProbeKey = @"SLWaveProbe";
+
+BOOL SLWaveProbeEnabled(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kSLWaveProbeKey];
+}
+
+void SLSetWaveProbeEnabled(BOOL on) {
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kSLWaveProbeKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    SLLog(@"SWAVE 开关 -> %@（重启陌陌生效）", on ? @"开" : @"关");
+}
+
+// 只认手机里第三方 App 自己的 image（陌陌主二进制），系统库一律不碰。
+static BOOL SLClassIsAppOwned(Class c) {
+    const char *img = class_getImageName(c);
+    if (!img) return NO;
+    NSString *p = [NSString stringWithUTF8String:img];
+    if (!p.length) return NO;
+    if ([p hasPrefix:@"/System/"] || [p hasPrefix:@"/usr/lib/"]) return NO;
+    if ([p containsString:@"/PrivateFrameworks/"] || [p containsString:@"/Frameworks/"]) return NO;
+    return [p containsString:@".app/"];
+}
+
+// 音波侦察用的窄探针：只挂陌陌自己的、名字里带 Wave / VoiceMessage 的类。
 static void SLInstallSoundWaveProbe(void) {
     static BOOL done = NO;
     if (done) return;
     done = YES;
+    if (!SLWaveProbeEnabled()) {
+        SLLog(@"SWAVE 探针未开启（设置 → 诊断），跳过");
+        return;
+    }
 
     int n = objc_getClassList(NULL, 0);
     if (n <= 0) return;
@@ -2077,8 +2187,9 @@ static void SLInstallSoundWaveProbe(void) {
         Class c = buf[i];
         NSString *cn = NSStringFromClass(c);
         if (!cn.length) continue;
-        if ([cn rangeOfString:@"Record"].location == NSNotFound &&
-            [cn rangeOfString:@"Wave"].location == NSNotFound) continue;
+        if ([cn rangeOfString:@"Wave"].location == NSNotFound &&
+            [cn rangeOfString:@"VoiceMessage"].location == NSNotFound) continue;
+        if (!SLClassIsAppOwned(c)) continue;   // 只碰陌陌自己的类
 
         unsigned int mc = 0;
         Method *ms = class_copyMethodList(c, &mc);
@@ -2099,8 +2210,14 @@ static void SLInstallSoundWaveProbe(void) {
         if (ms) free(ms);
     }
     free(buf);
-    SLLog(@"SWAVE 探针装上 %lu 个方法：%@", (unsigned long)hits.count,
-          [[hits subarrayWithRange:NSMakeRange(0, MIN(hits.count, 30))] componentsJoinedByString:@", "]);
+    SLLog(@"SWAVE 窄探针装上 %lu 个方法：%@", (unsigned long)hits.count,
+          [hits componentsJoinedByString:@", "]);
+}
+
+void SLRunWaveProbeScan(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @try { SLProbeScanAudioFiles(); } @catch (NSException *e) {}
+    });
 }
 
 static void SLInstallHooks(void) {
@@ -2130,7 +2247,10 @@ static void SLInstallHooks(void) {
     SLInstallServiceHook();
     // v0.4.10：虚拟定位（不开时全透传）
     @try { SLInstallVirtualLocationHooks(); } @catch (NSException *e) {}
-    @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
+    // v0.4.11：音波探针默认关。0.4.10 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
+    if (SLWaveProbeEnabled()) {
+        @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
+    }
 }
 
 NSString *SLHookStatusSummary(void) {
