@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.11"
+#define SLVersion @"0.4.12"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -156,17 +156,17 @@ static BOOL SLRegisterMethod(Class cls, SEL sel, IMP replacement) {
     const char *t = method_getTypeEncoding(m) ?: "";
 
     // ① 同一个 Method 只允许装一次：沿 owner 的父链检查是否已登记。
+    // v0.4.12：重试安装时这里会反复命中，原来每次都写一行日志（一次启动刷上百行），
+    // 现在静默跳过 —— 只有真正的安装才记账。
     Class owner = SLClassOwningMethod(cls, sel);
     for (Class c = owner; c; c = class_getSuperclass(c)) {
         if (SLOrigIMPs()[SLKey(c, sel)]) {
-            SLLog(@"probe %@ %@：已装过（owner=%@），跳过", cls, NSStringFromSelector(sel), owner);
             return NO;
         }
     }
 
     IMP cur = method_getImplementation(m);
     if (cur == replacement) {
-        SLLog(@"probe %@ %@：已装过（同 IMP）", cls, NSStringFromSelector(sel));
         return NO;
     }
 
@@ -2220,9 +2220,41 @@ void SLRunWaveProbeScan(void) {
     });
 }
 
+// v0.4.12：音波发布后闪退的兜底。
+// iOS 15 起，给「老式构造」的 UIButton（buttonWithType:）设 configurationUpdateHandler
+// 会直接 NSAssert：Invalid parameter not satisfying: configuration != nil。
+// 陌陌音波发布页在自己那套旧按钮上就是这么干的，所以一发布就闪退（栈里只有 MomoChat + UIKitCore）。
+// 这里把这种情况拦下来：按钮没有 configuration 就忽略这次设置，其它情况原样透传。
+static void SLSetConfigurationUpdateHandlerHook(id self, SEL _cmd, id handler) {
+    @try {
+        if (handler && [self isKindOfClass:[UIButton class]]) {
+            UIButton *b = (UIButton *)self;
+            if (!b.configuration) {
+                SLLog(@"UI-GUARD %@ 没有 configuration，忽略 setConfigurationUpdateHandler:（否则 UIKit 断言崩）",
+                      NSStringFromClass([self class]));
+                return;
+            }
+        }
+    } @catch (NSException *e) {}
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
+    if (orig) orig(self, _cmd, handler);
+}
+
+static void SLInstallUIButtonGuard(void) {
+    static BOOL done = NO;
+    if (done) return;
+    SEL sel = @selector(setConfigurationUpdateHandler:);
+    Method m = class_getInstanceMethod([UIButton class], sel);
+    if (!m) return;          // iOS < 15 没这个 API，不用兜底
+    done = YES;
+    if (SLRegisterMethod([UIButton class], sel, (IMP)SLSetConfigurationUpdateHandlerHook)) {
+        SLLog(@"UI-GUARD 已装 UIButton setConfigurationUpdateHandler: 兜底");
+    }
+}
+
 static void SLInstallHooks(void) {
     static int attempts = 0;
-    if (attempts++ > 8) return;   // 幂等：已装的会跳过，多试几次等类加载
+    if (attempts++ > 3) return;   // 幂等：已装的会静默跳过，多试几次等类加载
 
     // 输入栏（优先级最高：不依赖任何消息对象结构）
     SLInstallSendTextHook(NSClassFromString(@"MDChatInputBar"));
@@ -2247,6 +2279,8 @@ static void SLInstallHooks(void) {
     SLInstallServiceHook();
     // v0.4.10：虚拟定位（不开时全透传）
     @try { SLInstallVirtualLocationHooks(); } @catch (NSException *e) {}
+    // v0.4.12：UIButton configuration 断言兜底
+    @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
     // v0.4.11：音波探针默认关。0.4.10 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
     if (SLWaveProbeEnabled()) {
         @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
@@ -2269,10 +2303,12 @@ NSString *SLHookStatusSummary(void) {
         @try { [AWECAUtils ensureDirectoriesExist]; } @catch (NSException *e) {}
         @try { SLStartEntryWatcher(); } @catch (NSException *e) {}
         SLInstallHooks();
-        SLLog(@"%@", SLHookStatusSummary());
-        for (int i = 1; i <= 5; i++) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // 状态摘要从「每次都打」改成「最后一轮打完打一次」：
+        // 原来一次启动会刷 6 遍 2000 字的钩子清单，日志几乎没法看。
+        for (int i = 1; i <= 2; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 @try { SLInstallHooks(); } @catch (NSException *e) {}
+                if (i == 2) SLLog(@"%@", SLHookStatusSummary());
             });
         }
     });
