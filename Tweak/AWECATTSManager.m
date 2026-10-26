@@ -349,12 +349,12 @@ static int aweca_mapPitchToV3(float ratio) {
     }
     NSString *key = AWECATrim(self.fishAPIKey);
     if (!key.length) {
-        if (completion) completion(NO, nil, @"请先填写 FishAudio API Key");
+        if (completion) completion(NO, nil, @"请先填写 Fish Audio API Key");
         return;
     }
     NSString *refID = AWECATrim(self.fishVoiceType);
     if (!refID.length) {
-        if (completion) completion(NO, nil, @"请先选择 FishAudio 音色");
+        if (completion) completion(NO, nil, @"请先选择 Fish Audio 音色");
         return;
     }
 
@@ -407,7 +407,7 @@ static int aweca_mapPitchToV3(float ratio) {
             }
             if (!data.length) msg = @"服务器无响应";
             if (http.statusCode == 402) {
-                msg = @"FishAudio API 余额不足：模型选「免费版」(s2.1-pro-free) 可零费用，或到 fish.audio/app/developers 充值";
+                msg = @"Fish Audio 余额不足：模型选「免费版」(s2.1-pro-free) 可零费用，或到 fish.audio/app/developers 充值";
             } else if (http.statusCode == 401) {
                 msg = @"API Key 无效或已过期，请检查";
             }
