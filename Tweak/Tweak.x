@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.13"
+#define SLVersion @"0.4.14"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -2222,6 +2222,143 @@ void SLRunWaveProbeScan(void) {
     });
 }
 
+#pragma mark - 钩子 5：音波消息发送（补时长）
+
+// v0.4.14：音波录完之后，陌陌用 buildSingleWaveHandMessage: 造消息、再走
+// chatCell:handleSendWaveHandMessage: 发出去 —— 全程不经过 sendAudioMessage:。
+// 所以 PCM 换血这层是生效的（日志 fed=95108/95108），但没人改时长：
+// 气泡按「录音计时」显示（录 4 秒就 4 秒），文件里却是 2.97 秒的 AI 语音。
+// 这里在发送前把消息体里的 audiotime 改成 AI 真实长度，和语音消息那条链路对齐。
+static void SLWaveDumpMessage(id msg) {
+    if (!msg) return;
+    NSString *cls = NSStringFromClass([msg class]);
+
+    NSString *body = nil;
+    @try { body = [msg valueForKey:@"body"]; } @catch (NSException *e) {}
+    NSDictionary *extra = nil;
+    @try {
+        id v = [msg valueForKey:@"extra"];
+        if ([v isKindOfClass:[NSDictionary class]]) extra = v;
+    } @catch (NSException *e) {}
+
+    // 把名字里带 time/dur/sec/len 的数值型 ivar 全列出来，方便一眼看到时长存在哪
+    NSMutableArray *nums = [NSMutableArray array];
+    unsigned int cnt = 0;
+    Ivar *ivars = class_copyIvarList([msg class], &cnt);
+    for (unsigned int i = 0; ivars && i < cnt; i++) {
+        const char *nm = ivar_getName(ivars[i]);
+        const char *tp = ivar_getTypeEncoding(ivars[i]);
+        if (!nm || !tp) continue;
+        NSString *n = [NSString stringWithUTF8String:nm] ?: @"";
+        NSString *low = n.lowercaseString;
+        if ([low rangeOfString:@"time"].location == NSNotFound &&
+            [low rangeOfString:@"dur"].location == NSNotFound &&
+            [low rangeOfString:@"sec"].location == NSNotFound &&
+            [low rangeOfString:@"len"].location == NSNotFound) continue;
+        uint8_t *base = (uint8_t *)(__bridge void *)msg + ivar_getOffset(ivars[i]);
+        if (tp[0] == 'q' || tp[0] == 'Q') {
+            unsigned long long v = *(unsigned long long *)base;
+            [nums addObject:[NSString stringWithFormat:@"%@@%llu", n, v]];
+        } else if (tp[0] == 'd') {
+            double v = *(double *)base;
+            [nums addObject:[NSString stringWithFormat:@"%@@%.2f", n, v]];
+        } else if (tp[0] == 'i' || tp[0] == 'I') {
+            unsigned int v = *(unsigned int *)base;
+            [nums addObject:[NSString stringWithFormat:@"%@@%u", n, v]];
+        }
+    }
+    if (ivars) free(ivars);
+
+    SLLog(@"WAVE-MSG %@ body=%@ extra=%@ nums=[%@]", cls,
+          body.length > 200 ? [body substringToIndex:200] : (body ?: @"(nil)"),
+          extra.count ? extra : @"(nil)",
+          [nums componentsJoinedByString:@" "]);
+}
+
+static void SLFixWaveMessage(id msg) {
+    @try { SLWaveDumpMessage(msg); } @catch (NSException *e) {}
+
+    NSString *body = nil;
+    @try { body = [msg valueForKey:@"body"]; } @catch (NSException *e) {}
+    if (![body isKindOfClass:[NSString class]] || body.length == 0) return;
+
+    double useDur = SLFedDuration();
+    if (useDur < 0.05) useDur = gSLTTSAudioDur;
+    if (useDur < 0.05) return;
+
+    NSString *nb = SLBodySetAudioTime(body, useDur);
+    if (!nb || [nb isEqualToString:body]) {
+        SLLog(@"WAVE-MSG body 里没有 audiotime，没东西可改（时长 %.2f 秒）", useDur);
+        return;
+    }
+    BOOL set = NO;
+    SEL bs = NSSelectorFromString(@"setBody:");
+    if ([msg respondsToSelector:bs]) {
+        @try { ((void(*)(id,SEL,id))objc_msgSend)(msg, bs, nb); set = YES; } @catch (NSException *e) {}
+    }
+    if (!set) { @try { [msg setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {} }
+    SLLog(@"WAVE-MSG audiotime -> %.2f 秒 set=%d (%@)", useDur, set,
+          nb.length > 200 ? [nb substringToIndex:200] : nb);
+}
+
+static void SLWaveHandSendHook(id self, SEL _cmd, id cell, id msg) {
+    void (*orig)(id, SEL, id, id) = (void (*)(id, SEL, id, id))SLGetOrigIMP(self, _cmd);
+    if (SLIsEnabled() && gSLTTSAudioPath && msg) {
+        @try { SLFixWaveMessage(msg); } @catch (NSException *e) {}
+    }
+    if (orig) orig(self, _cmd, cell, msg);
+}
+
+static BOOL SLInstallWaveHandOnClass(Class c) {
+    if (!c) return NO;
+    SEL sel = NSSelectorFromString(@"chatCell:handleSendWaveHandMessage:");
+    Method m = class_getInstanceMethod(c, sel);
+    if (!m) return NO;
+
+    const char *t = method_getTypeEncoding(m);
+    NSMethodSignature *sig = nil;
+    @try { if (t) sig = [NSMethodSignature signatureWithObjCTypes:t]; } @catch (NSException *e) {}
+    // 只认 (对象, 对象) 两个参数：多一个少一个都可能是我们读不懂的调用约定，宁可不动
+    if (!sig || sig.numberOfArguments != 4 ||
+        [sig getArgumentTypeAtIndex:2][0] != '@' || [sig getArgumentTypeAtIndex:3][0] != '@') {
+        SLLog(@"WAVE-HOOK %@ 签名 %s 不符，跳过", NSStringFromClass(c), t ?: "?");
+        return NO;
+    }
+    if (SLRegisterMethod(c, sel, (IMP)SLWaveHandSendHook)) {
+        SLLog(@"WAVE-HOOK 装上 %@ chatCell:handleSendWaveHandMessage: type=%s",
+              NSStringFromClass(c), t ?: "?");
+        return YES;
+    }
+    return NO;
+}
+
+static void SLInstallWaveHandHook(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;   // 只尝试一次：陌陌的类启动时已经全部加载，扫不到就是没有
+
+    // 先试几个最可能的宿主，命中就不用扫全表（0.4.10 的教训：扫全表会卡启动）
+    NSArray<NSString *> *cand = @[@"MDChatBaseHander", @"MDChatSingleHandler", @"MDChatUniverseHandler",
+                                  @"MDChatViewController", @"MDChatCell", @"MDMessageCell"];
+    for (NSString *n in cand) {
+        if (SLInstallWaveHandOnClass(NSClassFromString(n))) return;
+    }
+
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!buf) return;
+    n = objc_getClassList(buf, n);
+    BOOL found = NO;
+    for (int i = 0; i < n; i++) {
+        Class c = buf[i];
+        if (!SLClassIsAppOwned(c)) continue;
+        if (SLInstallWaveHandOnClass(c)) { found = YES; break; }
+    }
+    free(buf);
+    if (!found) SLLog(@"WAVE-HOOK 没找到 chatCell:handleSendWaveHandMessage: 的宿主");
+}
+
 // v0.4.12：音波发布后闪退的兜底。
 // iOS 15 起，给「老式构造」的 UIButton（buttonWithType:）设 configurationUpdateHandler
 // 会直接 NSAssert：Invalid parameter not satisfying: configuration != nil。
@@ -2283,6 +2420,8 @@ static void SLInstallHooks(void) {
     @try { SLInstallVirtualLocationHooks(); } @catch (NSException *e) {}
     // v0.4.12：UIButton configuration 断言兜底
     @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
+    // v0.4.14：音波消息发送前补时长（音波不走 sendAudioMessage:）
+    @try { SLInstallWaveHandHook(); } @catch (NSException *e) {}
     // v0.4.11：音波探针默认关。0.4.10 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
     if (SLWaveProbeEnabled()) {
         @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
