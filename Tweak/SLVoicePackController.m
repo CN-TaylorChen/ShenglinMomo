@@ -8,15 +8,16 @@
 #import "SLTrimController.h"
 #import "AWECAUtils.h"
 #import "SLLog.h"
+#import "SLAlignBox.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 typedef UIDocumentPickerViewController * _Nullable (^SLPickerMaker)(void);
 
-// 语音包口令跟着设置走，文案里不再写死 yyb
+// 语音包口令跟着设置走（v0.4.9.9 默认改成 #yyb），文案里不再写死
 static NSString *SLPackCmdValue(void) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:@"SLPackCommand"];
-    return v.length ? v : @"yyb";
+    return v.length ? v : @"#yyb";
 }
 
 // 标题 / footer / 单元格文字统一左基线（跟设置页同一套算法）
@@ -35,36 +36,11 @@ static CGFloat SLPackMeasureLeading(UITableView *tv) {
 }
 
 static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
-    if (!text.length) return nil;
-    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 3, MAX(0, w - x - 16), 17)];
-    lab.font = [UIFont systemFontOfSize:12];
-    lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = text;
-    lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [box addSubview:lab];
-    return box;
+    return SLAlignHeader(text, x, width);
 }
 
 static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
-    if (!text.length) return nil;
-    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 0)];
-    UILabel *lab = [[UILabel alloc] init];
-    lab.translatesAutoresizingMaskIntoConstraints = NO;
-    lab.numberOfLines = 0;
-    lab.font = [UIFont systemFontOfSize:12];
-    lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = text;
-    [box addSubview:lab];
-    [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:MAX(0, x)],
-        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
-        [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:4],
-        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-6],
-    ]];
-    return box;
+    return SLAlignFooter(text, x, width);
 }
 
 @interface SLVoicePackController () <UIDocumentPickerDelegate, AVAudioPlayerDelegate>
@@ -431,7 +407,8 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
                                options:NSStringDrawingUsesLineFragmentOrigin
                             attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
                                context:nil];
-    return ceil(r.size.height) + 10;
+    // v0.4.9.9：footer 内边距统一为「上 5 + 下 7」（跟设置页同一个盒子），这里补足 14
+    return ceil(r.size.height) + 14;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
