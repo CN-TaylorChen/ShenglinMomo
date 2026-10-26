@@ -20,16 +20,36 @@
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
+#define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.5"
+#define SLVersion @"0.4.9.6"
 
-#pragma mark - 多行 footer
+#pragma mark - 分组标题 / 多行 footer：统一左基线
+
+// v0.4.9.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
+// 三者永远差几像素。现在只认一个基准：单元格文字的真实左边缘（表格坐标系）。
+// 首帧 cell 还没生成，用「卡片左缘 + 内边距」估；viewDidLayoutSubviews 里再按真实 cell 校正一次。
+static CGFloat SLMeasureLeading(UITableView *tv) {
+    for (UITableViewCell *c in tv.visibleCells) {
+        UILabel *lab = c.textLabel;
+        if (!lab || lab.hidden || !lab.text.length) continue;
+        CGFloat x = CGRectGetMinX(c.frame) + CGRectGetMinX(lab.frame);
+        if (x > 0) return x;
+    }
+    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
+        if ([tv numberOfRowsInSection:s] <= 0) continue;
+        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
+        if (r.size.width > 0) return CGRectGetMinX(r) + 16;
+    }
+    return 36;
+}
 
 // 系统 footer 在陌陌的 tableView 里会被算成单行并右侧截断，
 // 所以这里自己撑一个多行 label，高度交给自动布局。
-static UIView *SLMakeFooter(NSString *text) {
+static UIView *SLMakeFooter(NSString *text, CGFloat x, CGFloat width) {
     if (!text.length) return nil;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
+    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 0)];
     UILabel *lab = [[UILabel alloc] init];
     lab.translatesAutoresizingMaskIntoConstraints = NO;
     lab.numberOfLines = 0;
@@ -38,7 +58,7 @@ static UIView *SLMakeFooter(NSString *text) {
     lab.text = text;
     [box addSubview:lab];
     [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:16],
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:MAX(0, x)],
         [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
         [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
         [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
@@ -47,13 +67,12 @@ static UIView *SLMakeFooter(NSString *text) {
 }
 
 // v0.4.9.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
-// v0.4.9.3：改成与 footer 完全一致的 frame 定位。
-// v0.4.9.4：x 不再写死，直接取白色卡片的实际左边缘，标题严丝合缝贴住框线。
+// v0.4.9.6：x 与 footer 共用同一个左基线，三者对齐。
 static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (!text.length) return nil;
     CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
     UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, w - x - 16, 17)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, MAX(0, w - x - 16), 17)];
     lab.font = [UIFont systemFontOfSize:12];
     lab.textColor = [UIColor secondaryLabelColor];
     lab.text = text;
@@ -62,19 +81,9 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return box;
 }
 
-// 白色卡片的实际左边缘：rectForRowAtIndexPath 是纯计算 API，不依赖 cell 是否已创建，
-// 比读 visibleCells 稳 —— header 首次布局时 cell 往往还没生成，读 visibleCells 会拿到 nil。
-static CGFloat SLHeaderLeading(UITableView *tv) {
-    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
-        if ([tv numberOfRowsInSection:s] <= 0) continue;
-        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (r.size.width > 0) return r.origin.x;
-    }
-    return 20;
-}
-
 @interface SLSettingsPanel ()
 @property (nonatomic, strong) UISegmentedControl *engineSeg;
+@property (nonatomic, assign) CGFloat slLeading;
 @end
 
 @implementation SLSettingsPanel
@@ -103,6 +112,27 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
     return v.length ? v : @"#tts";
 }
 
+// v0.4.9.6：语音包口令也开放自定义，跟合成口令彻底分开，互不抢
+- (NSString *)sl_packCommand {
+    NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackCmdKey];
+    return v.length ? v : @"yyb";
+}
+
+- (CGFloat)sl_leadingForTableView:(UITableView *)tv {
+    if (self.slLeading <= 0) self.slLeading = SLMeasureLeading(tv);
+    return self.slLeading;
+}
+
+// 首帧 cell 还没生成，用估算值先排；拿到真实 cell 后校正一次，之后不再变
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat m = SLMeasureLeading(self.tableView);
+    if (m > 0 && fabs(m - self.slLeading) > 0.5) {
+        self.slLeading = m;
+        [self.tableView reloadData];
+    }
+}
+
 - (void)sl_close {
     [self dismissViewControllerAnimated:YES completion:nil];
 }
@@ -123,7 +153,7 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
     (void)tv;
     if (section == 0) return 4;   // 开关 + 引擎 + 语音包 + 悬浮球图标
     if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
-    if (section == 2) return 2;   // 口令 + 短录音补全
+    if (section == 2) return 3;   // 触发口令 + 语音包口令 + 短录音补全
     if (section == 3) return 1;   // API 凭证
     return 1;                     // 运行日志
 }
@@ -133,7 +163,7 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
-    return SLMakeHeader([self sl_headerForSection:section], SLHeaderLeading(tv), tv.bounds.size.width);
+    return SLMakeHeader([self sl_headerForSection:section], [self sl_leadingForTableView:tv], tv.bounds.size.width);
 }
 
 // 中文一行 12pt 足够；首个分组离标题栏留 10pt，其余分组靠上一个 footer 自然撑开
@@ -151,24 +181,27 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
 // footer 文案集中在一处，view 和高度用同一份，保证不压字
 // 每组都带 footer：既解释状态，也撑出分组间距（footer 高度为 0 时分组会粘在一起）
 - (NSString *)sl_footerForSection:(NSInteger)section {
-    if (section == 0) return @"语音包：发「yyb」直接发出所选语音，不走合成\n合成语音：发「#tts」正常联网合成\n切换引擎后需要在下方重新选择音色";
+    if (section == 0) {
+        // v0.4.9.6：口令可自定义，文案跟着实际设置走，不再写死 yyb / #tts
+        return [NSString stringWithFormat:@"语音包：发「%@」直接发出所选语音，不走合成\n合成语音：发「%@」正常联网合成\n切换引擎后需要在下方重新选择音色",
+                [self sl_packCommand], [self sl_command]];
+    }
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪";
-    if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
+    if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音\n语音包口令：单独一条，命中后直接发所选语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
     if (section == 3) return @"Key 只保存在本机，不会上传";
     if (section == 4) return @"没反应时先看这里";
     return nil;
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)section {
-    (void)tv;
-    return SLMakeFooter([self sl_footerForSection:section]);
+    return SLMakeFooter([self sl_footerForSection:section], [self sl_leadingForTableView:tv], tv.bounds.size.width);
 }
 
-// 高度按文本实算（宽 = 表宽 - 左右各 18pt），不依赖自动布局估算，避免出现压字 / 半行
+// 高度按文本实算（宽 = 表宽 - 左基线 - 右 16），不依赖自动布局估算，避免出现压字 / 半行
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)section {
     NSString *text = [self sl_footerForSection:section];
     if (!text.length) return 0;
-    CGFloat w = tv.bounds.size.width - 64;   // insetGrouped：分组左右各 16 + 文本左右各 16
+    CGFloat w = tv.bounds.size.width - [self sl_leadingForTableView:tv] - 16;
     if (w <= 0) return UITableViewAutomaticDimension;
     CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
                                   options:NSStringDrawingUsesLineFragmentOrigin
@@ -260,6 +293,10 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
             cell.textLabel.text = @"触发口令";
             cell.detailTextLabel.text = [self sl_command];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else if (ip.row == 1) {
+            cell.textLabel.text = @"语音包口令";
+            cell.detailTextLabel.text = [self sl_packCommand];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             cell.textLabel.text = @"短录音补全";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
@@ -322,6 +359,10 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
         [self sl_editCommand];
         return;
     }
+    if (ip.section == 2 && ip.row == 1) {
+        [self sl_editPackCommand];
+        return;
+    }
     if (ip.section == 3) {
         AWECAAPISettingsController *vc = [[AWECAAPISettingsController alloc] init];
         [self.navigationController pushViewController:vc animated:YES];
@@ -336,23 +377,52 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
 #pragma mark - Actions
 
 - (void)sl_editCommand {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"触发口令"
-                                                               message:@"以这个口令开头时，文字会被转成语音消息发送"
+    [self sl_editCommandForKey:kSLCommandKey
+                         title:@"触发口令"
+                       message:@"以这个口令开头时，文字会被转成语音消息发送"
+                      fallback:@"#tts"];
+}
+
+// v0.4.9.6：语音包口令也开放自定义（存 SLPackCommand），跟合成口令各走各的
+- (void)sl_editPackCommand {
+    [self sl_editCommandForKey:kSLPackCmdKey
+                         title:@"语音包口令"
+                       message:@"单独一条口令，命中后直接发出所选语音，不走合成"
+                      fallback:@"yyb"];
+}
+
+- (void)sl_editCommandForKey:(NSString *)key
+                       title:(NSString *)title
+                     message:(NSString *)message
+                    fallback:(NSString *)fallback {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *cur = [d stringForKey:key];
+    if (!cur.length) cur = fallback;
+
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+                                                               message:message
                                                         preferredStyle:UIAlertControllerStyleAlert];
     [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.text = [self sl_command];
-        tf.placeholder = @"#tts";
+        tf.text = cur;
+        tf.placeholder = fallback;
         tf.clearButtonMode = UITextFieldViewModeAlways;
     }];
     [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     __weak typeof(self) weakSelf = self;
     [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         NSString *v = [ac.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (v.length == 0) v = @"#tts";
-        [[NSUserDefaults standardUserDefaults] setObject:v forKey:kSLCommandKey];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+        if (v.length == 0) v = fallback;
+        // 两条口令撞了就等于其中一条永远抢不到，直接拦下来
+        NSString *otherKey = [key isEqualToString:kSLCommandKey] ? kSLPackCmdKey : kSLCommandKey;
+        NSString *other = [d stringForKey:otherKey];
+        if (other.length && [v.lowercaseString isEqualToString:other.lowercaseString]) {
+            [AWECAUtils showToast:@"跟另一条口令重复了，换一个" duration:2.2];
+            return;
+        }
+        [d setObject:v forKey:key];
+        [d synchronize];
         [weakSelf.tableView reloadData];
-        [AWECAUtils showToast:[NSString stringWithFormat:@"口令已改为 %@", v] duration:1.5];
+        [AWECAUtils showToast:[NSString stringWithFormat:@"%@已改为 %@", title, v] duration:1.5];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
