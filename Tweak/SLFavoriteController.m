@@ -51,15 +51,12 @@ static UIColor *SLFavAccent(void) {
     UIWindow *win = nil;
     for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
         if (![sc isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+        UIWindowScene *ws = (UIWindowScene *)sc;
+        for (UIWindow *w in ws.windows) {
             if (w.isKeyWindow) { win = w; break; }
         }
+        if (!win) win = ws.windows.firstObject;   // 退一步：取该 scene 的第一个窗口
         if (win) break;
-    }
-    if (!win) {
-        for (UIWindow *w in [UIApplication sharedApplication].windows) {
-            if (!w.hidden) { win = w; break; }
-        }
     }
     if (!win) return nil;
 
