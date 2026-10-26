@@ -109,13 +109,10 @@ static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 }
 
 static CGFloat AWECAHeaderLeading(UITableView *tv) {
-    UITableViewCell *c = tv.visibleCells.firstObject;
-    if (c) return CGRectGetMinX(c.frame);
     for (NSInteger s = 0; s < tv.numberOfSections; s++) {
         if ([tv numberOfRowsInSection:s] <= 0) continue;
-        UITableViewCell *first = [tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (first) return CGRectGetMinX(first.frame);
-        break;
+        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
+        if (r.size.width > 0) return r.origin.x;
     }
     return 20;
 }
