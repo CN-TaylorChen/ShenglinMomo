@@ -72,6 +72,27 @@
 
 #pragma mark - 设置页
 
+// v0.4.4：系统 footer 在陌陌的 tableView 里会被压成单行、右侧截断，
+// 统一改成多行自定义视图（numberOfLines = 0 + 自动高度）
+static UIView *AWECAMakeFooter(NSString *text) {
+    if (!text.length) return nil;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
+    UILabel *lab = [[UILabel alloc] init];
+    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    lab.numberOfLines = 0;
+    lab.font = [UIFont systemFontOfSize:12];
+    lab.textColor = [UIColor secondaryLabelColor];
+    lab.text = text;
+    [box addSubview:lab];
+    [NSLayoutConstraint activateConstraints:@[
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:18],
+        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-18],
+        [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
+        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
+    ]];
+    return box;
+}
+
 @implementation AWECAAPISettingsController {
     AWECATTSManager *_mgr;
     BOOL _tosExpanded;
@@ -84,6 +105,8 @@
     self.title = @"API 凭证";
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.separatorInset = UIEdgeInsetsZero;
+    self.tableView.estimatedSectionFooterHeight = 28;
+    self.tableView.estimatedSectionHeaderHeight = 26;
     [self.tableView registerClass:[AWECAAPIFieldCell class] forCellReuseIdentifier:@"field"];
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
         target:self action:@selector(aweca_saveAll)];
@@ -206,14 +229,38 @@ static NSString *AWECATrimStr(NSString *s) {
 
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"火山引擎（豆包音色）";
-    if (section == 1) return @"FishAudio";
+    if (section == 1) return @"Fish Audio";
     return @"高级";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    if (section == 0) return @"火山引擎控制台 → API Key 管理获取，仅保存在本机。评论区与私聊合成音色都用这一组。";
-    if (section == 1) return @"登录 fish.audio → 右上角头像 → API Keys 创建。免费模型 s2.1-pro-free 不消耗余额。";
-    return @"TOS 上传用于「录音转音色」的私有桶上传；识别资源 ID 留空即标准版。日常无需展开。";
+    (void)tableView;
+    (void)section;
+    return nil;   // 全部改走 viewForFooterInSection（多行，不截断）
+}
+
+- (NSString *)aweca_footerForSection:(NSInteger)section {
+    if (section == 0) return @"控制台 → API Key 管理获取，仅存本机";
+    if (section == 1) return @"fish.audio → 右上角头像 → API Keys 创建。免费模型 s2.1-pro-free 不消耗余额。";
+    return @"TOS 供「录音转音色」上传，资源 ID 留空即标准版";
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    (void)tableView;
+    return AWECAMakeFooter([self aweca_footerForSection:section]);
+}
+
+// 按文本实算高度，保证多行说明完整显示（系统默认单行会截断）
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    NSString *text = [self aweca_footerForSection:section];
+    if (!text.length) return 0;
+    CGFloat w = tableView.bounds.size.width - 36;
+    if (w <= 0) return UITableViewAutomaticDimension;
+    CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
+                                  options:NSStringDrawingUsesLineFragmentOrigin
+                               attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
+                                  context:nil];
+    return ceil(r.size.height) + 14;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -223,14 +270,19 @@ static NSString *AWECATrimStr(NSString *s) {
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:foldId];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:foldId];
         BOOL isTOS = (indexPath.row == 0);
-        if (isTOS) {
-            cell.textLabel.text = _tosExpanded ? @"∨ 录音转豆包上传（TOS）" : @"› 录音转豆包上传（TOS）";
-        } else {
-            cell.textLabel.text = _asrExpanded ? @"∨ 标准版语音识别资源 ID" : @"› 标准版语音识别资源 ID";
-        }
+        BOOL expanded = isTOS ? _tosExpanded : _asrExpanded;
+        // 标题只留主干，箭头交给右侧系统 chevron（不再把「›」写进文字里）
+        cell.textLabel.text = isTOS ? @"录音转豆包上传" : @"语音识别资源 ID";
         cell.textLabel.font = [UIFont systemFontOfSize:14];
-        cell.textLabel.textColor = [UIColor secondaryLabelColor];
+        cell.textLabel.textColor = [UIColor labelColor];
+        cell.accessoryView = nil;
         cell.accessoryType = UITableViewCellAccessoryNone;
+        UIView *chev = [self aweca_chevronExpanded:expanded];
+        if (chev) {
+            cell.accessoryView = chev;
+        } else if (!expanded) {
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
         return cell;
     }
 
@@ -256,6 +308,17 @@ static NSString *AWECATrimStr(NSString *s) {
 
 - (void)aweca_eyeTapped:(UIButton *)sender {
     (void)sender;   // cell 内部已切换明文；此处仅保留目标-动作链路
+}
+
+// 折叠指示箭头（展开朝下，收起朝右）；取不到系统图标时返回 nil 由调用方降级
+- (UIView *)aweca_chevronExpanded:(BOOL)expanded {
+    UIImage *img = [UIImage systemImageNamed:(expanded ? @"chevron.down" : @"chevron.right")];
+    if (!img) return nil;
+    UIImageView *iv = [[UIImageView alloc] initWithImage:img];
+    iv.frame = CGRectMake(0, 0, 13, 13);
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.tintColor = [UIColor tertiaryLabelColor];
+    return iv;
 }
 
 - (void)aweca_fieldEdited:(UITextField *)field {
