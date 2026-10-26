@@ -14,10 +14,11 @@
 #import "AWECAAPISettingsController.h"
 #import "AWECATTSVoiceListController.h"
 #import "SLLogViewController.h"
+#import "SLEntry.h"
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
-#define SLVersion @"0.4.4"
+#define SLVersion @"0.4.5"
 
 #pragma mark - 多行 footer
 
@@ -106,7 +107,7 @@ static UIView *SLMakeFooter(NSString *text) {
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return 2;   // 开关 + 引擎
+    if (section == 0) return 3;   // 开关 + 引擎 + 悬浮球图标
     if (section == 1) return 2;   // 音色库 + 情绪
     if (section == 2) return 1;   // 口令（语音格式内部固定走陌陌自己的编码链路，不再暴露）
     if (section == 3) return 1;   // API 凭证
@@ -174,7 +175,7 @@ static UIView *SLMakeFooter(NSString *text) {
             [sw addTarget:self action:@selector(sl_powerChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        } else {
+        } else if (ip.row == 1) {
             cell.textLabel.text = @"合成引擎";
             UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"火山引擎", @"Fish Audio"]];
             seg.frame = CGRectMake(0, 0, 186, 30);
@@ -182,6 +183,10 @@ static UIView *SLMakeFooter(NSString *text) {
             [seg addTarget:self action:@selector(sl_engineChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = seg;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else {
+            cell.textLabel.text = @"悬浮球图标";
+            cell.detailTextLabel.text = SLFloatIconSummary();
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
         return cell;
     }
@@ -229,6 +234,10 @@ static UIView *SLMakeFooter(NSString *text) {
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
+    if (ip.section == 0 && ip.row == 2) {
+        [self.navigationController pushViewController:[[SLFloatIconController alloc] init] animated:YES];
+        return;
+    }
     if (ip.section == 1 && ip.row == 0) {
         AWECATTSVoiceListController *vc = [[AWECATTSVoiceListController alloc] init];
         vc.fishMode = [AWECATTSManager shared].fishEngine;   // 关键：跟着引擎走，否则只能看到火山音色
