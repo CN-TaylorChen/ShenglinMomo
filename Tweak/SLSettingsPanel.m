@@ -1,5 +1,11 @@
 // 声临·陌陌版 设置面板
 // 复用声临的 TTS 引擎设置（火山/Fish）、音色库、情绪标签、API 凭证页
+//
+// v0.4.4 排版规则（解决长文案被截断）：
+//   R1 单元格右侧只放状态词（≤8 字），解释性长句一律下沉到分组 footer
+//   R2 footer 全部用自定义视图（UILabel numberOfLines = 0），不再用系统 titleForFooterInSection
+//   R3 折叠/跳转统一用系统 chevron，箭头不写进标题文字
+// v0.4.4 顺带删除「语音格式 AMR / 原始音频」开关（已是死代码）
 
 #import "SLSettingsPanel.h"
 #import "AWECATTSManager.h"
@@ -8,12 +14,33 @@
 #import "AWECAAPISettingsController.h"
 #import "AWECATTSVoiceListController.h"
 #import "SLLogViewController.h"
-#import "SLAMREncoder.h"
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
-#define kSLUseAMRKey  @"SLUseAMR"
-#define SLVersion @"0.4.3"
+#define SLVersion @"0.4.4"
+
+#pragma mark - 多行 footer
+
+// 系统 footer 在陌陌的 tableView 里会被算成单行并右侧截断，
+// 所以这里自己撑一个多行 label，高度交给自动布局。
+static UIView *SLMakeFooter(NSString *text) {
+    if (!text.length) return nil;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
+    UILabel *lab = [[UILabel alloc] init];
+    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    lab.numberOfLines = 0;
+    lab.font = [UIFont systemFontOfSize:12];
+    lab.textColor = [UIColor secondaryLabelColor];
+    lab.text = text;
+    [box addSubview:lab];
+    [NSLayoutConstraint activateConstraints:@[
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:18],
+        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-18],
+        [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
+        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
+    ]];
+    return box;
+}
 
 @interface SLSettingsPanel ()
 @property (nonatomic, strong) UISegmentedControl *engineSeg;
@@ -28,16 +55,29 @@
                                                                                           target:self
                                                                                           action:@selector(sl_close)];
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.tableView.estimatedSectionFooterHeight = 28;
+    self.tableView.estimatedSectionHeaderHeight = 26;
     self.tableView.tableHeaderView = [self sl_header];
 }
 
+// 顶部说明：两行讲完，高度按实际文本算，避免压字
 - (UIView *)sl_header {
-    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 72)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(18, 10, v.bounds.size.width - 36, 56)];
-    lab.numberOfLines = 3;
-    lab.font = [UIFont systemFontOfSize:12];
+    CGFloat w = self.view.bounds.size.width;
+    if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
+    NSString *text = [NSString stringWithFormat:@"输入框发「%@ 要说的话」，会自动换成 AI 音色语音发出；失败退回原文。", [self sl_command]];
+    CGFloat textW = w - 36;
+    UIFont *font = [UIFont systemFontOfSize:12];
+    CGRect r = [text boundingRectWithSize:CGSizeMake(textW, CGFLOAT_MAX)
+                                  options:NSStringDrawingUsesLineFragmentOrigin
+                               attributes:@{NSFontAttributeName: font}
+                                  context:nil];
+    CGFloat h = ceil(r.size.height);
+    UIView *v = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h + 24)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(18, 12, textW, h)];
+    lab.numberOfLines = 0;
+    lab.font = font;
     lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = [NSString stringWithFormat:@"在聊天输入框输入「%@ 要说的话」再点发送，插件会把这段文字转成所选 AI 音色的语音消息发出。\n合成/发送失败会自动退回发送原文。", [self sl_command]];
+    lab.text = text;
     [v addSubview:lab];
     return v;
 }
@@ -68,7 +108,7 @@
     (void)tv;
     if (section == 0) return 2;   // 开关 + 引擎
     if (section == 1) return 2;   // 音色库 + 情绪
-    if (section == 2) return 2;   // 口令 + 输出格式
+    if (section == 2) return 1;   // 口令（语音格式内部固定走陌陌自己的编码链路，不再暴露）
     if (section == 3) return 1;   // API 凭证
     return 1;                     // 运行日志
 }
@@ -76,6 +116,41 @@
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
     return @[@"基本", @"音色与情绪", @"发送方式", @"凭证", @"诊断"][section];
+}
+
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
+    (void)tv;
+    (void)section;
+    return nil;   // 全部改走 viewForFooterInSection
+}
+
+// footer 文案集中在一处，view 和高度用同一份，保证不压字
+// 每组都带 footer：既解释状态，也撑出分组间距（footer 高度为 0 时分组会粘在一起）
+- (NSString *)sl_footerForSection:(NSInteger)section {
+    if (section == 0) return @"切换引擎后需要在下方重新选择音色";
+    if (section == 1) return @"仅 Fish Audio 引擎支持情绪标签";
+    if (section == 2) return @"以该口令开头的文字才会转语音";
+    if (section == 3) return @"Key 只保存在本机，不会上传";
+    if (section == 4) return @"#tts 没反应时先看这里";
+    return nil;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)section {
+    (void)tv;
+    return SLMakeFooter([self sl_footerForSection:section]);
+}
+
+// 高度按文本实算（宽 = 表宽 - 左右各 18pt），不依赖自动布局估算，避免出现压字 / 半行
+- (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)section {
+    NSString *text = [self sl_footerForSection:section];
+    if (!text.length) return 0;
+    CGFloat w = tv.bounds.size.width - 36;
+    if (w <= 0) return UITableViewAutomaticDimension;
+    CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
+                                  options:NSStringDrawingUsesLineFragmentOrigin
+                               attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
+                                  context:nil];
+    return ceil(r.size.height) + 14;   // 上 5 + 下 7 + 2pt 余量
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
@@ -101,8 +176,8 @@
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else {
             cell.textLabel.text = @"合成引擎";
-            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"火山引擎", @"FishAudio"]];
-            seg.frame = CGRectMake(0, 0, 170, 30);
+            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"火山引擎", @"Fish Audio"]];
+            seg.frame = CGRectMake(0, 0, 186, 30);
             seg.selectedSegmentIndex = mgr.fishEngine ? 1 : 0;
             [seg addTarget:self action:@selector(sl_engineChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = seg;
@@ -116,51 +191,37 @@
             NSString *voice = mgr.fishEngine
                 ? (mgr.fishVoiceName.length ? mgr.fishVoiceName : @"未选择，点这里添加")
                 : (mgr.voiceName.length ? mgr.voiceName : @"未选择");
-            cell.textLabel.text = mgr.fishEngine ? @"FishAudio 音色库" : @"火山音色库";
+            cell.textLabel.text = mgr.fishEngine ? @"Fish Audio 音色库" : @"火山音色库";
             cell.detailTextLabel.text = voice;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             cell.textLabel.text = @"情绪标签";
-            NSString *note = mgr.fishEmotionSel.count
+            cell.detailTextLabel.text = mgr.fishEmotionSel.count
                 ? [NSString stringWithFormat:@"已选 %lu 个", (unsigned long)mgr.fishEmotionSel.count]
-                : @"未启用（仅 FishAudio 支持）";
-            cell.detailTextLabel.text = note;
+                : @"未启用";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         }
         return cell;
     }
 
     if (ip.section == 2) {
-        if (ip.row == 0) {
-            cell.textLabel.text = @"触发口令";
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"当前：%@（点此修改）", [self sl_command]];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        } else {
-            cell.textLabel.text = @"语音格式";
-            UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:@[@"AMR", @"原始音频"]];
-            seg.frame = CGRectMake(0, 0, 150, 30);
-            NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-            BOOL useAMR = [d objectForKey:kSLUseAMRKey] ? [d boolForKey:kSLUseAMRKey] : YES;
-            seg.selectedSegmentIndex = useAMR ? 0 : 1;
-            [seg addTarget:self action:@selector(sl_formatChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = seg;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            cell.detailTextLabel.text = [SLAMREncoder available] ? @"陌陌语音消息用 AMR；听不了可改原始音频" : @"未内置 AMR 编码器，将直接发送原始音频";
-        }
+        cell.textLabel.text = @"触发口令";
+        cell.detailTextLabel.text = [self sl_command];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
 
     if (ip.section == 3) {
         cell.textLabel.text = @"API 凭证";
         cell.detailTextLabel.text = mgr.fishEngine
-            ? (mgr.fishAPIKey.length ? @"FishAudio Key 已配置" : @"未配置 FishAudio Key")
-            : (mgr.appID.length ? @"火山 Key 已配置" : @"未配置火山凭证");
+            ? (mgr.fishAPIKey.length ? @"Fish Audio 已配置" : @"未配置 Fish Audio")
+            : (mgr.appID.length ? @"火山已配置" : @"未配置火山");
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
 
     cell.textLabel.text = @"运行日志";
-    cell.detailTextLabel.text = @"排查 #tts 没反应时点这里，可直接复制";
+    cell.detailTextLabel.text = @"点此查看";
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
 }
@@ -230,12 +291,6 @@
     mgr.fishEngine = (seg.selectedSegmentIndex == 1);
     [mgr saveConfig];
     [self.tableView reloadData];
-}
-
-- (void)sl_formatChanged:(UISegmentedControl *)seg {
-    BOOL useAMR = (seg.selectedSegmentIndex == 0);
-    [[NSUserDefaults standardUserDefaults] setBool:useAMR forKey:kSLUseAMRKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 @end
