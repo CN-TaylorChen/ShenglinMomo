@@ -30,7 +30,7 @@
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 
-#define SLVersion @"0.4.9.3"
+#define SLVersion @"0.4.9.4"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
