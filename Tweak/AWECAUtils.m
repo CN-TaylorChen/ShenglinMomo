@@ -98,6 +98,11 @@ static BOOL loadArchiveLibrary(void) {
 
 #pragma mark - Toast
 
+// v0.4.9.1：同一时刻只保留一条 toast。
+// 之前连续两次 showToast（如「合成成功」+「已就绪」）会在同一位置叠出两个黑框，
+// 后一条盖不住前一条，看着像界面串了。
+static __weak UILabel *sSLCurrentToast = nil;
+
 + (void)showToast:(NSString *)message {
     [self showToast:message duration:1.8];
 }
@@ -117,6 +122,14 @@ static BOOL loadArchiveLibrary(void) {
             }
         }
         if (!keyWindow) return;
+
+        // 先撤掉上一条，避免叠影
+        UILabel *old = sSLCurrentToast;
+        sSLCurrentToast = nil;
+        if (old) {
+            [old.layer removeAllAnimations];
+            [old removeFromSuperview];
+        }
 
         UILabel *toastLabel = [[UILabel alloc] init];
         toastLabel.text = message;
@@ -142,6 +155,7 @@ static BOOL loadArchiveLibrary(void) {
                                       width, height);
 
         [keyWindow addSubview:toastLabel];
+        sSLCurrentToast = toastLabel;
 
         [UIView animateWithDuration:0.3 animations:^{
             toastLabel.alpha = 1;
@@ -149,8 +163,9 @@ static BOOL loadArchiveLibrary(void) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(duration * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [UIView animateWithDuration:0.3 animations:^{
                     toastLabel.alpha = 0;
-                } completion:^(BOOL finished) {
+                } completion:^(BOOL finished2) {
                     [toastLabel removeFromSuperview];
+                    if (sSLCurrentToast == toastLabel) sSLCurrentToast = nil;
                 }];
             });
         }];
