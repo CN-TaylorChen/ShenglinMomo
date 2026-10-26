@@ -20,19 +20,18 @@ static NSString *SLPackCmdValue(void) {
 }
 
 // 标题 / footer / 单元格文字统一左基线（跟设置页同一套算法）
+// v0.4.9.7：不再调 rectForRowAtIndexPath —— 它内部要算分区总高，而分区总高又要问
+// heightForFooterInSection，那个方法反过来要这个值，形成无限递归（0.4.9.6 语音包页闪退的根因）。
+// 只读已经存在的 cell，读不到就用 insetGrouped 的固定值。
 static CGFloat SLPackMeasureLeading(UITableView *tv) {
     for (UITableViewCell *c in tv.visibleCells) {
         UILabel *lab = c.textLabel;
         if (!lab || lab.hidden || !lab.text.length) continue;
+        if (c.imageView.image) continue;     // 带图标的行文字被推右，不能当基准
         CGFloat x = CGRectGetMinX(c.frame) + CGRectGetMinX(lab.frame);
         if (x > 0) return x;
     }
-    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
-        if ([tv numberOfRowsInSection:s] <= 0) continue;
-        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (r.size.width > 0) return CGRectGetMinX(r) + 16;
-    }
-    return 36;
+    return 36;   // 卡片左缘 20 + 内边距 16
 }
 
 static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
@@ -101,7 +100,10 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
                                                       target:self
                                                       action:@selector(sl_addTapped)];
+    // 留痕：万一还有问题，日志能区分「页面没建完」和「表格结构算错」
+    SLLog(@"PACK-PAGE open root=%d folder=%@", (int)self.isRoot, self.folder ?: @"-");
     [self sl_reload];
+    SLLog(@"PACK-PAGE ready root=%d", (int)self.isRoot);
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -119,14 +121,10 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
     return self.slLeading;
 }
 
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    CGFloat m = SLPackMeasureLeading(self.tableView);
-    if (m > 0 && fabs(m - self.slLeading) > 0.5) {
-        self.slLeading = m;
-        [self.tableView reloadData];
-    }
-}
+// v0.4.9.7：删掉 viewDidLayoutSubviews 里的 reloadData。
+// 一级页同时有「文件夹行（带图标，文字 x≈46）」和「开关/音频行（无图标，x≈36）」，
+// 逐帧测出来的值会 36↔46 来回跳，于是每次布局都重新加载表格 —— 布局里重建表格正是崩溃来源。
+// 现在测量是纯读 cell、值恒定，不需要再校正。
 
 - (void)sl_reload {
     [SLVoicePack syncFromDisk];            // 手工放进目录的音频也能自动出现
@@ -140,6 +138,9 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
     } else {
         self.items = [SLVoicePack packsInFolder:self.folder];
     }
+    SLLog(@"PACK-PAGE data root=%d folders=%lu ungrouped=%lu items=%lu",
+          (int)self.isRoot, (unsigned long)self.folderList.count,
+          (unsigned long)self.ungrouped.count, (unsigned long)self.items.count);
     [self.tableView reloadData];
 }
 
@@ -422,7 +423,9 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)section {
     NSString *t = [self sl_footerTextForSection:section];
     if (!t.length) return 0;
-    CGFloat w = tv.bounds.size.width - [self sl_leadingForTableView:tv] - 16;
+    // 固定留出「左基线 36 + 右边距 16 + 余量」，不在这里调测量函数：
+    // 测量一旦走 rectForRow 就和本方法互相递归。宁可多留一点高度，也不能压字。
+    CGFloat w = tv.bounds.size.width - 68;
     if (w <= 0) return UITableViewAutomaticDimension;
     CGRect r = [t boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
                                options:NSStringDrawingUsesLineFragmentOrigin
