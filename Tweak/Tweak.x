@@ -278,6 +278,11 @@ static NSString *SLTextAfterCommand(NSString *text) {
     return rest;
 }
 
+// 合成口令或语音包口令，任一成立就算「带口令」（供输入框扫描用）
+static BOOL SLTextHasAnyCommand(NSString *text) {
+    return SLTextHasCommand(text) || SLHasPrefixCommand(text, SLPackCommand());
+}
+
 static NSString *SLShorten(NSString *s, NSUInteger max) {
     if (![s isKindOfClass:[NSString class]]) return @"(nil)";
     if (s.length <= max) return s;
