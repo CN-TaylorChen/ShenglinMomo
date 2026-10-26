@@ -4,11 +4,13 @@
 #import "AWECATTSVoiceListController.h"
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
+#import "SLVoiceImportController.h"
 #import <objc/runtime.h>
 #import <PhotosUI/PhotosUI.h>
 
 #define kAWECARecommendedVoices @"AWECARecommendedVoices"
 #define kAWECACustomVoices @"AWECACustomVoices"
+#define kAWECFishFavorites @"AWECFishFavorites"   // v0.4.9 收藏音色（存 voiceType 数组）
 
 typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     AWECAVoiceSectionCustom = 0,
@@ -28,6 +30,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 @property (nonatomic, strong) NSArray<NSDictionary *> *filteredRecommended;
 @property (nonatomic, strong) NSArray<NSDictionary *> *filteredAll;
 @property (nonatomic, copy) NSString *searchText;
+@property (nonatomic, strong) NSMutableArray<NSString *> *favorites;        // 收藏的 voiceType（顺序即置顶顺序）
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *filteredFavorites;
 @property (nonatomic, copy) NSString *pendingAvatarVoiceID;   // 正在为哪个音色选图
 @end
 
@@ -44,11 +48,14 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [self buildVoiceData];
     [self loadCustomVoices];
     [self loadRecommended];
+    [self loadFavorites];
 
     self.title = [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];   // 两个引擎统一叫「音色」
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
-    UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(addCustomVoice)];
+    UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
+                                                                          target:self
+                                                                          action:(self.fishMode ? @selector(aweca_addMenu) : @selector(addCustomVoice))];
     self.navigationItem.rightBarButtonItem = addBtn;
 
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, self.fishMode ? 56 : 44)];
@@ -60,7 +67,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [footer addSubview:verLabel];
     if (self.fishMode) {
         UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, 22, self.view.bounds.size.width, 20)];
-        hint.text = @"音色 ID 取自 fish.audio 音色详情页 · 长按音色可自定义头像图片";
+        hint.text = @"左滑可收藏（收藏置顶） · 长按音色可换头像 · ＋ 可导入 Fish 音色";
         hint.textAlignment = NSTextAlignmentCenter;
         hint.font = [UIFont systemFontOfSize:11];
         hint.textColor = [UIColor tertiaryLabelColor];
@@ -77,6 +84,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     self.filteredCustom = [self.customVoices mutableCopy];
     self.filteredRecommended = [self.recommendedVoices mutableCopy];
     self.filteredAll = self.allVoices;
+    [self rebuildFilteredFavorites];
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -308,6 +316,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         self.filteredCustom = [self.customVoices mutableCopy];
         self.filteredRecommended = [self.recommendedVoices mutableCopy];
         self.filteredAll = self.allVoices;
+        [self rebuildFilteredFavorites];
         return;
     }
     NSString *q = self.searchText.lowercaseString;
@@ -318,11 +327,76 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     self.filteredCustom = [[self.customVoices filteredArrayUsingPredicate:pred] mutableCopy];
     self.filteredRecommended = [[self.recommendedVoices filteredArrayUsingPredicate:pred] mutableCopy];
     self.filteredAll = [self.allVoices filteredArrayUsingPredicate:pred];
+    [self rebuildFilteredFavorites];
+}
+
+#pragma mark - 收藏（v0.4.9）
+
+- (void)loadFavorites {
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kAWECFishFavorites];
+    self.favorites = [saved isKindOfClass:[NSArray class]] ? [saved mutableCopy] : [NSMutableArray array];
+    if (!self.filteredFavorites) self.filteredFavorites = [NSMutableArray array];
+}
+
+- (void)saveFavorites {
+    [[NSUserDefaults standardUserDefaults] setObject:[self.favorites copy] ?: @[] forKey:kAWECFishFavorites];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+- (BOOL)isFavorite:(NSString *)vid {
+    return vid.length && [self.favorites containsObject:vid];
+}
+
+// 收藏分区：按收藏顺序排列（新收藏在前），并跟随搜索过滤
+- (void)rebuildFilteredFavorites {
+    NSMutableArray *out = [NSMutableArray array];
+    if (!self.favorites.count) { self.filteredFavorites = out; return; }
+
+    NSMutableArray *pool = [NSMutableArray array];
+    [pool addObjectsFromArray:self.customVoices];
+    [pool addObjectsFromArray:self.recommendedVoices];
+    NSMutableDictionary *byVid = [NSMutableDictionary dictionary];
+    for (NSDictionary *v in pool) {
+        NSString *vid = v[@"voiceType"];
+        if (vid.length && !byVid[vid]) byVid[vid] = v;
+    }
+    NSString *q = self.searchText.lowercaseString;
+    for (NSString *vid in self.favorites) {
+        NSDictionary *v = byVid[vid];
+        if (!v) continue;   // 音色已被删除
+        if (q.length) {
+            NSString *name = [v[@"name"] lowercaseString] ?: @"";
+            if (![name containsString:q] && ![[vid lowercaseString] containsString:q]) continue;
+        }
+        [out addObject:v];
+    }
+    self.filteredFavorites = out;
+}
+
+// 左滑「收藏 / 取消收藏」，收藏后立刻置顶到分区 0
+- (void)aweca_toggleFavoriteForVoice:(NSString *)vid {
+    if (!vid.length) return;
+    if ([self.favorites containsObject:vid]) {
+        [self.favorites removeObject:vid];
+        [AWECAUtils showToast:@"已取消收藏"];
+    } else {
+        [self.favorites insertObject:vid atIndex:0];
+        [AWECAUtils showToast:@"已收藏，已置顶"];
+    }
+    [self saveFavorites];
+    [self filterVoices];
+    [self.tableView reloadData];
 }
 
 #pragma mark - 数据源
 
 - (NSArray<NSDictionary *> *)listForSection:(NSInteger)section {
+    // Fish 模式：0 = 收藏（置顶） 1 = 我导入的（手动添加 + 导入），与内置库分开
+    if (self.fishMode) {
+        if (section == 0) return self.filteredFavorites ?: @[];
+        if (section == 1) return self.filteredCustom ?: @[];
+        return @[];
+    }
     switch (section) {
         case AWECAVoiceSectionCustom: return self.filteredCustom;
         case AWECAVoiceSectionRecommended: return self.filteredRecommended;
@@ -333,7 +407,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     if (self.emotionMode) return 1;
-    return self.fishMode ? 1 : AWECAVoiceSectionCount;
+    return self.fishMode ? 2 : AWECAVoiceSectionCount;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -347,7 +421,10 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         return [NSString stringWithFormat:@"全部标签 (%lu) · 已选 %lu 个",
                 (unsigned long)mgr.fishEmotionAll.count, (unsigned long)mgr.fishEmotionSel.count];
     }
-    if (self.fishMode) return [NSString stringWithFormat:@"我的音色 (%lu) · 长按自定义头像", (unsigned long)self.filteredCustom.count];
+    if (self.fishMode) {
+        if (section == 0) return [NSString stringWithFormat:@"收藏 (%lu)", (unsigned long)self.filteredFavorites.count];
+        return [NSString stringWithFormat:@"我导入的音色 (%lu)", (unsigned long)self.filteredCustom.count];
+    }
     switch (section) {
         case AWECAVoiceSectionCustom: return [NSString stringWithFormat:@"我的音色 (%lu)", (unsigned long)self.filteredCustom.count];
         case AWECAVoiceSectionRecommended: return @"推荐音色";
@@ -441,7 +518,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         cell.imageView.image = [self aweca_avatarImageForVoice:voice size:40];
         cell.imageView.layer.cornerRadius = 20;
         cell.imageView.layer.masksToBounds = YES;
-        cell.textLabel.text = name;
+        // 收藏的音色加 ★ 前缀（收藏分区本身就置顶，这里做视觉标识）
+        cell.textLabel.text = [self isFavorite:type] ? [NSString stringWithFormat:@"★ %@", name] : name;
         cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
     } else {
         cell.textLabel.text = [NSString stringWithFormat:@"%@  %@", name, type];
@@ -549,7 +627,13 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         return [UISwipeActionsConfiguration configurationWithActions:@[removeAction, editAction]];
     }
 
-    if (indexPath.section == AWECAVoiceSectionCustom) {
+    // 收藏分区：只提供「取消收藏」
+    if (self.fishMode && indexPath.section == 0) {
+        return [self aweca_configActions:@[] forIndexPath:indexPath];
+    }
+
+    NSInteger customSec = self.fishMode ? 1 : AWECAVoiceSectionCustom;
+    if (indexPath.section == customSec) {
         NSDictionary *voice = self.filteredCustom[indexPath.row];
         NSString *name = voice[@"name"];
         NSString *vid = voice[@"voiceType"];
@@ -629,7 +713,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             [AWECAUtils showToast:[NSString stringWithFormat:@"已删除: %@", name]];
             completionHandler(YES);
         }];
-        return [UISwipeActionsConfiguration configurationWithActions:@[removeAction, editAction]];
+        return [self aweca_configActions:@[removeAction, editAction] forIndexPath:indexPath];
 
     } else if (indexPath.section == AWECAVoiceSectionRecommended) {
         UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
@@ -640,7 +724,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             [tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
             completionHandler(YES);
         }];
-        return [UISwipeActionsConfiguration configurationWithActions:@[removeAction]];
+        return [self aweca_configActions:@[removeAction] forIndexPath:indexPath];
 
     } else if (indexPath.section == AWECAVoiceSectionAll) {
         NSDictionary *voice = self.filteredAll[indexPath.row];
@@ -660,9 +744,73 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             completionHandler(YES);
         }];
         addAction.backgroundColor = [UIColor systemBlueColor];
-        return [UISwipeActionsConfiguration configurationWithActions:@[addAction]];
+        return [self aweca_configActions:@[addAction] forIndexPath:indexPath];
     }
     return nil;
+}
+
+#pragma mark - 左滑动作组装 / 导入入口（v0.4.9）
+
+// 统一在左侧插入「收藏 / 取消收藏」（仅 Fish 模式）
+- (UISwipeActionsConfiguration *)aweca_configActions:(NSArray<UIContextualAction *> *)actions
+                                        forIndexPath:(NSIndexPath *)ip {
+    NSMutableArray *list = [actions mutableCopy] ?: [NSMutableArray array];
+    if (self.fishMode) {
+        NSArray *rows = [self listForSection:ip.section];
+        if (ip.row < (NSInteger)rows.count) {
+            NSDictionary *voice = rows[ip.row];
+            NSString *vid = voice[@"voiceType"];
+            BOOL fav = [self isFavorite:vid];
+            UIContextualAction *favAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                title:(fav ? @"取消收藏" : @"收藏")
+                handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+                [self aweca_toggleFavoriteForVoice:vid];
+                completionHandler(YES);
+            }];
+            favAction.backgroundColor = fav ? [UIColor systemGrayColor] : [UIColor systemOrangeColor];
+            [list insertObject:favAction atIndex:0];
+        }
+    }
+    return [UISwipeActionsConfiguration configurationWithActions:list];
+}
+
+- (void)aweca_addMenu {
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
+                                                                  message:@"添加 Fish 音色"
+                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) ws = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"从 Fish 导入（我的音色 / 搜公开库）"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *a) {
+        [ws aweca_pushImportWithMode:SLImportModeMine];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"粘贴 JSON 导入"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *a) {
+        [ws aweca_pushImportWithMode:SLImportModePaste];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"手动填写音色 ID"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *a) {
+        [ws addCustomVoice];
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    sheet.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)aweca_pushImportWithMode:(SLImportMode)mode {
+    SLVoiceImportController *vc = [[SLVoiceImportController alloc] init];
+    vc.initialMode = mode;
+    __weak typeof(self) ws = self;
+    vc.onImported = ^(NSInteger added, NSInteger updated) {
+        [ws loadCustomVoices];
+        [ws filterVoices];
+        [ws.tableView reloadData];
+        [AWECAUtils showToast:[NSString stringWithFormat:@"导入 %ld 个，更新 %ld 个", (long)added, (long)updated]
+                     duration:2.0];
+    };
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 #pragma mark - 试听
