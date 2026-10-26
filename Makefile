@@ -13,6 +13,8 @@ ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/SLPipeline.m \
 	Tweak/SLEntry.m \
 	Tweak/SLAMREncoder.m \
+	Tweak/SLLog.m \
+	Tweak/SLLogViewController.m \
 	Tweak/AWECAUtils.m \
 	Tweak/AWECATTSManager.m \
 	Tweak/AWECATOSUploader.m \
