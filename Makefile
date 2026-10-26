@@ -19,6 +19,8 @@ ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/AWECAUtils.m \
 	Tweak/AWECATTSManager.m \
 	Tweak/AWECATOSUploader.m \
+	Tweak/SLAlignBox.m \
+	Tweak/SLAPIBackup.m \
 	Tweak/AWECAAPISettingsController.m \
 	Tweak/AWECATTSVoiceListController.m \
 	Tweak/SLVoiceImportController.m \
