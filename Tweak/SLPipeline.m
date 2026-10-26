@@ -43,6 +43,10 @@ static NSString *SLASRCodeHint(NSString *code) {
     return nil;
 }
 
+@interface SLPipeline ()
+@property (nonatomic, copy) NSString *lastRawAudioPath;
+@end
+
 @implementation SLPipeline
 
 + (instancetype)shared {
@@ -170,6 +174,7 @@ static NSString *SLASRCodeHint(NSString *code) {
             return;
         }
         double dur = [AWECAUtils audioDurationAtPath:audioPath];
+        self.lastRawAudioPath = audioPath;   // 留给 Opus 编码取 PCM（AMR 解不回来）
         NSString *finalPath = audioPath;
         if ([self shouldEncodeAMR] && [SLAMREncoder available]) {
             NSString *amrPath = [[self outputDir] stringByAppendingPathComponent:
