@@ -235,6 +235,66 @@ static NSString *SLRelOfPath(NSString *path) {
     return YES;
 }
 
++ (BOOL)renameFolder:(NSString *)oldName to:(NSString *)newName error:(NSString **)err {
+    if (![oldName isKindOfClass:[NSString class]] || !oldName.length
+        || [oldName isEqualToString:@"未分组"]) {
+        if (err) *err = @"这个文件夹不能改名";
+        return NO;
+    }
+    NSString *n = SLSafeName(newName);
+    if (!n.length || [n isEqualToString:@"未分组"]) {
+        if (err) *err = @"名字不能用";
+        return NO;
+    }
+    if ([n isEqualToString:oldName]) return YES;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *src = [[self rootDir] stringByAppendingPathComponent:oldName];
+    NSString *dst = [[self rootDir] stringByAppendingPathComponent:n];
+    BOOL isDir = NO;
+    if (![fm fileExistsAtPath:src isDirectory:&isDir] || !isDir) {
+        if (err) *err = @"文件夹不在了";
+        return NO;
+    }
+    if ([fm fileExistsAtPath:dst]) {
+        if (err) *err = @"已有同名文件夹";
+        return NO;
+    }
+    NSError *e = nil;
+    [fm moveItemAtPath:src toPath:dst error:&e];
+    if (e) {
+        if (err) *err = e.localizedDescription;
+        return NO;
+    }
+
+    // 索引里的 folder 与 rel 一起跟着改，否则列表还在指着旧路径
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *list = [NSMutableArray array];
+    id raw = [d objectForKey:kSLPacksKey];
+    NSString *oldPrefix = [oldName stringByAppendingString:@"/"];
+    if ([raw isKindOfClass:[NSArray class]]) {
+        for (id item in raw) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            NSMutableDictionary *m = [item mutableCopy];
+            NSString *f = m[@"folder"];
+            NSString *rel = m[@"rel"];
+            if ([f isEqualToString:oldName] && [rel isKindOfClass:[NSString class]] && [rel hasPrefix:oldPrefix]) {
+                m[@"folder"] = n;
+                m[@"rel"] = [n stringByAppendingPathComponent:[rel substringFromIndex:oldPrefix.length]];
+            }
+            [list addObject:m];
+        }
+    }
+    [d setObject:list forKey:kSLPacksKey];
+    NSString *sel = [d stringForKey:kSLPackSelKey];
+    if (sel.length && [sel hasPrefix:oldPrefix]) {
+        [d setObject:[n stringByAppendingPathComponent:[sel substringFromIndex:oldPrefix.length]] forKey:kSLPackSelKey];
+    }
+    [d synchronize];
+    SLLog(@"pack rename folder %@ -> %@", oldName, n);
+    return YES;
+}
+
 + (BOOL)movePack:(NSDictionary *)pack toFolder:(NSString *)folder error:(NSString **)err {
     NSString *src = [self pathOfPack:pack];
     if (!src.length) { if (err) *err = @"文件不在了"; return NO; }
