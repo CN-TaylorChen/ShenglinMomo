@@ -19,7 +19,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9"
+#define SLVersion @"0.4.9.1"
 
 #pragma mark - 多行 footer
 
@@ -73,7 +73,8 @@ static UIView *SLMakeFooter(NSString *text) {
 - (UIView *)sl_header {
     CGFloat w = self.view.bounds.size.width;
     if (w <= 0) w = [UIScreen mainScreen].bounds.size.width;
-    NSString *text = [NSString stringWithFormat:@"输入框发「%@ 要说的话」，会自动换成AI合成语音发出；失败退回原文。", [self sl_command]];
+    // v0.4.9.1 文案规范：中英之间加空格、分号处换行、句末不加句号
+    NSString *text = [NSString stringWithFormat:@"输入框发「%@ 要说的话」，会自动换成 AI 合成语音发出\n失败时退回原文", [self sl_command]];
     CGFloat textW = w - 36;
     UIFont *font = [UIFont systemFontOfSize:12];
     CGRect r = [text boundingRectWithSize:CGSizeMake(textW, CGFLOAT_MAX)
@@ -138,8 +139,8 @@ static UIView *SLMakeFooter(NSString *text) {
 // 每组都带 footer：既解释状态，也撑出分组间距（footer 高度为 0 时分组会粘在一起）
 - (NSString *)sl_footerForSection:(NSInteger)section {
     if (section == 0) return @"切换引擎后需要在下方重新选择音色";
-    if (section == 1) return @"仅 Fish Audio 引擎支持情绪标签";
-    if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音；短录音补全：录音比AI语音短时自动补足全长，不必录完。";
+    if (section == 1) return @"仅 Fish Audio 引擎支持情绪";
+    if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
     if (section == 3) return @"Key 只保存在本机，不会上传";
     if (section == 4) return @"没反应时先看这里";
     return nil;
@@ -213,7 +214,7 @@ static UIView *SLMakeFooter(NSString *text) {
             cell.detailTextLabel.text = voice;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (ip.row == 1) {
-            cell.textLabel.text = @"情绪标签";
+            cell.textLabel.text = @"情绪";
             cell.detailTextLabel.text = mgr.fishEmotionSel.count
                 ? [NSString stringWithFormat:@"已选 %lu 个", (unsigned long)mgr.fishEmotionSel.count]
                 : @"未启用";
