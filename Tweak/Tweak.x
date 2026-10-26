@@ -27,7 +27,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.9"
+#define SLVersion @"0.4.0"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -351,6 +351,8 @@ static double gSLTTSAudioDur = 0;
 static NSTimeInterval gSLArmedAt = 0;   // #tts 装填时刻（锁定“本次录音刚写的文件”）
 static int gSLRecDump = 0;
 static int gSLModelDump = 0;
+static NSString *gSLTempRecPath = nil;  // 陌陌录音机的临时文件路径（setTempAudioPath: 时捕获）
+static int gSLMethDump = 0;
 
 // 深层 dump model：含父类 ivar + 所有 property 值
 static void SLDumpModelDeep(id model) {
@@ -635,6 +637,158 @@ static NSString *SLNewestRecordFileSince(NSTimeInterval since) {
     return best;
 }
 
+// —— v0.4.0：按语音消息 body 里的 file token 精确定位陌陌真实录音文件 ——
+//
+// 真机日志 MODEL-DEEP 已给出铁证：
+//   body = http://www.immomo.com/chataudio?mode=GUID&filesize=0&file=3B9-F2528F92A310
+//          &audiotime=14&ext=amr&ft=1&dummy=1
+// 这个 file token 就是陌陌给这段录音起的文件名。按它在容器里按文件名搜 → 精确定位，
+// 比「扫最新音频文件」可靠得多（v0.3.9 的扫描一个候选都没找到，说明录音既不在
+// Documents/Library/Caches/tmp，也可能没有扩展名 → 只能按名字搜）。
+
+// 容器根：自己的沙盒 + 自己可见的 AppGroup（共享容器）
+static NSArray *SLSearchRoots(void) {
+    NSMutableArray *roots = [NSMutableArray array];
+    [roots addObject:NSHomeDirectory()];
+    NSString *shared = @"/var/mobile/Containers/Shared/AppGroup";
+    NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:shared error:nil];
+    for (NSString *n in names) {
+        if (n.length) [roots addObject:[shared stringByAppendingPathComponent:n]];
+    }
+    return roots;
+}
+
+// 按文件名片段全容器找文件（file token）
+static NSString *SLFindFileByToken(NSString *token) {
+    if (![token isKindOfClass:[NSString class]] || token.length < 5) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    int scanned = 0;
+    for (NSString *root in SLSearchRoots()) {
+        NSDirectoryEnumerator *e = [fm enumeratorAtPath:root];
+        if (!e) continue;
+        NSString *sub;
+        while ((sub = [e nextObject])) {
+            if (scanned++ > 60000) break;
+            NSString *name = [sub lastPathComponent];
+            if ([name rangeOfString:token options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
+            NSString *fp = [root stringByAppendingPathComponent:sub];
+            BOOL isDir = NO;
+            if (![fm fileExistsAtPath:fp isDirectory:&isDir] || isDir) continue;
+            if (SLIsOurOwnFile(fp)) continue;
+            NSDictionary *a = [fm attributesOfItemAtPath:fp error:nil];
+            SLLog(@"TOKEN hit %@ name=%@ size=%lld", fp, name, (long long)[a fileSize]);
+            return fp;
+        }
+    }
+    return nil;
+}
+
+// 在指定目录里找「since 之后被写过」的最新音频文件（录音临时目录）
+static NSString *SLNewestAudioInDir(NSString *dir, NSTimeInterval since) {
+    if (![dir isKindOfClass:[NSString class]] || dir.length == 0) return nil;
+    static NSArray *exts = nil;
+    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *names = [fm contentsOfDirectoryAtPath:dir error:nil];
+    NSString *best = nil;
+    NSTimeInterval bestT = 0;
+    for (NSString *n in names) {
+        NSString *fp = [dir stringByAppendingPathComponent:n];
+        if (![exts containsObject:fp.pathExtension.lowercaseString]) continue;
+        if (SLIsOurOwnFile(fp)) continue;
+        NSDictionary *a = [fm attributesOfItemAtPath:fp error:nil];
+        NSTimeInterval t = [a[NSFileModificationDate] timeIntervalSince1970];
+        if (t >= (since - 2.0) && t > bestT) { bestT = t; best = fp; }
+    }
+    return best;
+}
+
+// 诊断：列出自 since 起被改过的「最近 6 个文件」（不限扩展名），
+// 用来在「找不到录音文件」时暴露陌陌到底把它写在哪（可能是无扩展名的 GUID 文件）。
+static NSString *SLDiagRecentFiles(NSTimeInterval since) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray *hits = [NSMutableArray array];   // [mtime, path]
+    int scanned = 0;
+    for (NSString *root in @[NSHomeDirectory(), NSTemporaryDirectory()]) {
+        NSDirectoryEnumerator *e = [fm enumeratorAtPath:root];
+        if (!e) continue;
+        NSString *sub;
+        while ((sub = [e nextObject])) {
+            if (scanned++ > 20000) break;
+            NSString *fp = [root stringByAppendingPathComponent:sub];
+            if ([fp rangeOfString:@"/ShenglinMomo/"].location != NSNotFound) continue;
+            NSDictionary *a = [fm attributesOfItemAtPath:fp error:nil];
+            if (!a) continue;
+            if ([a[NSFileType] isEqualToString:NSFileTypeDirectory]) continue;
+            NSTimeInterval t = [a[NSFileModificationDate] timeIntervalSince1970];
+            if (t < since - 2.0) continue;
+            [hits addObject:[NSString stringWithFormat:@"%.0f|%lld|%@", t, (long long)[a fileSize], fp]];
+        }
+    }
+    [hits sortUsingSelector:@selector(compare:)];
+    NSUInteger n = hits.count;
+    if (n > 6) hits = [[hits subarrayWithRange:NSMakeRange(n - 6, 6)] mutableCopy];
+    return hits.count ? [hits componentsJoinedByString:@" ;; "] : @"(none)";
+}
+
+// 取 body 里 key=value 的 value（到 & 或结尾）
+static NSString *SLBodyValue(NSString *body, NSString *key) {
+    if (![body isKindOfClass:[NSString class]] || body.length == 0) return nil;
+    NSString *needle = [key stringByAppendingString:@"="];
+    NSRange r = [body rangeOfString:needle];
+    if (r.location == NSNotFound) return nil;
+    NSUInteger start = r.location + r.length;
+    if (start >= body.length) return nil;
+    NSRange amp = [body rangeOfString:@"&" options:0 range:NSMakeRange(start, body.length - start)];
+    NSUInteger end = (amp.location == NSNotFound) ? body.length : amp.location;
+    if (end <= start) return nil;
+    return [body substringWithRange:NSMakeRange(start, end - start)];
+}
+
+// 把 body 里 audiotime=N 改成我们的真实时长（单位：秒，按 timeRaw/audiotime 对照确认）
+static NSString *SLBodySetAudioTime(NSString *body, double dur) {
+    if (![body isKindOfClass:[NSString class]] || body.length == 0) return body;
+    long long secs = (long long)llround(dur);
+    if (secs < 1) secs = 1;
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"audiotime=\\d+"
+                                                                       options:0 error:nil];
+    if (!re) return body;
+    return [re stringByReplacingMatchesInString:body options:0 range:NSMakeRange(0, body.length)
+                                   withTemplate:[NSString stringWithFormat:@"audiotime=%lld", secs]];
+}
+
+// 把 AI 音频原地写进陌陌的真实录音文件（必须 atomically:NO：换 inode 陌陌读到的还是旧内容）
+static BOOL SLOverwriteWithAI(NSString *target) {
+    if (![target isKindOfClass:[NSString class]] || target.length == 0) return NO;
+    if (![gSLTTSAudioPath isKindOfClass:[NSString class]] || gSLTTSAudioPath.length == 0) return NO;
+    NSData *payload = [NSData dataWithContentsOfFile:gSLTTSAudioPath];
+    if (payload.length == 0) {
+        SLLog(@"OVERWRITE read AI failed: %@", gSLTTSAudioPath);
+        return NO;
+    }
+    BOOL ok = [payload writeToFile:target atomically:NO];
+    SLLog(@"OVERWRITE target=%@ ok=%d size=%lu aiExt=%@",
+          target, ok, (unsigned long)payload.length, [gSLTTSAudioPath pathExtension]);
+    return ok;
+}
+
+// 一次性 dump MDAudioRecorder 的方法名（万一还要再深挖）
+static void SLDumpMethodNames(id obj) {
+    if (!obj) return;
+    Class c = [obj class];
+    NSMutableArray *names = [NSMutableArray array];
+    while (c && c != [NSObject class] && names.count < 200) {
+        unsigned int mc = 0;
+        Method *ms = class_copyMethodList(c, &mc);
+        for (unsigned i = 0; i < mc && names.count < 200; i++) {
+            [names addObject:NSStringFromSelector(method_getName(ms[i]))];
+        }
+        free(ms);
+        c = class_getSuperclass(c);
+    }
+    SLLog(@"RECORDER-METHODS %@", [names componentsJoinedByString:@" "]);
+}
+
 #pragma mark - #tts 处理（录音替换：装填 AI 音频，等真实录音时覆盖）
 
 static void SLArmTTS(id handler,
@@ -775,13 +929,76 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
 
 #pragma mark - 钩子 4：MDChatBaseHander -sendAudioMessage:audioTime:audioFileSize:（诊断用，抓语音 model 结构）
 
-static void SLSendAudioMessageHook(id self, SEL _cmd, id model, double t, double size) {
-    void (*orig)(id, SEL, id, double, double) = (void (*)(id, SEL, id, double, double))SLGetOrigIMP(self, _cmd);
+// 注意：真实签名是 v40@0:8@16Q24Q32 —— audioTime / audioFileSize 都是 Q（unsigned long long）。
+// v0.3.9 这里写成了 double，读的时候从 d0 取垃圾值、调 orig 时又把值塞进 d0/d1（orig 要 x2/x3），
+// 结果陌陌拿到的时长/文件大小全被污染 → 这就是「语音条秒数乱」的真因（连原生录音也被改坏）。
+static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long long t, unsigned long long size) {
+    void (*orig)(id, SEL, id, unsigned long long, unsigned long long) =
+        (void (*)(id, SEL, id, unsigned long long, unsigned long long))SLGetOrigIMP(self, _cmd);
+    unsigned long long newT = t;
+
     if (!gSLModelDump) {
         gSLModelDump = 1;
         SLDumpModelDeep(model);
     }
-    if (orig) orig(self, _cmd, model, t, size);
+
+    // 「录音替换」的真正落地位置：body 里的 file token 就是陌陌这段录音的文件名，
+    // 此刻还没上传，按 token 找到文件覆盖成 AI 音频即可；顺手把 audiotime 改成真实时长。
+    if (gSLTTSAudioPath) {
+        @try {
+            NSString *body = nil;
+            @try { body = [model valueForKey:@"body"]; } @catch (NSException *e) {}
+            if (![body isKindOfClass:[NSString class]] || body.length == 0) body = nil;
+            NSString *token = SLBodyValue(body, @"file");
+            SLLog(@"AUDIO-SEND model=%@ t=%llu size=%llu token=%@ armedDur=%.2f",
+                  NSStringFromClass([model class]), t, size, token ?: @"(nil)", gSLTTSAudioDur);
+
+            NSString *target = nil;
+            if (token.length) target = SLFindFileByToken(token);
+            if (!target) {
+                NSTimeInterval since = gSLArmedAt > 0 ? gSLArmedAt
+                                                     : ([[NSDate date] timeIntervalSince1970] - 180.0);
+                target = SLNewestRecordFileSince(since);
+            }
+            if (target) {
+                if (SLOverwriteWithAI(target)) {
+                    if (gSLTTSAudioDur > 0) {
+                        double nd = gSLTTSAudioDur;
+                        long long secs = (long long)llround(nd);
+                        if (secs < 1) secs = 1;
+                        newT = (unsigned long long)secs;
+                        if (body) {
+                            NSString *nb = SLBodySetAudioTime(body, nd);
+                            BOOL set = NO;
+                            SEL bs = NSSelectorFromString(@"setBody:");
+                            if ([model respondsToSelector:bs]) {
+                                @try { ((void(*)(id,SEL,id))objc_msgSend)(model, bs, nb); set = YES; } @catch (NSException *e) {}
+                            }
+                            if (!set) { @try { [model setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {} }
+                            SLLog(@"AUDIO-SEND body audiotime -> %lld set=%d (%@)", secs, set,
+                                  nb.length > 160 ? [nb substringToIndex:160] : nb);
+                        }
+                    }
+                    [AWECAUtils showToast:@"已替换为 AI 语音" duration:1.5];
+                    gSLTTSAudioPath = nil;
+                } else {
+                    SLLog(@"AUDIO-SEND overwrite failed, keep armed");
+                }
+            } else {
+                SLLog(@"AUDIO-SEND no file for token=%@（未替换）", token ?: @"(nil)");
+                static int diagOnce = 0;
+                if (diagOnce++ < 2) {
+                    NSTimeInterval since = gSLArmedAt > 0 ? gSLArmedAt
+                                                         : ([[NSDate date] timeIntervalSince1970] - 180.0);
+                    SLLog(@"DIAG-AUDIO-RECENT %@", SLDiagRecentFiles(since));
+                }
+            }
+        } @catch (NSException *e) {
+            SLLog(@"AUDIO-SEND exception %@", e);
+        }
+    }
+
+    if (orig) orig(self, _cmd, model, newT, size);
 }
 
 static BOOL SLInstallSendAudioHook(Class cls) {
@@ -797,20 +1014,62 @@ static BOOL SLInstallSendAudioHook(Class cls) {
     return SLRegisterMethod(cls, sel, (IMP)SLSendAudioMessageHook);
 }
 
+#pragma mark - 钩子 4.5：MDAudioRecorder -setTempAudioPath:（捕获录音临时文件路径）
+
+// 回调那一刻 _tempAudioPath 已被置 nil，但录音开始时它一定被赋过值。
+// 钩住 setter 就能拿到「这次录音写到哪个文件/哪个目录」，比事后瞎猜可靠。
+static void SLSetTempAudioPathHook(id self, SEL _cmd, NSString *p) {
+    void (*orig)(id, SEL, NSString *) = (void (*)(id, SEL, NSString *))SLGetOrigIMP(self, _cmd);
+    if ([p isKindOfClass:[NSString class]] && p.length) {
+        gSLTempRecPath = [p copy];
+        SLLog(@"TEMP-PATH set %@", p);
+    } else {
+        BOOL ex = NO;
+        long long sz = -1;
+        if (gSLTempRecPath.length) {
+            ex = [[NSFileManager defaultManager] fileExistsAtPath:gSLTempRecPath];
+            NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:gSLTempRecPath error:nil];
+            sz = (long long)[a fileSize];
+        }
+        SLLog(@"TEMP-PATH cleared (prev=%@ exists=%d size=%lld)", gSLTempRecPath ?: @"(nil)", ex, sz);
+    }
+    if (orig) orig(self, _cmd, p);
+}
+
+static BOOL SLInstallTempPathHook(Class cls) {
+    if (!cls) return NO;
+    SEL sel = @selector(setTempAudioPath:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        SLLog(@"%@ 没有 setTempAudioPath:", NSStringFromClass(cls));
+        return NO;
+    }
+    const char *t = method_getTypeEncoding(m);
+    NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
+    if (!sig || sig.numberOfArguments < 3) return NO;
+    const char *a2 = [sig getArgumentTypeAtIndex:2];
+    if (!a2 || a2[0] != '@') return NO;
+    return SLRegisterMethod(cls, sel, (IMP)SLSetTempAudioPathHook);
+}
+
 #pragma mark - 钩子 5：audioRecorder:recordSucessStoreAt:audioTime:（覆盖陌陌即将发送的录音文件为合成音）
 
 static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path, unsigned long long time) {
     void (*orig)(id, SEL, id, id, unsigned long long) = (void (*)(id, SEL, id, id, unsigned long long))SLGetOrigIMP(self, _cmd);
     unsigned long long newTime = time;
 
-    if (gSLRecDump < 4) {
+    if (gSLRecDump < 3) {
         gSLRecDump++;
-        SLLog(@"REC-DONE self=%@ recorderClass=%@ pathArg=%@ timeRaw=%llu armed=%d",
+        SLLog(@"REC-DONE self=%@ recorderClass=%@ pathArg=%@ timeRaw=%llu armed=%d tempPath=%@",
               NSStringFromClass([self class]),
               recorder ? NSStringFromClass([recorder class]) : @"(nil)", path, time,
-              gSLTTSAudioPath ? 1 : 0);
+              gSLTTSAudioPath ? 1 : 0, gSLTempRecPath ?: @"(nil)");
         if (recorder) SLDumpRecorderDeep(recorder);
         SLDumpSelfIvars(self);
+    }
+    if (gSLMethDump < 1 && recorder) {
+        gSLMethDump = 1;
+        SLDumpMethodNames(recorder);
     }
 
     // 「录音替换」：把本次真实录音文件覆盖成 AI 音频，再让陌陌发送。
@@ -818,6 +1077,7 @@ static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path
         NSTimeInterval armedAt = gSLArmedAt > 0 ? gSLArmedAt : ([[NSDate date] timeIntervalSince1970] - 300.0);
         NSString *target = nil;
         NSString *via = @"(none)";
+        BOOL replaced = NO;
 
         // ① path 参数（通常是 nil）
         if (SLIsAudioPath(path) && !SLIsOurOwnFile(path) && SLFileFreshSince(path, armedAt)) {
@@ -828,7 +1088,16 @@ static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path
             NSString *p = SLFindRecordPathInObject(recorder, armedAt, 0);
             if (p) { target = p; via = @"recorder"; }
         }
-        // ③ 兜底扫描：只接受 armed 之后写的文件
+        // ③ setTempAudioPath: 捕获到的临时路径 / 它所在目录
+        if (!target && gSLTempRecPath.length && !SLIsOurOwnFile(gSLTempRecPath)) {
+            if (SLIsAudioPath(gSLTempRecPath) && SLFileFreshSince(gSLTempRecPath, armedAt)) {
+                target = gSLTempRecPath; via = @"tempPath";
+            } else {
+                NSString *p = SLNewestAudioInDir([gSLTempRecPath stringByDeletingLastPathComponent], armedAt);
+                if (p) { target = p; via = @"tempDir"; }
+            }
+        }
+        // ④ 兜底扫描：只接受 armed 之后写的文件
         if (!target) {
             NSString *p = SLNewestRecordFileSince(armedAt);
             if (p) { target = p; via = @"scan"; }
@@ -844,37 +1113,15 @@ static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path
               target ?: @"(nil)", via, origDur, ttsDur, time);
 
         if (target) {
-            NSMutableData *payload = [NSMutableData dataWithContentsOfFile:gSLTTSAudioPath];
-            BOOL padded = NO;
-            NSString *ttsExt = [gSLTTSAudioPath pathExtension].lowercaseString;
-            if (payload.length && ttsDur > 0 && origDur > ttsDur + 0.06 && [ttsExt isEqualToString:@"amr"]) {
-                // AI 音频比真实录音短 → 补静音帧补到同长，语音条秒数就与音频一致
-                NSUInteger frames = (NSUInteger)llround((origDur - ttsDur) / 0.02);
-                NSData *sil = [SLAMREncoder amrSilenceForFrames:frames];
-                if (sil.length) { [payload appendData:sil]; padded = YES; }
-            }
-            if (payload.length) {
-                // 关键：必须原地覆盖（atomically:NO）。
-                // 陌陌可能还持有这个文件的 fd，原子写是换 inode，它读到的还是旧内容。
-                BOOL ok = [payload writeToFile:target atomically:NO];
-                SLLog(@"REPLACE write target=%@ ok=%d size=%lu padded=%d targetExt=%@ ttsExt=%@",
-                      target, ok, (unsigned long)payload.length, padded,
-                      [target pathExtension].lowercaseString, ttsExt);
-                if (ok) {
-                    if (!padded && origDur > 0.1 && ttsDur > origDur + 0.06) {
-                        // AI 音频比录音长：按同一比例改时长（单位无关）
-                        newTime = (unsigned long long)llround((double)time * (ttsDur / origDur));
-                        SLLog(@"REPLACE time adjusted %llu -> %llu", time, newTime);
-                    }
-                    [AWECAUtils showToast:@"已发送 AI 语音" duration:1.5];
-                }
-            } else {
-                SLLog(@"REPLACE read armed audio failed: %@", gSLTTSAudioPath);
-            }
+            replaced = SLOverwriteWithAI(target);
+            if (replaced) SLLog(@"REPLACE ok via=%@（时长将在 sendAudio 钩子里改成 %.2fs）", via, ttsDur);
         } else {
-            SLLog(@"REPLACE skip: 没找到本次录音文件（armed=%.0f）", armedAt);
+            SLLog(@"REPLACE miss: 这次没定位到录音文件，留给 sendAudio 钩子按 token 再试（armed 保留）");
+            if (gSLRecDump <= 3) SLLog(@"DIAG-RECENT %@", SLDiagRecentFiles(armedAt));
         }
-        gSLTTSAudioPath = nil;
+        // 注意：这里绝不无条件清空装填。
+        // 陌陌紧接着会调 sendAudioMessage:，那里能用 body 的 file token 精确定位文件，
+        // 并顺手把 audiotime 改成 AI 的真实时长 —— 那一步才是真正的落地与收尾。
     }
 
     if (orig) orig(self, _cmd, recorder, path, newTime);
@@ -968,6 +1215,8 @@ static void SLInstallHooks(void) {
     SLInstallAudioRecordHook(NSClassFromString(@"MDChatSingleHandler"));
     SLInstallAudioRecordHook(NSClassFromString(@"MDChatBaseHander"));
     SLInstallAudioRecordHook(NSClassFromString(@"MDChatUniverseHandler"));
+    // 录音机临时路径（拿得到就直接命中真实录音文件）
+    SLInstallTempPathHook(NSClassFromString(@"MDAudioRecorder"));
     SLInstallServiceHook();
 }
 
