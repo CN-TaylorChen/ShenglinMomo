@@ -20,6 +20,8 @@
 + (BOOL)createFolder:(NSString *)name;
 /// 删除文件夹（仅空文件夹；非空返回 NO）
 + (BOOL)removeFolder:(NSString *)name;
+/// 重命名文件夹（索引里的 folder / rel 一起改）
++ (BOOL)renameFolder:(NSString *)oldName to:(NSString *)newName error:(NSString **)err;
 /// 把语音包移到另一个文件夹
 + (BOOL)movePack:(NSDictionary *)pack toFolder:(NSString *)folder error:(NSString **)err;
 
