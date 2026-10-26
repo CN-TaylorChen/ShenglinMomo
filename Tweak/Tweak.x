@@ -6,9 +6,8 @@
 //           MMCommonServiceImpl  -sendTextMessage:withTargetID:isSingle:
 //   发语音：MDChatBaseHander  -sendAudioMessage:audioTime:audioFileSize:
 //
-// 工作方式：输入框输入 `#tts 要说的话` 点发送 → 拦掉这次发送 →
-// TTS 合成 → 编码成 AMR → 用陌陌自己的发语音接口发出去。
-// 任一步失败都会退回「发送原文本」，绝不丢消息。
+// 工作方式：输入框输入 `#tts 要说的话` 点发送 → 拦掉文本 → 合成 AI 语音并「装填」→
+// 用户真实录音时，audioRecorder 钩子把录音文件覆盖成 AI 音频 → 陌陌照常发出（录音替换）。
 //
 // 所有钩子安装前都用 NSMethodSignature 校验签名，签名不符就不装（避免猜错崩溃）；
 // 发语音统一走 NSInvocation，按真实类型填参。
@@ -26,7 +25,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.6"
+#define SLVersion @"0.3.7"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -341,38 +340,7 @@ static id SLFindAudioHandlerNear(UIView *view) {
 }
 
 
-#pragma mark - 假录音机（让陌陌读取我们合成的音频，而不是它自己的原声）
-
-@interface SLFakeRecorder : NSObject
-@property (nonatomic, copy) NSString *slAudioPath;
-@property (nonatomic) double slDuration;
-@end
-
-@implementation SLFakeRecorder
-
-- (NSURL *)url { SLLog(@"fakeRec url -> %@", self.slAudioPath); return [NSURL fileURLWithPath:self.slAudioPath]; }
-- (NSURL *)fileURL { return [self url]; }
-- (NSURL *)recordFileURL { return [self url]; }
-- (NSURL *)audioFileURL { return [self url]; }
-- (NSString *)filePath { return self.slAudioPath; }
-- (NSString *)recordFilePath { return self.slAudioPath; }
-- (NSString *)audioFilePath { return self.slAudioPath; }
-- (NSString *)path { return self.slAudioPath; }
-- (NSTimeInterval)currentTime { return self.slDuration; }
-- (NSTimeInterval)duration { return self.slDuration; }
-- (BOOL)isRecording { return NO; }
-- (BOOL)recording { return NO; }
-- (BOOL)isMeteringEnabled { return NO; }
-- (BOOL)prepareToRecord { return YES; }
-- (BOOL)record { SLLog(@"fakeRec record (ignored)"); return NO; }
-- (void)stop { SLLog(@"fakeRec stop (ignored)"); }
-- (void)pause {}
-- (BOOL)deleteRecording { SLLog(@"fakeRec deleteRecording (ignored, keep our file)"); return NO; }
-- (void)updateMeters {}
-- (float)averagePowerForChannel:(NSUInteger)channel { (void)channel; return -160.0f; }
-- (float)peakPowerForChannel:(NSUInteger)channel { (void)channel; return -160.0f; }
-
-@end
+// （v0.3.7 起不再使用假录音机：改为「录音替换」——见 SLArmTTS / audioRecorder 钩子）
 
 #pragma mark - 全局：#tts 待发送的合成音频
 
@@ -448,32 +416,11 @@ static void SLDumpSelfIvars(id selfObj) {
     }
 }
 
-// 收集所有可能的「陌陌即将读取的录音文件路径」（self 内部录音机文件优先）
-static NSArray *SLAudioCandidatePaths(id selfObj, id recorder, NSString *pathArg) {
-    NSMutableArray *arr = [NSMutableArray array];
-    NSArray *exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"mp4",@"aac"];
-    void (^addStr)(NSString *) = ^(NSString *s){
-        if (![s isKindOfClass:[NSString class]] || s.length == 0) return;
-        if ([s hasPrefix:@"/var/mobile"] || [s hasPrefix:@"/private/var/mobile"]) {
-            if ([exts containsObject:s.pathExtension.lowercaseString]) [arr addObject:s];
-        }
-    };
-    void (^addRec)(id) = ^(id r){
-        if (!r) return;
-        for (NSString *sel in @[@"url",@"filePath",@"recordFilePath",@"audioFileURL",@"fileURL",@"recordFileURL",@"currentPath",@"audioFilePath"]) {
-            SEL s = NSSelectorFromString(sel);
-            if (![r respondsToSelector:s]) continue;
-            @try {
-                id u = ((id(*)(id,SEL))objc_msgSend)(r, s);
-                if ([u isKindOfClass:[NSURL class]]) addStr([u path]);
-                else if ([u isKindOfClass:[NSString class]]) addStr(u);
-            } @catch (NSException *e) {}
-        }
-    };
-    addStr(pathArg);
-    addRec(recorder);
-    // self 的全部对象/字符串 ivar（含父类），优先命中真正的录音机文件
-    Class c = [selfObj class];
+// 从录音机对象里找它刚写好的录音文件路径（覆盖目标）。要求文件已存在。
+static NSString *SLAudioRecordTargetPathFromRecorder(id rec) {
+    if (!rec) return nil;
+    NSArray *exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"aac"];
+    Class c = [rec class];
     while (c && c != [NSObject class]) {
         unsigned int pc = 0;
         Ivar *list = class_copyIvarList(c, &pc);
@@ -481,22 +428,87 @@ static NSArray *SLAudioCandidatePaths(id selfObj, id recorder, NSString *pathArg
             const char *te = ivar_getTypeEncoding(list[i]);
             if (!te || te[0] != '@') continue;
             id v = nil;
-            @try { v = object_getIvar(selfObj, list[i]); } @catch (NSException *e) { continue; }
-            if ([v isKindOfClass:[NSString class]]) addStr((NSString *)v);
-            else if (v) addRec(v);
+            @try { v = object_getIvar(rec, list[i]); } @catch (NSException *e) { continue; }
+            NSString *s = nil;
+            if ([v isKindOfClass:[NSString class]]) s = v;
+            else if ([v isKindOfClass:[NSURL class]]) s = [v path];
+            if ([s isKindOfClass:[NSString class]] && s.length &&
+                ([s hasPrefix:@"/var/mobile"] || [s hasPrefix:@"/private/var/mobile"]) &&
+                [exts containsObject:s.pathExtension.lowercaseString] &&
+                [[NSFileManager defaultManager] fileExistsAtPath:s]) {
+                free(list);
+                return s;
+            }
         }
         free(list);
         c = class_getSuperclass(c);
     }
-    return arr;
+    return nil;
 }
 
-#pragma mark - #tts 处理
+// 深层 dump 录音机对象全部 ivar（定位文件路径 / 时长字段）
+static void SLDumpRecorderDeep(id rec) {
+    if (!rec) return;
+    Class c = [rec class];
+    NSMutableArray *arr = [NSMutableArray array];
+    while (c && c != [NSObject class]) {
+        unsigned int pc = 0;
+        Ivar *list = class_copyIvarList(c, &pc);
+        for (unsigned i = 0; i < pc; i++) {
+            const char *te = ivar_getTypeEncoding(list[i]);
+            const char *nm = ivar_getName(list[i]);
+            id v = nil;
+            @try { v = object_getIvar(rec, list[i]); } @catch (NSException *e) { v = @"(ex)"; }
+            NSString *vs = @"(nil)";
+            if ([v isKindOfClass:[NSString class]]) vs = (NSString *)v;
+            else if ([v isKindOfClass:[NSURL class]]) vs = [(NSURL *)v path];
+            else if ([v isKindOfClass:[NSNumber class]]) vs = [NSString stringWithFormat:@"#%@", v];
+            else if (v) vs = [NSString stringWithFormat:@"(%@)", NSStringFromClass([v class])];
+            [arr addObject:[NSString stringWithFormat:@"%s(%s)=%@", nm, te ?: "", vs]];
+        }
+        free(list);
+        c = class_getSuperclass(c);
+    }
+    SLLog(@"RECORDER-DEEP class=%@ [%@]", NSStringFromClass([rec class]), [arr componentsJoinedByString:@" | "]);
+}
 
-static void SLHandleTTS(id handler,
-                       NSString *content,
-                       void (^fallback)(void),
-                       void (^onSuccess)(void)) {
+// 兜底：扫沙盒（Documents / Library / tmp）找最近修改的音频文件
+static NSString *SLNewestAudioFile(void) {
+    NSArray *exts = @[@"amr",@"m4a",@"caf",@"wav"];
+    NSArray *roots = @[
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Library"],
+        NSTemporaryDirectory()
+    ];
+    NSString *best = nil;
+    NSTimeInterval bestT = 0;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *root in roots) {
+        NSDirectoryEnumerator *e = [fm enumeratorAtPath:root];
+        if (!e) continue;
+        NSString *sub;
+        int count = 0;
+        while ((sub = [e nextObject]) && count++ < 4000) {
+            NSString *fp = [root stringByAppendingPathComponent:sub];
+            // 排除我们自己生成的 AI 音频目录，避免把自己当“最新录音”
+            if ([fp rangeOfString:@"/ShenglinMomo/"].location != NSNotFound) continue;
+            if ([exts containsObject:fp.pathExtension.lowercaseString]) {
+                NSDictionary *a = [fm attributesOfItemAtPath:fp error:nil];
+                NSDate *mt = a[NSFileModificationDate];
+                NSTimeInterval t = [mt timeIntervalSince1970];
+                if (t > bestT) { bestT = t; best = fp; }
+            }
+        }
+    }
+    return best;
+}
+
+#pragma mark - #tts 处理（录音替换：装填 AI 音频，等真实录音时覆盖）
+
+static void SLArmTTS(id handler,
+                     NSString *content,
+                     void (^fallback)(void)) {
+    (void)handler;
     [AWECAUtils showToast:@"声临合成中..." duration:2.0];
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -507,45 +519,20 @@ static void SLHandleTTS(id handler,
                 if (fallback) fallback();
                 return;
             }
-            // 伪装一次「录制完成」：把合成音频当录音文件，交给陌陌自己的
-            // audioRecorder:recordSucessStoreAt:audioTime: 去构造语音消息 model 并发送。
-            // 这样完全绕开 sendAudioMessage:audioTime:audioFileSize: 的私有 model
-            // （它的第一参数是带 cate 属性的消息对象，直接 NSInvocation 调必崩）。
-            BOOL sent = NO;
-            SEL recSel = @selector(audioRecorder:recordSucessStoreAt:audioTime:);
-            if ([handler respondsToSelector:recSel]) {
-                @try {
-                    // 关键修复：之前 audioRecorder: 传 nil，陌陌回退读「自己的录音机」原声文件 → 发出去是真人声音。
-                    // 现在造一个假 recorder，把 url 指向我们合成的音频，陌陌就会读我们的文件来发语音。
-                    SLFakeRecorder *fake = [[SLFakeRecorder alloc] init];
-                    fake.slAudioPath = outPath;
-                    fake.slDuration = dur;
-                    gSLTTSAudioPath = [outPath copy];
-                    gSLTTSAudioDur = dur;
-                    SLLog(@"fakeRecord use SLFakeRecorder path=%@ dur=%.2f", outPath, dur);
-                    ((void(*)(id,SEL,id,id,unsigned long long))objc_msgSend)(handler, recSel, fake, outPath, (unsigned long long)(dur * 1000.0));
-                    sent = YES;
-                    SLLog(@"fakeRecord ok path=%@ dur=%.2f fmt=%@", outPath, dur, [outPath pathExtension]);
-                } @catch (NSException *e) {
-                    SLLog(@"fakeRecord exception %@", e);
+            // 「录音替换」模式：合成后只“装填”，不自动发。
+            // 等用户真实录音，audioRecorder 钩子会把录音文件覆盖成这份 AI 音频。
+            gSLTTSAudioPath = [outPath copy];
+            gSLTTSAudioDur = dur;
+            SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
+            [AWECAUtils showToast:@"声临已就绪：现在录音将发 AI 语音" duration:2.0];
+            // 60s 内未录音则自动解除，避免误替换普通语音
+            NSString *armed = outPath;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armed]) {
+                    gSLTTSAudioPath = nil;
+                    SLLog(@"armed tts expired (60s), cleared");
                 }
-            } else {
-                SLLog(@"handler 无 audioRecorder:recordSucessStoreAt:audioTime: 方法");
-            }
-            // 诊断：发完后看我们的文件是否还在（若被陌陌删/覆盖，说明它读的是自己的录音机文件而非我们的）
-            {
-                BOOL ex = [[NSFileManager defaultManager] fileExistsAtPath:outPath];
-                NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:outPath error:nil];
-                SLLog(@"afterSend outPath exists=%d size=%lld", ex, (long long)[attrs fileSize]);
-            }
-            SLLog(@"audio sent=%d path=%@ dur=%.2f", sent, outPath, dur);
-            if (!sent) {
-                [AWECAUtils showToast:@"发送语音失败，已改发文本" duration:2.5];
-                if (fallback) fallback();
-            } else {
-                [AWECAUtils showToast:@"已发送 AI 语音" duration:1.5];
-                if (onSuccess) onSuccess();
-            }
+            });
         });
     }];
 }
@@ -590,7 +577,9 @@ static void SLSendText(id self, SEL _cmd) {
         return;
     }
 
-    SLHandleTTS(handler, content, ^{ if (orig) orig(self, _cmd); }, ^{ SLClearTextInView(tv); });
+    SLArmTTS(handler, content, ^{ if (orig) orig(self, _cmd); });
+    SLClearTextInView(tv);
+    return;
 }
 
 #pragma mark - 钩子 2：handler -sendTextMessage:
@@ -624,7 +613,9 @@ static void SLSendTextMessage(id self, SEL _cmd, id arg) {
     }
 
     SLLog(@"#tts hit via %@ -sendTextMessage:", NSStringFromClass([self class]));
-    SLHandleTTS(self, content, ^{ if (orig) orig(self, _cmd, arg); }, ^{ SLClearInputBars(); });
+    SLArmTTS(self, content, ^{ if (orig) orig(self, _cmd, arg); });
+    SLClearInputBars();
+    return;
 }
 
 #pragma mark - 钩子 3：MMCommonServiceImpl -sendTextMessage:withTargetID:isSingle:
@@ -644,7 +635,9 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
         return;
     }
     SLLog(@"#tts hit via MMCommonServiceImpl");
-    SLHandleTTS(self, content, ^{ if (orig) orig(self, _cmd, text, targetID, isSingle); }, ^{ SLClearInputBars(); });
+    SLArmTTS(self, content, ^{ if (orig) orig(self, _cmd, text, targetID, isSingle); });
+    SLClearInputBars();
+    return;
 }
 
 #pragma mark - 钩子 4：MDChatBaseHander -sendAudioMessage:audioTime:audioFileSize:（诊断用，抓语音 model 结构）
@@ -675,31 +668,27 @@ static BOOL SLInstallSendAudioHook(Class cls) {
 
 static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path, unsigned long long time) {
     void (*orig)(id, SEL, id, id, unsigned long long) = (void (*)(id, SEL, id, id, unsigned long long))SLGetOrigIMP(self, _cmd);
-    if (gSLRecDump < 4) {
+    // 诊断：把真实录音机的内部结构打出来（前几次），定位文件路径与时长字段
+    if (gSLRecDump < 6) {
         gSLRecDump++;
-        NSString *recUrl = (recorder && [recorder respondsToSelector:@selector(url)]) ? [[recorder url] path] : @"(?)";
-        SLLog(@"REC-DONE self=%@ recorderClass=%@ recorderUrl=%@ pathArg=%@",
+        SLLog(@"REC-DONE self=%@ recorderClass=%@ pathArg=%@",
               NSStringFromClass([self class]),
-              recorder ? NSStringFromClass([recorder class]) : @"(nil)", recUrl, path);
+              recorder ? NSStringFromClass([recorder class]) : @"(nil)", path);
+        if (recorder) SLDumpRecorderDeep(recorder);
         SLDumpSelfIvars(self);
     }
+    // 「录音替换」：若已装填 AI 音频，把真实录音文件覆盖成 AI 音频，再让陌陌发送
     if (gSLTTSAudioPath) {
         NSData *d = [NSData dataWithContentsOfFile:gSLTTSAudioPath];
-        NSArray *cands = SLAudioCandidatePaths(self, recorder, path);
-        SLLog(@"TTS candidates=%lu size=%lu", (unsigned long)cands.count, (unsigned long)d.length);
-        BOOL anyOk = NO;
-        for (NSString *tp in cands) {
-            // 只覆盖「已存在」的录音文件（陌陌真实录音机此刻应已写好的那个）
-            if ([[NSFileManager defaultManager] fileExistsAtPath:tp]) {
-                BOOL ok = [d writeToFile:tp atomically:YES];
-                SLLog(@"TTS write target=%@ ok=%d", tp, ok);
-                if (ok) anyOk = YES;
-            } else {
-                SLLog(@"TTS skip(not exist) %@", tp);
-            }
+        NSString *target = SLAudioRecordTargetPathFromRecorder(recorder);
+        if (!target) target = SLNewestAudioFile();
+        if (target && d.length) {
+            BOOL ok = [d writeToFile:target atomically:YES];
+            SLLog(@"TTS replace target=%@ ok=%d size=%lu", target, ok, (unsigned long)d.length);
+            [AWECAUtils showToast:@"已发送 AI 语音" duration:1.5];
+        } else {
+            SLLog(@"TTS no target (recorder paths 见上) fsNewest=%@", SLNewestAudioFile() ?: @"(none)");
         }
-        if (!anyOk) SLLog(@"TTS NO EXISTING TARGET recorderClass=%@ pathArg=%@",
-                          recorder ? NSStringFromClass([recorder class]) : @"(nil)", path);
         gSLTTSAudioPath = nil;
     }
     if (orig) orig(self, _cmd, recorder, path, time);
