@@ -26,7 +26,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.4"
+#define SLVersion @"0.3.5"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -374,6 +374,109 @@ static id SLFindAudioHandlerNear(UIView *view) {
 
 @end
 
+#pragma mark - 全局：#tts 待发送的合成音频
+
+static NSString *gSLTTSAudioPath = nil;
+static double gSLTTSAudioDur = 0;
+static int gSLRecDump = 0;
+static int gSLModelDump = 0;
+
+// 深层 dump model：含父类 ivar + 所有 property 值
+static void SLDumpModelDeep(id model) {
+    if (!model) return;
+    Class c = [model class];
+    NSMutableArray *ivs = [NSMutableArray array];
+    Class cc = c;
+    while (cc && cc != [NSObject class]) {
+        unsigned int pc = 0;
+        Ivar *list = class_copyIvarList(cc, &pc);
+        for (unsigned i = 0; i < pc; i++) {
+            const char *te = ivar_getTypeEncoding(list[i]);
+            [ivs addObject:[NSString stringWithFormat:@"%s:%s", ivar_getName(list[i]), te ?: ""]];
+        }
+        free(list);
+        cc = class_getSuperclass(cc);
+    }
+    NSMutableArray *props = [NSMutableArray array];
+    Class c2 = c;
+    while (c2 && c2 != [NSObject class]) {
+        unsigned int pc = 0;
+        objc_property_t *pl = class_copyPropertyList(c2, &pc);
+        for (unsigned i = 0; i < pc; i++) {
+            NSString *pname = [NSString stringWithUTF8String:property_getName(pl[i])];
+            id val = nil;
+            @try { val = [model valueForKey:pname]; } @catch (NSException *e) {}
+            NSString *vs = nil;
+            if ([val isKindOfClass:[NSString class]]) {
+                vs = (NSString *)val;
+            } else if ([val isKindOfClass:[NSDictionary class]] || [val isKindOfClass:[NSArray class]]) {
+                NSString *full = [NSString stringWithFormat:@"%@", val];
+                vs = full.length > 300 ? [full substringToIndex:300] : full;
+            } else if (val) {
+                vs = [NSString stringWithFormat:@"(%@)", NSStringFromClass([val class])];
+            } else {
+                vs = @"(nil)";
+            }
+            [props addObject:[NSString stringWithFormat:@"%@=%@", pname, vs]];
+        }
+        free(pl);
+        c2 = class_getSuperclass(c2);
+    }
+    SLLog(@"MODEL-DEEP class=%@ ivars=[%@] props=[%@]", NSStringFromClass(c),
+          [ivs componentsJoinedByString:@","], [props componentsJoinedByString:@" | "]);
+}
+
+// dump self 的字符串 ivar（定位陌陌内部录音文件路径）
+static void SLDumpSelfIvars(id selfObj) {
+    Class c = [selfObj class];
+    while (c && c != [NSObject class]) {
+        unsigned int pc = 0;
+        Ivar *list = class_copyIvarList(c, &pc);
+        for (unsigned i = 0; i < pc; i++) {
+            const char *te = ivar_getTypeEncoding(list[i]);
+            if (!te || te[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(selfObj, list[i]); } @catch (NSException *e) { continue; }
+            if ([v isKindOfClass:[NSString class]]) {
+                SLLog(@"SELF-IVAR %s = %@", ivar_getName(list[i]), (NSString *)v);
+            } else if (v && [v respondsToSelector:@selector(url)]) {
+                @try { NSURL *u = [v url]; if (u) SLLog(@"SELF-IVAR %s.(url) = %@", ivar_getName(list[i]), [u path]); } @catch (NSException *e) {}
+            }
+        }
+        free(list);
+        c = class_getSuperclass(c);
+    }
+}
+
+// 找陌陌即将发送的录音文件路径：优先 self 内部音频 ivar，其次 recorder.url，最后 path 参数
+static NSString *SLAudioRecordTargetPath(id selfObj, id recorder, NSString *pathArg) {
+    NSArray *exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"mp4",@"aac"];
+    Class c = [selfObj class];
+    while (c && c != [NSObject class]) {
+        unsigned int pc = 0;
+        Ivar *list = class_copyIvarList(c, &pc);
+        for (unsigned i = 0; i < pc; i++) {
+            const char *te = ivar_getTypeEncoding(list[i]);
+            if (!te || te[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(selfObj, list[i]); } @catch (NSException *e) { continue; }
+            if ([v isKindOfClass:[NSString class]]) {
+                NSString *s = (NSString *)v;
+                if ([s hasPrefix:@"/var/mobile"] || [s hasPrefix:@"/private/var/mobile"]) {
+                    if ([exts containsObject:s.pathExtension.lowercaseString]) return s;
+                }
+            }
+        }
+        free(list);
+        c = class_getSuperclass(c);
+    }
+    if (recorder && [recorder respondsToSelector:@selector(url)]) {
+        @try { NSURL *u = [recorder url]; if (u) return [u path]; } @catch (NSException *e) {}
+    }
+    if (pathArg.length && [[NSFileManager defaultManager] fileExistsAtPath:pathArg]) return pathArg;
+    return nil;
+}
+
 #pragma mark - #tts 处理
 
 static void SLHandleTTS(id handler,
@@ -403,6 +506,8 @@ static void SLHandleTTS(id handler,
                     SLFakeRecorder *fake = [[SLFakeRecorder alloc] init];
                     fake.slAudioPath = outPath;
                     fake.slDuration = dur;
+                    gSLTTSAudioPath = [outPath copy];
+                    gSLTTSAudioDur = dur;
                     SLLog(@"fakeRecord use SLFakeRecorder path=%@ dur=%.2f", outPath, dur);
                     ((void(*)(id,SEL,id,id,double))objc_msgSend)(handler, recSel, fake, outPath, dur);
                     sent = YES;
@@ -530,22 +635,11 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
 
 #pragma mark - 钩子 4：MDChatBaseHander -sendAudioMessage:audioTime:audioFileSize:（诊断用，抓语音 model 结构）
 
-static int SLAudioModelDumped = 0;
-
 static void SLSendAudioMessageHook(id self, SEL _cmd, id model, double t, double size) {
     void (*orig)(id, SEL, id, double, double) = (void (*)(id, SEL, id, double, double))SLGetOrigIMP(self, _cmd);
-    if (!SLAudioModelDumped) {
-        SLAudioModelDumped = 1;
-        Class mc = [model class];
-        NSMutableArray *ivs = [NSMutableArray array];
-        unsigned int pc = 0;
-        Ivar *list = class_copyIvarList(mc, &pc);
-        for (unsigned i = 0; i < pc; i++) {
-            const char *tn = ivar_getTypeEncoding(list[i]);
-            [ivs addObject:[NSString stringWithFormat:@"%s:%s", ivar_getName(list[i]), tn ?: ""]];
-        }
-        free(list);
-        SLLog(@"AUDIO-MODEL class=%@ ivars=%@", NSStringFromClass(mc), [ivs componentsJoinedByString:@", "]);
+    if (!gSLModelDump) {
+        gSLModelDump = 1;
+        SLDumpModelDeep(model);
     }
     if (orig) orig(self, _cmd, model, t, size);
 }
@@ -561,6 +655,52 @@ static BOOL SLInstallSendAudioHook(Class cls) {
     const char *a2 = [sig getArgumentTypeAtIndex:2];
     if (!a2 || a2[0] != '@') return NO;
     return SLRegisterMethod(cls, sel, (IMP)SLSendAudioMessageHook);
+}
+
+#pragma mark - 钩子 5：audioRecorder:recordSucessStoreAt:audioTime:（覆盖陌陌即将发送的录音文件为合成音）
+
+static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path, double time) {
+    void (*orig)(id, SEL, id, id, double) = (void (*)(id, SEL, id, id, double))SLGetOrigIMP(self, _cmd);
+    if (gSLRecDump < 3) {
+        gSLRecDump++;
+        NSString *recUrl = (recorder && [recorder respondsToSelector:@selector(url)]) ? [[recorder url] path] : @"(?)";
+        SLLog(@"REC-DONE self=%@ recorderClass=%@ recorderUrl=%@ pathArg=%@",
+              NSStringFromClass([self class]),
+              recorder ? NSStringFromClass([recorder class]) : @"(nil)", recUrl, path);
+        SLDumpSelfIvars(self);
+    }
+    if (gSLTTSAudioPath) {
+        NSString *target = SLAudioRecordTargetPath(self, recorder, path);
+        NSData *d = [NSData dataWithContentsOfFile:gSLTTSAudioPath];
+        if (target.length && d.length) {
+            BOOL ok = [d writeToFile:target atomically:YES];
+            SLLog(@"TTS write target=%@ ok=%d size=%lu", target, ok, (unsigned long)d.length);
+        } else {
+            SLLog(@"TTS no target (recorderUrl=%@ pathArg=%@) size=%lu",
+                  (recorder && [recorder respondsToSelector:@selector(url)]) ? [[recorder url] path] : @"(?)",
+                  path, (unsigned long)d.length);
+        }
+        gSLTTSAudioPath = nil;
+    }
+    if (orig) orig(self, _cmd, recorder, path, time);
+}
+
+static BOOL SLInstallAudioRecordHook(Class cls) {
+    if (!cls) return NO;
+    SEL sel = @selector(audioRecorder:recordSucessStoreAt:audioTime:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return NO;
+    const char *t = method_getTypeEncoding(m);
+    NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
+    if (!sig || sig.numberOfArguments < 5) return NO;
+    const char *a2 = [sig getArgumentTypeAtIndex:2];
+    const char *a3 = [sig getArgumentTypeAtIndex:3];
+    const char *a4 = [sig getArgumentTypeAtIndex:4];
+    if (!a2 || a2[0] != '@' || !a3 || a3[0] != '@' || !a4 || a4[0] != 'd') {
+        SLLog(@"skip %@ audioRecorder:recordSucessStoreAt: (types %s %s %s)", cls, a2 ?: "", a3 ?: "", a4 ?: "");
+        return NO;
+    }
+    return SLRegisterMethod(cls, sel, (IMP)SLAudioRecordDoneHook);
 }
 
 #pragma mark - 安装
@@ -629,6 +769,9 @@ static void SLInstallHooks(void) {
     SLInstallSendAudioHook(NSClassFromString(@"MDChatBaseHander"));
     SLInstallSendAudioHook(NSClassFromString(@"MDChatUniverseHandler"));
     SLInstallSendAudioHook(NSClassFromString(@"MDChatSingleHandler"));
+    SLInstallAudioRecordHook(NSClassFromString(@"MDChatSingleHandler"));
+    SLInstallAudioRecordHook(NSClassFromString(@"MDChatBaseHander"));
+    SLInstallAudioRecordHook(NSClassFromString(@"MDChatUniverseHandler"));
     SLInstallServiceHook();
 }
 
