@@ -10,15 +10,13 @@
 
 typedef UIDocumentPickerViewController * _Nullable (^SLPickerMaker)(void);
 
-// 分组标题跟白色卡片左边缘对齐：取第一个可见 cell 的 x，取不到用 insetGrouped 的 20pt
+// 分组标题跟白色卡片左边缘对齐：rectForRowAtIndexPath 是纯计算 API，
+// 不依赖 cell 是否已创建 —— header 首次布局时 visibleCells 往往是空的。
 static CGFloat SLCardLeading(UITableView *tv) {
-    UITableViewCell *c = tv.visibleCells.firstObject;
-    if (c) return CGRectGetMinX(c.frame);
     for (NSInteger s = 0; s < tv.numberOfSections; s++) {
         if ([tv numberOfRowsInSection:s] <= 0) continue;
-        UITableViewCell *first = [tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (first) return CGRectGetMinX(first.frame);
-        break;
+        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
+        if (r.size.width > 0) return r.origin.x;
     }
     return 20;
 }
@@ -320,7 +318,7 @@ static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
     (void)tv;
     if (section != 0) return nil;
-    return @"开启后发「#tts」直接发出所选语音，不再合成\n点行选中 · 右侧圆钮试听 · 左滑移动/裁剪 · 长按文件夹可删除";
+    return @"发「yyb」直接发出所选语音，不走合成\n点行选中 · 右侧圆钮试听 · 左滑移动/裁剪 · 长按文件夹可删除";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
@@ -482,7 +480,12 @@ static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
     NSError *err = nil;
     self.player = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:&err];
     if (err || !self.player) {
-        [AWECAUtils showToast:@"这段音频放不了" duration:1.8];
+        NSString *ext = path.pathExtension.lowercaseString;
+        BOOL ogg = [@[@"ogg", @"oga", @"opus", @"webm"] containsObject:ext];
+        [AWECAUtils showToast:(ogg ? @"iOS 解不了 oga/ogg，先转成 m4a 或 wav"
+                                   : @"这段音频放不了，换个格式试试")
+                     duration:2.4];
+        SLLog(@"pack preview fail %@ / %@", path.lastPathComponent, err.localizedDescription ?: @"nil player");
         return;
     }
     self.player.delegate = self;
