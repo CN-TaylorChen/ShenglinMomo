@@ -19,7 +19,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.8"
+#define SLVersion @"0.4.9"
 
 #pragma mark - 多行 footer
 
