@@ -212,7 +212,7 @@ static NSString *AWECATrimStr(NSString *s) {
     if ([AWECATOSUploader hasCredentials]) {
         [AWECAUtils showToast:@"已保存" duration:1.5];
     } else {
-        [AWECAUtils showToast:@"已保存（TOS 配置不完整时录音转音色不可用）" duration:2.0];
+        [AWECAUtils showToast:@"已保存（TOS 配置不完整时，语音转音色不可用）" duration:2.0];
     }
 }
 
@@ -231,7 +231,7 @@ static NSString *AWECATrimStr(NSString *s) {
 - (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
     if (section == 0) return @"火山引擎（豆包音色）";
     if (section == 1) return @"Fish Audio";
-    return @"高级";
+    return @"语音转语音设置";
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
@@ -242,8 +242,8 @@ static NSString *AWECATrimStr(NSString *s) {
 
 - (NSString *)aweca_footerForSection:(NSInteger)section {
     if (section == 0) return @"控制台 → API Key 管理获取，仅存本机";
-    if (section == 1) return @"fish.audio → 右上角头像 → API Keys 创建。免费模型 s2.1-pro-free 不消耗余额。";
-    return @"TOS 私有桶用于「录音转音色」上传；识别资源 ID 留空即标准版。日常无需展开。";
+    if (section == 1) return @"fish.audio 首页 → 左侧栏「开发者」 → 创建API密钥。";
+    return @"对象存储（TOS）用于「语音转音色」功能的音频存储：音频上传至存储桶后，执行音色替换处理；识别资源 ID 留空即标准版，一般不需要修改。";
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
@@ -272,7 +272,7 @@ static NSString *AWECATrimStr(NSString *s) {
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:foldId];
         BOOL expanded = _advancedExpanded;
         // 标题只留主干，箭头交给右侧系统 chevron（不再把「›」写进文字里）
-        cell.textLabel.text = @"录音转音色上传";
+        cell.textLabel.text = @"TOS设置";
         cell.textLabel.font = [UIFont systemFontOfSize:14];
         cell.textLabel.textColor = [UIColor labelColor];
         cell.accessoryView = nil;
