@@ -17,6 +17,8 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <stdlib.h>
+#import <string.h>
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
 #import "AWECATOSUploader.h"
@@ -26,11 +28,12 @@
 #import "SLPCMTool.h"
 #import "SLPipeline.h"
 #import "SLSettingsPanel.h"
+#import "SLVirtualLocation.h"
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 
-#define SLVersion @"0.4.9.9"
+#define SLVersion @"0.4.10"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -1871,6 +1874,235 @@ static BOOL SLInstallServiceHook(void) {
     return SLRegisterMethod(cls, sel, (IMP)SLSendTextMessageService);
 }
 
+#pragma mark - 虚拟定位（v0.4.10）
+
+// 只在「开关开 + 已选点」时返回非 nil；返回 nil 就原样透传，对陌陌现状零影响。
+static CLLocation *SLVirtualLocationNow(void) {
+    @try {
+        return [SLVirtualLocation fakeLocation];
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+// 陌陌所有业务读坐标都过这个 getter（MomoLocationManager 的 location 属性）
+static NSUInteger sSLMomoLocHits = 0;
+static NSUInteger sSLCLLocHits = 0;
+
+static CLLocation *SLMomoLocationGetHook(id self, SEL _cmd) {
+    CLLocation *fake = SLVirtualLocationNow();
+    if (fake) {
+        // 每 200 次记一条：用来证明钩子确实被业务调用，而不是「装了但没人走」
+        if (++sSLMomoLocHits % 200 == 1) SLLog(@"VLOC MomoLocationManager 取坐标第 %lu 次", (unsigned long)sSLMomoLocHits);
+        return fake;
+    }
+    CLLocation *(*orig)(id, SEL) = (CLLocation *(*)(id, SEL))SLGetOrigIMP(self, _cmd);
+    return orig ? orig(self, _cmd) : nil;
+}
+
+// 兜底：万一某模块自己 new 了一个 CLLocationManager 直接取位置，这层也拦住
+static CLLocation *SLCLLocationGetHook(id self, SEL _cmd) {
+    CLLocation *fake = SLVirtualLocationNow();
+    if (fake) {
+        if (++sSLCLLocHits % 200 == 1) SLLog(@"VLOC CLLocationManager 取坐标第 %lu 次", (unsigned long)sSLCLLocHits);
+        return fake;
+    }
+    CLLocation *(*orig)(id, SEL) = (CLLocation *(*)(id, SEL))SLGetOrigIMP(self, _cmd);
+    return orig ? orig(self, _cmd) : nil;
+}
+
+// 只打一次：把定位相关类的真实方法名全部写进日志。
+// 离线解析方法表在陌陌这个包里不可靠（Swift 类没有 OC 方法表 / 相对方法列表编码特殊），
+// 所以宁可运行时 dump 一次，下一轮改钩子就不用猜 selector 了。
+static void SLDumpLocationClassesOnce(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    NSArray<NSString *> *names = @[@"MomoLocationManager", @"MILLocationManager", @"MDLocation",
+                                   @"MDLocationClient", @"IMJClientLocationManager", @"BUSDKLocation"];
+    for (NSString *n in names) {
+        Class c = NSClassFromString(n);
+        if (!c) {
+            SLLog(@"VLOC 无此 %@", n);
+            continue;
+        }
+        unsigned int cnt = 0;
+        Method *ms = class_copyMethodList(c, &cnt);
+        NSMutableArray *out = [NSMutableArray array];
+        for (unsigned int i = 0; i < cnt && i < 150; i++) {
+            [out addObject:NSStringFromSelector(method_getName(ms[i]))];
+        }
+        if (ms) free(ms);
+        SLLog(@"VLOC %@ 方法%u: %@", n, cnt, [out componentsJoinedByString:@" | "]);
+    }
+}
+
+static void SLInstallVirtualLocationHooks(void) {
+    SLDumpLocationClassesOnce();
+    SLRegisterMethod(NSClassFromString(@"MomoLocationManager"), NSSelectorFromString(@"location"),
+                     (IMP)SLMomoLocationGetHook);
+    SLRegisterMethod([CLLocationManager class], NSSelectorFromString(@"location"),
+                     (IMP)SLCLLocationGetHook);
+    SLLog(@"VLOC 当前 %@", [SLVirtualLocation summary]);
+}
+
+#pragma mark - 音波探针（v0.4.10，只记日志，不改任何发送行为）
+
+// 目的：音波（发布语音动态）走的是独立的一套录音流程，不经过聊天那条 opus 链路。
+// 但陌陌的 Swift 类没有 OC 方法表，离线解析不出它调了哪个录音器、文件落在哪。
+// 所以这里在运行时把所有「名字像录音」的类的方法挂上只读探针，录一段音波看日志就能确定。
+// 铁律：探针只打日志，绝不改参数、不改返回值，最坏情况是日志多几行。
+
+static void SLProbeScanAudioFiles(void);
+
+static NSMutableDictionary *SLProbeLastLog(void) {
+    static NSMutableDictionary *d = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
+    return d;
+}
+
+// 同一个「类.方法」5 秒内只记一次，避免录音回调刷爆日志
+static BOOL SLProbeShouldLog(NSString *key) {
+    NSMutableDictionary *d = SLProbeLastLog();
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSNumber *last = d[key];
+    if (last && (now - last.doubleValue) < 5.0) return NO;
+    d[key] = @(now);
+    return YES;
+}
+
+static BOOL SLProbeSelWanted(NSString *sel) {
+    static NSArray<NSString *> *kws;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        kws = @[@"record", @"Record", @"audio", @"Audio", @"path", @"Path", @"file", @"File",
+                @"publish", @"Publish", @"upload", @"Upload", @"finish", @"Finish", @"save", @"Save"];
+    });
+    for (NSString *k in kws) {
+        if ([sel rangeOfString:k].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+static void SLProbeSchedScan(void) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try { SLProbeScanAudioFiles(); } @catch (NSException *e) {}
+    });
+}
+
+static void SLProbe0(id self, SEL _cmd) {
+    NSString *sel = NSStringFromSelector(_cmd);
+    NSString *cls = NSStringFromClass([self class]);
+    if (SLProbeShouldLog([NSString stringWithFormat:@"%@.%@", cls, sel])) {
+        SLLog(@"SWAVE %@ -%@", cls, sel);
+    }
+    void (*orig)(id, SEL) = (void (*)(id, SEL))SLGetOrigIMP(self, _cmd);
+    if (orig) orig(self, _cmd);
+    if ([sel rangeOfString:@"stop" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+        [sel rangeOfString:@"finish" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+        SLProbeSchedScan();   // 停止录音后扫一遍目录，看新落了什么文件
+    }
+}
+
+static void SLProbe1(id self, SEL _cmd, id a) {
+    NSString *sel = NSStringFromSelector(_cmd);
+    NSString *cls = NSStringFromClass([self class]);
+    if (SLProbeShouldLog([NSString stringWithFormat:@"%@.%@", cls, sel])) {
+        NSString *desc = @"(nil)";
+        if ([a isKindOfClass:[NSURL class]]) desc = [(NSURL *)a path];
+        else if ([a isKindOfClass:[NSString class]]) desc = a;
+        else if ([a isKindOfClass:[NSData class]]) desc = [NSString stringWithFormat:@"<NSData %lu B>", (unsigned long)[(NSData *)a length]];
+        else if (a) desc = [a description];
+        SLLog(@"SWAVE %@ -%@(%@)", cls, sel, desc);
+    }
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
+    if (orig) orig(self, _cmd, a);
+}
+
+// 列目录找最近 3 分钟内新出现/被改过的音频视频文件——这是确定「落盘路径 + 格式」最直接的办法
+static void SLProbeScanAudioFiles(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *roots = @[
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches"],
+        [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"],
+        NSTemporaryDirectory(),
+    ];
+    NSSet<NSString *> *exts = [NSSet setWithObjects:@"m4a", @"aac", @"caf", @"wav", @"mp3", @"opus",
+                               @"amr", @"ogg", @"oga", @"mp4", @"mov", @"aiff", nil];
+    NSDate *cut = [NSDate dateWithTimeIntervalSinceNow:-180];
+    NSMutableArray<NSString *> *found = [NSMutableArray array];
+
+    for (NSString *root in roots) {
+        NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
+        NSString *rel = nil;
+        int guard = 0;
+        while ((rel = [en nextObject]) && guard++ < 20000) {
+            if (rel.pathComponents.count > 4) {
+                [en skipDescendants];
+                continue;
+            }
+            if (![exts containsObject:rel.pathExtension.lowercaseString]) continue;
+            NSString *full = [root stringByAppendingPathComponent:rel];
+            NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
+            NSDate *m = attr[NSFileModificationDate];
+            if (!m || [m compare:cut] != NSOrderedDescending) continue;
+            [found addObject:[NSString stringWithFormat:@"%@ (%@B, %.0fs前)", full,
+                              attr[NSFileSize], -[m timeIntervalSinceNow]]];
+        }
+    }
+
+    if (!found.count) {
+        SLLog(@"SWAVE 扫描：近 3 分钟没有新的音频文件");
+        return;
+    }
+    NSArray *head = [found subarrayWithRange:NSMakeRange(0, MIN(found.count, 12))];
+    SLLog(@"SWAVE 扫描到 %lu 个新文件：%@", (unsigned long)found.count, [head componentsJoinedByString:@"  |  "]);
+}
+
+static void SLInstallSoundWaveProbe(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!buf) return;
+    n = objc_getClassList(buf, n);
+
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    for (int i = 0; i < n; i++) {
+        Class c = buf[i];
+        NSString *cn = NSStringFromClass(c);
+        if (!cn.length) continue;
+        if ([cn rangeOfString:@"Record"].location == NSNotFound &&
+            [cn rangeOfString:@"Wave"].location == NSNotFound) continue;
+
+        unsigned int mc = 0;
+        Method *ms = class_copyMethodList(c, &mc);
+        for (unsigned int k = 0; k < mc; k++) {
+            NSString *sel = NSStringFromSelector(method_getName(ms[k]));
+            if (!SLProbeSelWanted(sel)) continue;
+            if ([sel isEqualToString:@"dealloc"] || [sel hasPrefix:@"init"] || [sel hasPrefix:@"set"]) continue;
+            const char *t = method_getTypeEncoding(ms[k]);
+            if (!t) continue;
+            IMP rep = NULL;
+            if (strncmp(t, "v16@0:8", 7) == 0) rep = (IMP)SLProbe0;
+            else if (strncmp(t, "v24@0:8@", 8) == 0) rep = (IMP)SLProbe1;
+            if (!rep) continue;   // 参数复杂的直接跳过，宁可少测也不猜签名
+            if (SLRegisterMethod(c, method_getName(ms[k]), rep)) {
+                [hits addObject:[NSString stringWithFormat:@"%@.%@", cn, sel]];
+            }
+        }
+        if (ms) free(ms);
+    }
+    free(buf);
+    SLLog(@"SWAVE 探针装上 %lu 个方法：%@", (unsigned long)hits.count,
+          [[hits subarrayWithRange:NSMakeRange(0, MIN(hits.count, 30))] componentsJoinedByString:@", "]);
+}
+
 static void SLInstallHooks(void) {
     static int attempts = 0;
     if (attempts++ > 8) return;   // 幂等：已装的会跳过，多试几次等类加载
@@ -1896,6 +2128,9 @@ static void SLInstallHooks(void) {
     SLInstallBusPCMHooks();
     SLInstallFunnelHooks();
     SLInstallServiceHook();
+    // v0.4.10：虚拟定位（不开时全透传）
+    @try { SLInstallVirtualLocationHooks(); } @catch (NSException *e) {}
+    @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
 }
 
 NSString *SLHookStatusSummary(void) {
