@@ -21,7 +21,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.4"
+#define SLVersion @"0.4.9.5"
 
 #pragma mark - 多行 footer
 
@@ -62,15 +62,13 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return box;
 }
 
-// 白色卡片的实际左边缘：优先取可见 cell，取不到再用 insetGrouped 的标准 20pt
+// 白色卡片的实际左边缘：rectForRowAtIndexPath 是纯计算 API，不依赖 cell 是否已创建，
+// 比读 visibleCells 稳 —— header 首次布局时 cell 往往还没生成，读 visibleCells 会拿到 nil。
 static CGFloat SLHeaderLeading(UITableView *tv) {
-    UITableViewCell *c = tv.visibleCells.firstObject;
-    if (c) return CGRectGetMinX(c.frame);
     for (NSInteger s = 0; s < tv.numberOfSections; s++) {
         if ([tv numberOfRowsInSection:s] <= 0) continue;
-        UITableViewCell *first = [tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (first) return CGRectGetMinX(first.frame);
-        break;
+        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
+        if (r.size.width > 0) return r.origin.x;
     }
     return 20;
 }
@@ -153,7 +151,7 @@ static CGFloat SLHeaderLeading(UITableView *tv) {
 // footer 文案集中在一处，view 和高度用同一份，保证不压字
 // 每组都带 footer：既解释状态，也撑出分组间距（footer 高度为 0 时分组会粘在一起）
 - (NSString *)sl_footerForSection:(NSInteger)section {
-    if (section == 0) return @"语音包开启后，发「#tts」直接发出所选语音，不再走合成\n切换引擎后需要在下方重新选择音色";
+    if (section == 0) return @"语音包：发「yyb」直接发出所选语音，不走合成\n合成语音：发「#tts」正常联网合成\n切换引擎后需要在下方重新选择音色";
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪";
     if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
     if (section == 3) return @"Key 只保存在本机，不会上传";
