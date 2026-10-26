@@ -705,6 +705,255 @@ static int aweca_mapPitchToV3(float ratio) {
     self.player = nil;
 }
 
+#pragma mark - 内置情绪（v0.4.9）
+
+// 30 条 Fish Audio 情绪标签 + 中文备注（备注只影响列表显示，合成始终用英文标签）
++ (NSArray<NSArray<NSString *> *> *)sl_defaultFishEmotions {
+    static NSArray *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table = @[
+            @[@"Continuous Panting",    @"持续喘气"],
+            @[@"Continuous Gasping",    @"连连倒气"],
+            @[@"Sustained Wheezing",    @"不停哮喘"],
+            @[@"Rapid Breathing",       @"急促呼吸"],
+            @[@"Repeated Gulping",      @"反复吞咽"],
+            @[@"Fits of Coughing",      @"一阵咳嗽"],
+            @[@"Repeated Sneezing",     @"连续喷嚏"],
+            @[@"Audible Swallowing",    @"吞咽出声"],
+            @[@"Repeated Burping",      @"反复打嗝"],
+            @[@"Long Yawning",          @"长长哈欠"],
+            @[@"Continuous Groaning",   @"持续哼唧"],
+            @[@"Sustained Moaning",     @"连绵呻吟"],
+            @[@"Continuous Screaming",  @"持续尖叫"],
+            @[@"Prolonged Shouting",    @"长时间喊"],
+            @[@"Continuous Sobbing",    @"不停抽泣"],
+            @[@"Constant Whining",      @"委屈抱怨"],
+            @[@"Continuous Roaring",    @"持续咆哮"],
+            @[@"Uncontrollable Laughter", @"放声大笑"],
+            @[@"Soft Chuckling",        @"轻声轻笑"],
+            @[@"Repeated Snickering",   @"连连偷笑"],
+            @[@"Indistinct Mumbling",   @"含糊嘟囔"],
+            @[@"Stuttering Speech",     @"结巴说话"],
+            @[@"Soft Murmuring",        @"柔声低语"],
+            @[@"Echoing Voice",         @"空灵回声"],
+            @[@"Angry Muttering",       @"生气嘟囔"],
+            @[@"Repeated Sniffling",    @"反复抽鼻"],
+            @[@"Sighing Heavily",       @"重重叹气"],
+            @[@"Awkward Silence",       @"尴尬沉默"],
+            @[@"Hesitant Speech",       @"迟疑说话"],
+            @[@"Deep Sighing",          @"深深叹气"],
+        ];
+    });
+    return table;
+}
+
+// 把标签的括号剥掉，便于「已存在」判断（用户可能自建过同一个标签、括号不同）
+static NSString *SLEmotionBare(NSString *tag) {
+    if (![tag isKindOfClass:[NSString class]] || tag.length < 3) return tag ?: @"";
+    unichar f = [tag characterAtIndex:0];
+    unichar l = [tag characterAtIndex:tag.length - 1];
+    if ((f == '[' && l == ']') || (f == '(' && l == ')')) {
+        return [tag substringWithRange:NSMakeRange(1, tag.length - 2)];
+    }
+    return tag;
+}
+
+// 首次启动补齐 30 条内置情绪；已有自定义的只补缺失项，不覆盖备注、不动已勾选状态
+- (void)seedDefaultFishEmotions {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d boolForKey:@"SLDefaultEmotionsV1"]) return;
+
+    NSMutableArray<NSString *> *all = [self.fishEmotionAll mutableCopy] ?: [NSMutableArray array];
+    NSMutableArray<NSString *> *notes = [self.fishEmotionNotes mutableCopy] ?: [NSMutableArray array];
+    while (notes.count < all.count) [notes addObject:@""];
+
+    BOOL s1 = [self.fishModel isEqualToString:@"s1"];
+    for (NSArray<NSString *> *pair in [AWECATTSManager sl_defaultFishEmotions]) {
+        NSString *bare = pair[0];
+        BOOL exists = NO;
+        for (NSString *x in all) {
+            if ([SLEmotionBare(x) caseInsensitiveCompare:bare] == NSOrderedSame) { exists = YES; break; }
+        }
+        if (exists) continue;
+        [all addObject:(s1 ? [NSString stringWithFormat:@"(%@)", bare] : [NSString stringWithFormat:@"[%@]", bare])];
+        [notes addObject:pair[1]];
+    }
+    if (notes.count > all.count) notes = [[notes subarrayWithRange:NSMakeRange(0, all.count)] mutableCopy];
+
+    self.fishEmotionAll = all;
+    self.fishEmotionNotes = notes;
+    [d setBool:YES forKey:@"SLDefaultEmotionsV1"];
+    [self saveConfig];
+}
+
+#pragma mark - 音色导入（v0.4.9）
+
+static NSString *SLStringOf(id v) {
+    return [v isKindOfClass:[NSString class]] ? v : nil;
+}
+
+// 单个音色对象 → 归一化字段；识别不了返回 nil
++ (NSDictionary *)sl_normalizeVoiceItem:(NSDictionary *)raw inheritedCategory:(NSString *)cat skipped:(NSInteger *)skipped {
+    if (![raw isKindOfClass:[NSDictionary class]]) { if (skipped) (*skipped)++; return nil; }
+
+    NSString *type = SLStringOf(raw[@"type"]) ?: SLStringOf(raw[@"engine"]);
+    if (type.length && [type rangeOfString:@"fish" options:NSCaseInsensitiveSearch].location == NSNotFound) {
+        if (skipped) (*skipped)++;   // fine / kk 等非 Fish 引擎，跳过
+        return nil;
+    }
+    NSString *vid = SLStringOf(raw[@"vid"]) ?: SLStringOf(raw[@"voice_id"])
+                 ?: SLStringOf(raw[@"reference_id"]) ?: SLStringOf(raw[@"_id"])
+                 ?: SLStringOf(raw[@"id"]);
+    vid = [vid stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!vid.length) { if (skipped) (*skipped)++; return nil; }
+
+    NSString *name = SLStringOf(raw[@"name"]) ?: SLStringOf(raw[@"title"])
+                  ?: SLStringOf(raw[@"voice_name"]) ?: SLStringOf(raw[@"nickname"]) ?: vid;
+    name = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!name.length) name = vid;
+
+    NSString *img = SLStringOf(raw[@"img"]) ?: SLStringOf(raw[@"avatar"])
+                 ?: SLStringOf(raw[@"cover_image"]) ?: SLStringOf(raw[@"cover"]);
+    NSString *category = SLStringOf(raw[@"category"]) ?: SLStringOf(raw[@"cat"])
+                      ?: SLStringOf(raw[@"group"]) ?: cat ?: @"";
+
+    return @{ @"name": name, @"voiceType": vid, @"img": img ?: @"", @"category": category };
+}
+
+// 递归展开：数组 / 字典包一层 / 分类字典
++ (void)sl_collectVoiceItems:(id)node inheritedCategory:(NSString *)cat
+                       into:(NSMutableArray *)out skipped:(NSInteger *)skipped {
+    if ([node isKindOfClass:[NSArray class]]) {
+        for (id one in (NSArray *)node) {
+            if ([one isKindOfClass:[NSDictionary class]]) {
+                // 分类字典里再套一层 {"name":..., "list":[...]} 的写法
+                id nested = ((NSDictionary *)one)[@"voices"] ?: ((NSDictionary *)one)[@"list"];
+                if ([nested isKindOfClass:[NSArray class]]) {
+                    NSString *sub = SLStringOf(((NSDictionary *)one)[@"category"])
+                                 ?: SLStringOf(((NSDictionary *)one)[@"name"]) ?: cat;
+                    [self sl_collectVoiceItems:nested inheritedCategory:sub into:out skipped:skipped];
+                    continue;
+                }
+                NSDictionary *n = [self sl_normalizeVoiceItem:one inheritedCategory:cat skipped:skipped];
+                if (n) [out addObject:n];
+            } else if ([one isKindOfClass:[NSArray class]]) {
+                [self sl_collectVoiceItems:one inheritedCategory:cat into:out skipped:skipped];
+            } else {
+                if (skipped) (*skipped)++;
+            }
+        }
+        return;
+    }
+    if ([node isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *dict = (NSDictionary *)node;
+        id inner = dict[@"items"] ?: dict[@"voices"] ?: dict[@"data"]
+                ?: dict[@"list"] ?: dict[@"models"] ?: dict[@"result"];
+        if (inner) {
+            [self sl_collectVoiceItems:inner inheritedCategory:cat into:out skipped:skipped];
+            return;
+        }
+        // {"分类名": [ ... ], ...} 形态（voicesByCat / categories / 直接分类键）
+        for (NSString *key in dict) {
+            id v = dict[key];
+            if ([v isKindOfClass:[NSArray class]]) {
+                [self sl_collectVoiceItems:v inheritedCategory:key into:out skipped:skipped];
+            }
+        }
+        return;
+    }
+    if (skipped) (*skipped)++;
+}
+
++ (NSArray<NSDictionary *> *)sl_parseVoiceJSONText:(NSString *)text skipped:(NSInteger *)skipped {
+    NSInteger local = 0;
+    if (skipped) *skipped = 0;
+    NSMutableArray *out = [NSMutableArray array];
+    if (![text isKindOfClass:[NSString class]] || !text.length) return out;
+
+    NSString *s = [text stringByReplacingOccurrencesOfString:@"\uFEFF" withString:@""];
+    NSRange firstBrace = [s rangeOfString:@"["];
+    NSRange firstCurly = [s rangeOfString:@"{"];
+    NSUInteger start = NSNotFound;
+    if (firstBrace.location != NSNotFound && firstCurly.location != NSNotFound) {
+        start = MIN(firstBrace.location, firstCurly.location);
+    } else if (firstBrace.location != NSNotFound) {
+        start = firstBrace.location;
+    } else if (firstCurly.location != NSNotFound) {
+        start = firstCurly.location;
+    }
+    if (start == NSNotFound) { if (skipped) *skipped = 0; return out; }
+
+    NSRange rBracket = [s rangeOfString:@"]" options:NSBackwardsSearch];
+    NSRange rBrace = [s rangeOfString:@"}" options:NSBackwardsSearch];
+    NSUInteger end = MAX(rBracket.location == NSNotFound ? 0 : rBracket.location,
+                         rBrace.location == NSNotFound ? 0 : rBrace.location);
+    if (end < start) end = s.length - 1;
+    NSString *json = [s substringWithRange:NSMakeRange(start, end - start + 1)];
+
+    id root = [NSJSONSerialization JSONObjectWithData:[json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    if (!root) return out;
+    [self sl_collectVoiceItems:root inheritedCategory:nil into:out skipped:&local];
+
+    // 同一次导入内按 vid 去重（后出现的名字覆盖前面的）
+    NSMutableDictionary *byVid = [NSMutableDictionary dictionary];
+    NSMutableArray *order = [NSMutableArray array];
+    for (NSDictionary *v in out) {
+        NSString *vid = v[@"voiceType"];
+        if (!byVid[vid]) [order addObject:vid];
+        byVid[vid] = v;
+    }
+    NSMutableArray *dedup = [NSMutableArray array];
+    for (NSString *vid in order) [dedup addObject:byVid[vid]];
+
+    if (skipped) *skipped = local;
+    return dedup;
+}
+
++ (NSDictionary *)sl_importFishVoices:(NSArray<NSDictionary *> *)items {
+    NSInteger added = 0, updated = 0;
+    if (![items isKindOfClass:[NSArray class]] || !items.count) {
+        return @{ @"added": @0, @"updated": @0 };
+    }
+    NSMutableArray<NSDictionary *> *lib = [[AWECATTSManager fishVoices] mutableCopy] ?: [NSMutableArray array];
+    for (NSDictionary *it in items) {
+        NSString *vid = it[@"voiceType"];
+        NSString *name = it[@"name"];
+        if (!vid.length) continue;
+        NSInteger hit = -1;
+        for (NSUInteger i = 0; i < lib.count; i++) {
+            if ([lib[i][@"voiceType"] isEqualToString:vid]) { hit = (NSInteger)i; break; }
+        }
+        if (hit >= 0) {
+            NSMutableDictionary *m = [lib[hit] mutableCopy];
+            if (name.length) m[@"name"] = name;
+            m[@"voiceType"] = vid;
+            lib[hit] = m;
+            updated++;
+        } else {
+            [lib addObject:@{ @"name": name.length ? name : vid,
+                              @"voiceType": vid,
+                              @"color": @(lib.count % 6) }];
+            added++;
+        }
+    }
+    [AWECATTSManager saveFishVoices:lib];
+    return @{ @"added": @(added), @"updated": @(updated) };
+}
+
++ (void)sl_downloadAvatarForVoice:(NSString *)vid fromURL:(NSString *)urlString {
+    if (!vid.length || !urlString.length) return;
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (!url) return;
+    [[[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        (void)resp; (void)err;
+        if (!data.length) return;
+        UIImage *img = [UIImage imageWithData:data];
+        if (!img) return;
+        [[AWECATTSManager shared] saveFishAvatarImage:img forVoiceID:vid];
+    }] resume];
+}
+
 #pragma mark - 持久化
 
 - (void)saveConfig {
@@ -772,6 +1021,9 @@ static int aweca_mapPitchToV3(float ratio) {
         [aligned addObject:([n isKindOfClass:[NSString class]] ? n : @"")];
     }
     self.fishEmotionNotes = aligned;
+
+    // v0.4.9：首次启动补齐 30 条内置情绪（带中文备注）
+    [self seedDefaultFishEmotions];
 }
 
 @end
