@@ -7,12 +7,13 @@
 #import "AWECATOSUploader.h"
 #import "AWECAAPISettingsController.h"
 #import "AWECATTSVoiceListController.h"
+#import "SLLogViewController.h"
 #import "SLAMREncoder.h"
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLUseAMRKey  @"SLUseAMR"
-#define SLVersion @"0.2"
+#define SLVersion @"0.3"
 
 @interface SLSettingsPanel ()
 @property (nonatomic, strong) UISegmentedControl *engineSeg;
@@ -60,7 +61,7 @@
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    return 4;
+    return 5;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
@@ -68,12 +69,13 @@
     if (section == 0) return 2;   // 开关 + 引擎
     if (section == 1) return 2;   // 音色库 + 情绪
     if (section == 2) return 2;   // 口令 + 输出格式
-    return 1;                     // API 凭证
+    if (section == 3) return 1;   // API 凭证
+    return 1;                     // 运行日志
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    return @[@"基本", @"音色与情绪", @"发送方式", @"凭证"][section];
+    return @[@"基本", @"音色与情绪", @"发送方式", @"凭证", @"诊断"][section];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
@@ -148,10 +150,17 @@
         return cell;
     }
 
-    cell.textLabel.text = @"API 凭证";
-    cell.detailTextLabel.text = mgr.fishEngine
-        ? (mgr.fishAPIKey.length ? @"FishAudio Key 已配置" : @"未配置 FishAudio Key")
-        : (mgr.appID.length ? @"火山 Key 已配置" : @"未配置火山凭证");
+    if (ip.section == 3) {
+        cell.textLabel.text = @"API 凭证";
+        cell.detailTextLabel.text = mgr.fishEngine
+            ? (mgr.fishAPIKey.length ? @"FishAudio Key 已配置" : @"未配置 FishAudio Key")
+            : (mgr.appID.length ? @"火山 Key 已配置" : @"未配置火山凭证");
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
+    }
+
+    cell.textLabel.text = @"运行日志";
+    cell.detailTextLabel.text = @"排查 #tts 没反应时点这里，可直接复制";
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
 }
@@ -177,6 +186,11 @@
     }
     if (ip.section == 3) {
         AWECAAPISettingsController *vc = [[AWECAAPISettingsController alloc] init];
+        [self.navigationController pushViewController:vc animated:YES];
+        return;
+    }
+    if (ip.section == 4) {
+        SLLogViewController *vc = [[SLLogViewController alloc] init];
         [self.navigationController pushViewController:vc animated:YES];
     }
 }
