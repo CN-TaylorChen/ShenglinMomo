@@ -48,14 +48,15 @@ jobs:
 
       - name: Package deb
         run: |
+          VER=$(grep '^Version:' control | awk '{print $2}' | tr -d '\r')
           python3 make_deb.py --control control \
             --dylib ShenglinMomo.dylib --plist ShenglinMomo.plist \
             --dylib-name ShenglinMomo.dylib \
-            --out "ShenglinMomo-v$(grep '^Version:' control | awk '{print $2}').deb"
+            --out "ShenglinMomo-v${VER}.deb"
 
       - name: Resolve artifact name (声临-v<版本>)
         id: art
-        run: echo "name=ShenglinMomo-v$(grep '^Version:' control | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        run: echo "name=ShenglinMomo-v$(grep '^Version:' control | awk '{print $2}' | tr -d '\r')" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
