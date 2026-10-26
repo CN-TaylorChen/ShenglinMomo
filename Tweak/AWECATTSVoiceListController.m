@@ -45,7 +45,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [self loadCustomVoices];
     [self loadRecommended];
 
-    self.title = self.fishMode ? [NSString stringWithFormat:@"%@ · FishAudio 音色", AWECAProductName]
+    self.title = self.fishMode ? [NSString stringWithFormat:@"%@ · Fish Audio 音色", AWECAProductName]
                                : [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
