@@ -23,6 +23,7 @@ ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/SLVirtualLocation.m \
 	Tweak/SLMapPickerController.m \
 	Tweak/SLAPIBackup.m \
+	Tweak/SLTTSAuditionPanel.m \
 	Tweak/AWECAAPISettingsController.m \
 	Tweak/AWECATTSVoiceListController.m \
 	Tweak/SLVoiceImportController.m \
