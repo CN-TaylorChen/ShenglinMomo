@@ -234,59 +234,38 @@ void SLStartEntryWatcher(void) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    return 2;
+    return 1;   // v0.4.9：删掉表情预设，只留自定义图片
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return [self sl_emojiItems].count + 1;   // 预设 + 自定义表情
+    (void)section;
     return 2;   // 从相册选择 / 恢复默认
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return @"表情";
-    return @"图片";
+    (void)section;
+    return @"自定义图标";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *rid = @"icon";
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:rid];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:rid];
     cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.textLabel.font = [UIFont systemFontOfSize:16];
+    cell.detailTextLabel.text = nil;
 
     NSString *cur = SLFloatIconValue();
-    if (ip.section == 0) {
-        NSArray<NSString *> *items = [self sl_emojiItems];
-        if (ip.row < items.count) {
-            NSString *e = items[ip.row];
-            cell.textLabel.text = e;
-            cell.textLabel.font = [UIFont systemFontOfSize:22];
-            if ([cur isEqualToString:[@"emoji:" stringByAppendingString:e]]) {
-                cell.accessoryType = UITableViewCellAccessoryCheckmark;
-            }
-        } else {
-            cell.textLabel.text = @"自定义表情";
-            cell.textLabel.font = [UIFont systemFontOfSize:16];
-            NSString *e = [cur hasPrefix:@"emoji:"] ? [cur substringFromIndex:6] : nil;
-            BOOL isCustom = e.length > 0 && ![items containsObject:e];
-            if (isCustom) {
-                cell.accessoryType = UITableViewCellAccessoryCheckmark;
-                cell.textLabel.text = [NSString stringWithFormat:@"自定义表情    %@", e];
-            } else {
-                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-            }
-        }
+    if (ip.row == 0) {
+        cell.textLabel.text = @"从相册选择图片";
+        cell.detailTextLabel.text = [cur hasPrefix:@"image:"] ? @"已设置" : @"";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else {
-        cell.textLabel.font = [UIFont systemFontOfSize:16];
-        if (ip.row == 0) {
-            cell.textLabel.text = @"从相册选择图片";
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        } else {
-            cell.textLabel.text = @"恢复默认（🎙️）";
-            if ([cur isEqualToString:kSLFloatIconDefault]) {
-                cell.accessoryType = UITableViewCellAccessoryCheckmark;
-            }
+        cell.textLabel.text = @"恢复默认（🎙️）";
+        if ([cur isEqualToString:kSLFloatIconDefault]) {
+            cell.accessoryType = UITableViewCellAccessoryCheckmark;
         }
     }
     return cell;
@@ -296,17 +275,6 @@ void SLStartEntryWatcher(void) {
     [tv deselectRowAtIndexPath:ip animated:YES];
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
 
-    if (ip.section == 0) {
-        NSArray<NSString *> *items = [self sl_emojiItems];
-        if (ip.row < items.count) {
-            [d setObject:[@"emoji:" stringByAppendingString:items[ip.row]] forKey:kSLFloatIconKey];
-            [d synchronize];
-            [self sl_applied];
-        } else {
-            [self sl_askCustomEmoji];
-        }
-        return;
-    }
     if (ip.row == 0) {
         [self sl_pickPhoto];
         return;
