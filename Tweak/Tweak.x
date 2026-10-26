@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.12"
+#define SLVersion @"0.4.13"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -1041,15 +1041,17 @@ static void SLArmTTS(id handler,
 
             if ([SLTTSAuditionPanel isEnabled]) {
                 // 试听期间不清空装填：用户点「用这条」才算数，点「取消」才撤销。
+                // v0.4.13：把 16k PCM 一起递进去，面板拿它封 WAV 试听（AMR 播不动）
                 [SLTTSAuditionPanel presentWithAudioPath:outPath
-                                                duration:dur
-                                                    text:content
-                                                   onUse:^{
+                                                 pcm16k:gSLTTSPCM16k
+                                               duration:dur
+                                                   text:content
+                                                  onUse:^{
                     [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 现在录音发送 AI 语音（%.1fs）", dur]
                                  duration:2.0];
                     startDisarmTimer();
                 }
-                                                onCancel:^{
+                                                  onCancel:^{
                     // 只有这次装的还是这条才清，避免误清掉用户已经换成新的一条
                     if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armed]) {
                         gSLTTSAudioPath = nil;
