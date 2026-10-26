@@ -15,4 +15,8 @@
 /// 把任意音频文件解码重采样为 8kHz / 16bit / 单声道 PCM（内部也用于调试）
 + (NSData *)pcm8kMono16AtPath:(NSString *)inPath;
 
+/// 生成 frames 个 AMR-NB 静音帧（12.2kbps，32 字节/帧，不含 #!AMR 头）。
+/// 用途：把 AI 语音补长到与用户真实录音同样时长，保证语音条秒数与音频一致。
++ (NSData *)amrSilenceForFrames:(NSUInteger)frames;
+
 @end
