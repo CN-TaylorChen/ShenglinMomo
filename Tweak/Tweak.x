@@ -26,7 +26,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.1"
+#define SLVersion @"0.3.2"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -99,26 +99,109 @@ static BOOL SLClaimText(NSString *text) {
 
 #pragma mark - 文本解析
 
+// 一次性 dump 消息对象的所有属性（含父类），便于定位文本真实字段
+static NSString *SLDumpPropsOnce(id arg) {
+    static int done = 0;
+    if (done) return nil;
+    done = 1;
+    NSMutableArray *arr = [NSMutableArray array];
+    Class c = [arg class];
+    while (c && c != [NSObject class]) {
+        unsigned int pc = 0;
+        objc_property_t *pl = class_copyPropertyList(c, &pc);
+        for (unsigned i = 0; i < pc; i++) {
+            const char *pn = property_getName(pl[i]);
+            NSString *pname = [NSString stringWithUTF8String:pn];
+            id val = nil;
+            @try { val = [arg valueForKey:pname]; } @catch (NSException *e) {}
+            NSString *vs = nil;
+            if ([val isKindOfClass:[NSString class]]) {
+                NSString *s = (NSString *)val;
+                vs = s.length > 80 ? [NSString stringWithFormat:@"\"%@…\"", [s substringToIndex:80]] : [NSString stringWithFormat:@"\"%@\"", s];
+            } else if ([val isKindOfClass:[NSNumber class]]) {
+                vs = [NSString stringWithFormat:@"#%@", val];
+            } else if (val) {
+                vs = [NSString stringWithFormat:@"(%@)", NSStringFromClass([val class])];
+            } else {
+                vs = @"(nil)";
+            }
+            [arr addObject:[NSString stringWithFormat:@"%@=%@", pname, vs]];
+        }
+        free(pl);
+        c = class_getSuperclass(c);
+    }
+    SLLog(@"DUMP %@ props: %@", NSStringFromClass([arg class]), [arr componentsJoinedByString:@" | "]);
+    return nil;
+}
+
+// 命中 #tts 后清空输入栏（避免原文本残留）
+static void SLClearInputBars(void) {
+    @try {
+        NSArray *classes = @[NSClassFromString(@"MDChatInputBar"),
+                              NSClassFromString(@"MDNewInputTextBar"),
+                              NSClassFromString(@"MDChatUniverseInputBar")];
+        UIWindow *win = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+                if ([sc isKindOfClass:[UIWindowScene class]] &&
+                    ((UIWindowScene *)sc).activationState == UISceneActivationStateForegroundActive) {
+                    win = ((UIWindowScene *)sc).windows.firstObject;
+                    break;
+                }
+            }
+        }
+        if (!win) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            win = [UIApplication sharedApplication].keyWindow;
+#pragma clang diagnostic pop
+        }
+        if (!win) return;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:win];
+        while (q.count) {
+            UIView *v = q.firstObject; [q removeObjectAtIndex:0];
+            for (NSString *cn in classes) {
+                if (cn && [v isKindOfClass:NSClassFromString(cn)]) {
+                    id tv = [v valueForKey:@"inputTextView"];
+                    if ([tv isKindOfClass:[UITextView class]]) ((UITextView *)tv).text = @"";
+                }
+            }
+            for (UIView *s in v.subviews) [q addObject:s];
+        }
+    } @catch (NSException *e) {}
+}
+
 static NSString *SLTextFromArgument(id arg) {
     if ([arg isKindOfClass:[NSString class]]) return (NSString *)arg;
     if ([arg isKindOfClass:[NSAttributedString class]]) return ((NSAttributedString *)arg).string;
     if ([arg isKindOfClass:[NSDictionary class]]) {
         NSDictionary *d = (NSDictionary *)arg;
-        for (NSString *k in @[@"text", @"content", @"msg", @"message"]) {
+        for (NSString *k in @[@"text", @"content", @"msg", @"message", @"body"]) {
             id v = d[k];
             if ([v isKindOfClass:[NSString class]]) return v;
         }
         return nil;
     }
     if (arg) {
-        for (NSString *name in @[@"text", @"content", @"msgContent", @"messageText", @"msg"]) {
+        // 陌陌文本消息字段（离线 class-dump 确认 MDBaseMessage 无纯 text getter）
+        NSArray *names = @[@"text", @"textv2", @"content", @"body", @"instantMessageText",
+                           @"msgContent", @"messageText", @"msg", @"title", @"noreplyText",
+                           @"additionalText", @"extraDataString", @"msgExtraInfo"];
+        for (NSString *name in names) {
             SEL s = NSSelectorFromString(name);
             if (![arg respondsToSelector:s]) continue;
             @try {
                 id v = ((id (*)(id, SEL))objc_msgSend)(arg, s);
-                if ([v isKindOfClass:[NSString class]]) return v;
+                if ([v isKindOfClass:[NSString class]] && [v length]) return v;
             } @catch (NSException *e) { }
         }
+        for (NSString *name in names) {
+            @try {
+                id v = [arg valueForKey:name];
+                if ([v isKindOfClass:[NSString class]] && [v length]) return v;
+            } @catch (NSException *e) { }
+        }
+        SLDumpPropsOnce(arg);
     }
     return nil;
 }
@@ -415,7 +498,7 @@ static void SLSendTextMessage(id self, SEL _cmd, id arg) {
     }
 
     SLLog(@"#tts hit via %@ -sendTextMessage:", NSStringFromClass([self class]));
-    SLHandleTTS(self, content, ^{ if (orig) orig(self, _cmd, arg); }, nil);
+    SLHandleTTS(self, content, ^{ if (orig) orig(self, _cmd, arg); }, ^{ SLClearInputBars(); });
 }
 
 #pragma mark - 钩子 3：MMCommonServiceImpl -sendTextMessage:withTargetID:isSingle:
@@ -435,7 +518,7 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
         return;
     }
     SLLog(@"#tts hit via MMCommonServiceImpl");
-    SLHandleTTS(self, content, ^{ if (orig) orig(self, _cmd, text, targetID, isSingle); }, nil);
+    SLHandleTTS(self, content, ^{ if (orig) orig(self, _cmd, text, targetID, isSingle); }, ^{ SLClearInputBars(); });
 }
 
 #pragma mark - 安装
