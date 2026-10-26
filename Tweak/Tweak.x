@@ -439,7 +439,7 @@ static BOOL SLTypeIsNamedObj(const char *te) {
 static BOOL SLTypeIsSafeObj(const char *te) {
     if (!SLTypeIsNamedObj(te)) return NO;
     static const char *safe[] = {"@\"NSString\"","@\"NSMutableString\"","@\"NSURL\"",
-                                 @"@\"NSNumber\"","@\"NSData\"","@\"NSMutableData\""};
+                                 "@\"NSNumber\"","@\"NSData\"","@\"NSMutableData\""};
     for (int i = 0; i < 6; i++) {
         if (strncmp(te, safe[i], strlen(safe[i])) == 0) return YES;
     }
