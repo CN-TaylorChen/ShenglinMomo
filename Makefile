@@ -20,6 +20,8 @@ ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/AWECATTSManager.m \
 	Tweak/AWECATOSUploader.m \
 	Tweak/SLAlignBox.m \
+	Tweak/SLVirtualLocation.m \
+	Tweak/SLMapPickerController.m \
 	Tweak/SLAPIBackup.m \
 	Tweak/AWECAAPISettingsController.m \
 	Tweak/AWECATTSVoiceListController.m \
@@ -31,7 +33,7 @@ ShenglinMomo_FILES = Tweak/Tweak.x \
 
 ShenglinMomo_CFLAGS = -fobjc-arc
 ShenglinMomo_LDFLAGS = -Xlinker -not_for_dyld_shared_cache
-ShenglinMomo_FRAMEWORKS = UIKit Foundation AVFoundation CoreAudio CoreMedia AudioToolbox UniformTypeIdentifiers SafariServices PhotosUI
+ShenglinMomo_FRAMEWORKS = UIKit Foundation MapKit CoreLocation AVFoundation CoreAudio CoreMedia AudioToolbox UniformTypeIdentifiers SafariServices PhotosUI
 ShenglinMomo_LIBRARIES = objc
 
 # AMR-NB 编码器（opencore-amrnb 静态库，可选）
