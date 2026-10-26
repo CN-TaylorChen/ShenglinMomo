@@ -57,6 +57,14 @@ static BOOL SLWriteWAV(NSData *pcm, NSString *path, double sampleRate) {
     return [d writeToFile:path atomically:YES];
 }
 
+// 绝对路径 -> 相对 voicepacks 根目录的索引键
+static NSString *SLRelOfPath(NSString *path) {
+    if (![path isKindOfClass:[NSString class]] || !path.length) return nil;
+    NSString *root = [[SLVoicePack rootDir] stringByAppendingString:@"/"];
+    if ([path hasPrefix:root]) return [path substringFromIndex:root.length];
+    return path.lastPathComponent;
+}
+
 @interface SLVoicePack ()
 + (void)sl_addEntry:(NSDictionary *)entry;
 + (void)sl_removeEntryRel:(NSString *)rel;
@@ -110,11 +118,162 @@ static BOOL SLWriteWAV(NSData *pcm, NSString *path, double sampleRate) {
 
 + (NSArray<NSString *> *)folders {
     NSMutableArray *names = [NSMutableArray array];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = [self rootDir];
+    // 磁盘上的目录（含刚新建、还没放音频的空文件夹）
+    NSArray *items = [fm contentsOfDirectoryAtPath:root error:nil] ?: @[];
+    for (NSString *item in items) {
+        if ([item hasPrefix:@"."]) continue;
+        BOOL isDir = NO;
+        NSString *full = [root stringByAppendingPathComponent:item];
+        if ([fm fileExistsAtPath:full isDirectory:&isDir] && isDir) {
+            if (![names containsObject:item]) [names addObject:item];
+        }
+    }
+    // 索引里出现但目录已被手工改名的，也补进来
     for (NSDictionary *p in [self allPacks]) {
         NSString *f = [p[@"folder"] isKindOfClass:[NSString class]] ? p[@"folder"] : @"未分组";
         if (![names containsObject:f]) [names addObject:f];
     }
+    [names sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        BOOL ua = [a isEqualToString:@"未分组"], ub = [b isEqualToString:@"未分组"];
+        if (ua != ub) return ua ? NSOrderedDescending : NSOrderedAscending;   // 未分组沉底
+        return [a localizedStandardCompare:b];
+    }];
     return names;
+}
+
+#pragma mark - 目录维护
+
++ (NSInteger)syncFromDisk {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = [self rootDir];
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+
+    NSMutableDictionary<NSString *, NSMutableDictionary *> *byRel = [NSMutableDictionary dictionary];
+    id raw = [d objectForKey:kSLPacksKey];
+    if ([raw isKindOfClass:[NSArray class]]) {
+        for (id item in raw) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            NSString *rel = item[@"rel"];
+            if ([rel isKindOfClass:[NSString class]] && rel.length) byRel[rel] = [item mutableCopy];
+        }
+    }
+
+    __block NSInteger added = 0;
+    void (^scan)(NSString *, NSString *) = ^(NSString *dir, NSString *folder) {
+        NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil] ?: @[];
+        for (NSString *item in items) {
+            if ([item hasPrefix:@"."]) continue;
+            NSString *full = [dir stringByAppendingPathComponent:item];
+            BOOL isDir = NO;
+            if (![fm fileExistsAtPath:full isDirectory:&isDir]) continue;
+            if (isDir || !SLIsAudioFile(full)) continue;
+            NSString *rel = folder.length ? [folder stringByAppendingPathComponent:item] : item;
+            NSMutableDictionary *m = byRel[rel];
+            if (!m) {
+                byRel[rel] = [@{ @"name": item.stringByDeletingPathExtension ?: @"未命名",
+                                 @"rel": rel,
+                                 @"folder": folder.length ? folder : @"未分组",
+                                 @"dur": @(0) } mutableCopy];
+                added++;
+            } else {
+                m[@"folder"] = folder.length ? folder : @"未分组";
+            }
+        }
+    };
+
+    scan(root, @"");
+    for (NSString *sub in ([fm contentsOfDirectoryAtPath:root error:nil] ?: @[])) {
+        if ([sub hasPrefix:@"."]) continue;
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:[root stringByAppendingPathComponent:sub] isDirectory:&isDir] && isDir) {
+            scan([root stringByAppendingPathComponent:sub], sub);
+        }
+    }
+
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSString *rel in byRel) {
+        if ([fm fileExistsAtPath:[root stringByAppendingPathComponent:rel]]) [out addObject:byRel[rel]];
+    }
+    [d setObject:out forKey:kSLPacksKey];
+    [d synchronize];
+    if (added > 0) SLLog(@"pack sync +%ld (total %lu)", (long)added, (unsigned long)out.count);
+    return added;
+}
+
++ (BOOL)createFolder:(NSString *)name {
+    NSString *n = SLSafeName(name);
+    if (!n.length || [n isEqualToString:@"未分组"]) return NO;
+    NSString *dir = [[self rootDir] stringByAppendingPathComponent:n];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL isDir = NO;
+    if ([fm fileExistsAtPath:dir isDirectory:&isDir]) return NO;
+    NSError *e = nil;
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&e];
+    if (e) { SLLog(@"pack mkdir fail %@ / %@", n, e.localizedDescription); return NO; }
+    SLLog(@"pack mkdir %@", n);
+    return YES;
+}
+
++ (BOOL)removeFolder:(NSString *)name {
+    if (![name isKindOfClass:[NSString class]] || !name.length) return NO;
+    if ([name isEqualToString:@"未分组"]) return NO;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = [[self rootDir] stringByAppendingPathComponent:name];
+    for (NSString *item in ([fm contentsOfDirectoryAtPath:dir error:nil] ?: @[])) {
+        if ([item hasPrefix:@"."]) continue;
+        return NO;   // 非空，不允许删
+    }
+    NSError *e = nil;
+    [fm removeItemAtPath:dir error:&e];
+    if (e) { SLLog(@"pack rmdir fail %@ / %@", name, e.localizedDescription); return NO; }
+    SLLog(@"pack rmdir %@", name);
+    return YES;
+}
+
++ (BOOL)movePack:(NSDictionary *)pack toFolder:(NSString *)folder error:(NSString **)err {
+    NSString *src = [self pathOfPack:pack];
+    if (!src.length) { if (err) *err = @"文件不在了"; return NO; }
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL ungrouped = (!folder.length || [folder isEqualToString:@"未分组"]);
+    NSString *folderName = ungrouped ? @"未分组" : SLSafeName(folder);
+    NSString *dir = ungrouped ? [self rootDir]
+                              : [[self rootDir] stringByAppendingPathComponent:folderName];
+    if (![fm fileExistsAtPath:dir]) {
+        NSError *e = nil;
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:&e];
+        if (e) { if (err) *err = e.localizedDescription; return NO; }
+    }
+    if ([src.stringByDeletingLastPathComponent isEqualToString:dir]) return YES;   // 已经在这
+
+    NSString *dest = [self sl_uniquePathInDir:dir fileName:src.lastPathComponent];
+    NSError *e = nil;
+    [fm moveItemAtPath:src toPath:dest error:&e];
+    if (e) { if (err) *err = e.localizedDescription; return NO; }
+
+    NSString *oldRel = pack[@"rel"];
+    NSString *newRel = SLRelOfPath(dest);
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *list = [NSMutableArray array];
+    id raw = [d objectForKey:kSLPacksKey];
+    if ([raw isKindOfClass:[NSArray class]]) {
+        for (id item in raw) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            NSMutableDictionary *m = [item mutableCopy];
+            if ([m[@"rel"] isEqualToString:oldRel]) {
+                m[@"rel"] = newRel;
+                m[@"folder"] = folderName;
+                m[@"name"] = dest.lastPathComponent.stringByDeletingPathExtension ?: m[@"name"];
+            }
+            [list addObject:m];
+        }
+    }
+    [d setObject:list forKey:kSLPacksKey];
+    if ([[d stringForKey:kSLPackSelKey] isEqualToString:oldRel]) [d setObject:newRel forKey:kSLPackSelKey];
+    [d synchronize];
+    SLLog(@"pack move %@ -> %@", oldRel, newRel);
+    return YES;
 }
 
 + (NSArray<NSDictionary *> *)packsInFolder:(NSString *)folder {
