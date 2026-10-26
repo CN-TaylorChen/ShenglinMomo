@@ -75,19 +75,16 @@
 // v0.4.4：系统 footer 在陌陌的 tableView 里会被压成单行、右侧截断，
 // 统一改成多行自定义视图（numberOfLines = 0 + 自动高度）
 // v0.4.9.6：与主页一致，分组标题 / footer / 单元格文字统一到同一条左基线
+// v0.4.9.7：同主页 —— 只读已存在的 cell，不再走 rectForRowAtIndexPath（会和 footer 高度互相递归）
 static CGFloat AWECAMeasureLeading(UITableView *tv) {
     for (UITableViewCell *c in tv.visibleCells) {
         UILabel *lab = c.textLabel;
         if (!lab || lab.hidden || !lab.text.length) continue;
+        if (c.imageView.image) continue;     // 带图标的行文字被推右，不能当基准
         CGFloat x = CGRectGetMinX(c.frame) + CGRectGetMinX(lab.frame);
         if (x > 0) return x;
     }
-    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
-        if ([tv numberOfRowsInSection:s] <= 0) continue;
-        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (r.size.width > 0) return CGRectGetMinX(r) + 16;
-    }
-    return 36;
+    return 36;   // 卡片左缘 20 + 内边距 16
 }
 
 static UIView *AWECAMakeFooter(NSString *text, CGFloat x, CGFloat width) {
@@ -157,15 +154,7 @@ static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return _awecaLeading;
 }
 
-// 首帧 cell 未生成时用估算值，拿到真实 cell 后校正一次
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    CGFloat m = AWECAMeasureLeading(self.tableView);
-    if (m > 0 && fabs(m - _awecaLeading) > 0.5) {
-        _awecaLeading = m;
-        [self.tableView reloadData];
-    }
-}
+// v0.4.9.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
 
 #pragma mark - 字段读写
 
@@ -313,7 +302,7 @@ static NSString *AWECATrimStr(NSString *s) {
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSString *text = [self aweca_footerForSection:section];
     if (!text.length) return 0;
-    CGFloat w = tableView.bounds.size.width - [self aweca_leading:tableView] - 16;
+    CGFloat w = tableView.bounds.size.width - 68;   // 左基线 36 + 右 16 + 余量，不在此处调测量（会递归）
     if (w <= 0) return UITableViewAutomaticDimension;
     CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
                                   options:NSStringDrawingUsesLineFragmentOrigin
