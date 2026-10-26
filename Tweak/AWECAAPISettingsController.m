@@ -74,9 +74,26 @@
 
 // v0.4.4：系统 footer 在陌陌的 tableView 里会被压成单行、右侧截断，
 // 统一改成多行自定义视图（numberOfLines = 0 + 自动高度）
-static UIView *AWECAMakeFooter(NSString *text) {
+// v0.4.9.6：与主页一致，分组标题 / footer / 单元格文字统一到同一条左基线
+static CGFloat AWECAMeasureLeading(UITableView *tv) {
+    for (UITableViewCell *c in tv.visibleCells) {
+        UILabel *lab = c.textLabel;
+        if (!lab || lab.hidden || !lab.text.length) continue;
+        CGFloat x = CGRectGetMinX(c.frame) + CGRectGetMinX(lab.frame);
+        if (x > 0) return x;
+    }
+    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
+        if ([tv numberOfRowsInSection:s] <= 0) continue;
+        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
+        if (r.size.width > 0) return CGRectGetMinX(r) + 16;
+    }
+    return 36;
+}
+
+static UIView *AWECAMakeFooter(NSString *text, CGFloat x, CGFloat width) {
     if (!text.length) return nil;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
+    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 0)];
     UILabel *lab = [[UILabel alloc] init];
     lab.translatesAutoresizingMaskIntoConstraints = NO;
     lab.numberOfLines = 0;
@@ -85,7 +102,7 @@ static UIView *AWECAMakeFooter(NSString *text) {
     lab.text = text;
     [box addSubview:lab];
     [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:16],
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:MAX(0, x)],
         [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
         [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
         [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
@@ -94,12 +111,12 @@ static UIView *AWECAMakeFooter(NSString *text) {
 }
 
 // v0.4.9.2：系统分区头会把英文强制全大写（Fish Audio → FISH AUDIO），改成自定义视图。
-// v0.4.9.4：x 取白色卡片实际左边缘，跟框线对齐。
+// v0.4.9.6：x 与 footer 共用同一个左基线，三者对齐。
 static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (!text.length) return nil;
     CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
     UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, w - x - 16, 17)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, MAX(0, w - x - 16), 17)];
     lab.font = [UIFont systemFontOfSize:12];
     lab.textColor = [UIColor secondaryLabelColor];
     lab.text = text;
@@ -108,19 +125,11 @@ static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return box;
 }
 
-static CGFloat AWECAHeaderLeading(UITableView *tv) {
-    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
-        if ([tv numberOfRowsInSection:s] <= 0) continue;
-        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (r.size.width > 0) return r.origin.x;
-    }
-    return 20;
-}
-
 @implementation AWECAAPISettingsController {
 
     AWECATTSManager *_mgr;
     BOOL _advancedExpanded;   // v0.4.5：TOS 与识别资源 ID 合并成一组，共用这个折叠开关
+    CGFloat _awecaLeading;    // v0.4.9.6：统一左基线（单元格文字左边缘）
 }
 
 // v0.4.6：跟主面板一致，改用 insetGrouped 圆角卡片样式
@@ -141,6 +150,21 @@ static CGFloat AWECAHeaderLeading(UITableView *tv) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
         target:self action:@selector(aweca_saveAll)];
     _advancedExpanded = NO;
+}
+
+- (CGFloat)aweca_leading:(UITableView *)tv {
+    if (_awecaLeading <= 0) _awecaLeading = AWECAMeasureLeading(tv);
+    return _awecaLeading;
+}
+
+// 首帧 cell 未生成时用估算值，拿到真实 cell 后校正一次
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat m = AWECAMeasureLeading(self.tableView);
+    if (m > 0 && fabs(m - _awecaLeading) > 0.5) {
+        _awecaLeading = m;
+        [self.tableView reloadData];
+    }
 }
 
 #pragma mark - 字段读写
@@ -260,7 +284,7 @@ static NSString *AWECATrimStr(NSString *s) {
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    return AWECAMakeHeader([self aweca_headerForSection:section], AWECAHeaderLeading(tableView), tableView.bounds.size.width);
+    return AWECAMakeHeader([self aweca_headerForSection:section], [self aweca_leading:tableView], tableView.bounds.size.width);
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
@@ -282,15 +306,14 @@ static NSString *AWECATrimStr(NSString *s) {
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
-    (void)tableView;
-    return AWECAMakeFooter([self aweca_footerForSection:section]);
+    return AWECAMakeFooter([self aweca_footerForSection:section], [self aweca_leading:tableView], tableView.bounds.size.width);
 }
 
 // 按文本实算高度，保证多行说明完整显示（系统默认单行会截断）
 - (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
     NSString *text = [self aweca_footerForSection:section];
     if (!text.length) return 0;
-    CGFloat w = tableView.bounds.size.width - 64;   // insetGrouped：分组左右各 16 + 文本左右各 16
+    CGFloat w = tableView.bounds.size.width - [self aweca_leading:tableView] - 16;
     if (w <= 0) return UITableViewAutomaticDimension;
     CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
                                   options:NSStringDrawingUsesLineFragmentOrigin
