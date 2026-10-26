@@ -22,26 +22,24 @@
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.6"
+#define SLVersion @"0.4.9.7"
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 
 // v0.4.9.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
 // 三者永远差几像素。现在只认一个基准：单元格文字的真实左边缘（表格坐标系）。
-// 首帧 cell 还没生成，用「卡片左缘 + 内边距」估；viewDidLayoutSubviews 里再按真实 cell 校正一次。
+// 首帧 cell 还没生成时用卡片左缘 + 内边距兜底，值恒定，不再逐帧校正。
+// v0.4.9.7：只读已存在的 cell，不再调 rectForRowAtIndexPath。
+// 那个 API 内部要算分区总高 → 回调 heightForFooterInSection → 又要这个值，会无限递归。
 static CGFloat SLMeasureLeading(UITableView *tv) {
     for (UITableViewCell *c in tv.visibleCells) {
         UILabel *lab = c.textLabel;
         if (!lab || lab.hidden || !lab.text.length) continue;
+        if (c.imageView.image) continue;     // 带图标的行文字被推右，不能当基准
         CGFloat x = CGRectGetMinX(c.frame) + CGRectGetMinX(lab.frame);
         if (x > 0) return x;
     }
-    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
-        if ([tv numberOfRowsInSection:s] <= 0) continue;
-        CGRect r = [tv rectForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
-        if (r.size.width > 0) return CGRectGetMinX(r) + 16;
-    }
-    return 36;
+    return 36;   // 卡片左缘 20 + 内边距 16
 }
 
 // 系统 footer 在陌陌的 tableView 里会被算成单行并右侧截断，
@@ -123,15 +121,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return self.slLeading;
 }
 
-// 首帧 cell 还没生成，用估算值先排；拿到真实 cell 后校正一次，之后不再变
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    CGFloat m = SLMeasureLeading(self.tableView);
-    if (m > 0 && fabs(m - self.slLeading) > 0.5) {
-        self.slLeading = m;
-        [self.tableView reloadData];
-    }
-}
+// v0.4.9.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
 
 - (void)sl_close {
     [self dismissViewControllerAnimated:YES completion:nil];
@@ -201,7 +191,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)section {
     NSString *text = [self sl_footerForSection:section];
     if (!text.length) return 0;
-    CGFloat w = tv.bounds.size.width - [self sl_leadingForTableView:tv] - 16;
+    CGFloat w = tv.bounds.size.width - 68;   // 左基线 36 + 右 16 + 余量，不在此处调测量（会递归）
     if (w <= 0) return UITableViewAutomaticDimension;
     CGRect r = [text boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
                                   options:NSStringDrawingUsesLineFragmentOrigin
