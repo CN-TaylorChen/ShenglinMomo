@@ -93,22 +93,18 @@ static UIView *AWECAMakeFooter(NSString *text) {
     return box;
 }
 
-// v0.4.9.2：系统分区头会把英文强制全大写（Fish Audio → FISH AUDIO），
-// 改成自定义视图，保留原本大小写，同时把留白压到 22pt。
-static UIView *AWECAMakeHeader(NSString *text) {
+// v0.4.9.2：系统分区头会把英文强制全大写（Fish Audio → FISH AUDIO），改成自定义视图。
+// v0.4.9.3：与 footer 同一条基准线（x = 16）。
+static UIView *AWECAMakeHeader(NSString *text, CGFloat width) {
     if (!text.length) return nil;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
-    UILabel *lab = [[UILabel alloc] init];
-    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(16, 22 - 19, w - 32, 17)];
     lab.font = [UIFont systemFontOfSize:12];
     lab.textColor = [UIColor secondaryLabelColor];
     lab.text = text;
+    lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [box addSubview:lab];
-    [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:32],
-        [lab.trailingAnchor constraintLessThanOrEqualToAnchor:box.trailingAnchor constant:-32],
-        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-3],
-    ]];
     return box;
 }
 
@@ -255,8 +251,7 @@ static NSString *AWECATrimStr(NSString *s) {
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    (void)tableView;
-    return AWECAMakeHeader([self aweca_headerForSection:section]);
+    return AWECAMakeHeader([self aweca_headerForSection:section], tableView.bounds.size.width);
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
