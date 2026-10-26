@@ -170,7 +170,7 @@ static NSString *AWECATrimStr(NSString *s) {
     switch (f) {
         case 0: return @"数字 ID";
         case 1: return @"以 AKLT 开头的 Key";
-        case 2: return @"fish.audio 的 Key";
+        case 2: return @"Fish Audio 的 Key";
         case 3: return @"AccessKey ID";
         case 4: return @"SecretAccessKey";
         case 5: return @"私有桶名称";
@@ -212,7 +212,7 @@ static NSString *AWECATrimStr(NSString *s) {
     if ([AWECATOSUploader hasCredentials]) {
         [AWECAUtils showToast:@"已保存" duration:1.5];
     } else {
-        [AWECAUtils showToast:@"已保存（TOS 配置不完整时，语音转音色不可用）" duration:2.0];
+        [AWECAUtils showToast:@"已保存（TOS 配置不完整时，录音转音色不可用）" duration:2.0];
     }
 }
 
@@ -242,8 +242,9 @@ static NSString *AWECATrimStr(NSString *s) {
 
 - (NSString *)aweca_footerForSection:(NSInteger)section {
     if (section == 0) return @"控制台 → API Key 管理获取，仅存本机";
-    if (section == 1) return @"fish.audio 首页 → 左侧栏「开发者」 → 创建API密钥。";
-    return @"对象存储（TOS）用于「语音转音色」功能的音频存储：音频上传至存储桶后，执行音色替换处理；识别资源 ID 留空即标准版，一般不需要修改。";
+    if (section == 1) return @"Fish Audio 官网 → 左侧「开发者」 → 创建 API 密钥";
+    // v0.4.9.1：原句用「；」串了三件事，一行读不下来；按分号拆行，句末不再加句号
+    return @"对象存储（TOS）用于「录音转音色」功能的音频存储\n音频上传至存储桶后，再执行音色替换处理\n识别资源 ID 留空即标准版，一般不需要修改";
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
@@ -272,7 +273,7 @@ static NSString *AWECATrimStr(NSString *s) {
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:foldId];
         BOOL expanded = _advancedExpanded;
         // 标题只留主干，箭头交给右侧系统 chevron（不再把「›」写进文字里）
-        cell.textLabel.text = @"TOS设置";
+        cell.textLabel.text = @"TOS 设置";
         cell.textLabel.font = [UIFont systemFontOfSize:14];
         cell.textLabel.textColor = [UIColor labelColor];
         cell.accessoryView = nil;
