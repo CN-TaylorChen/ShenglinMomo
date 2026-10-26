@@ -17,12 +17,13 @@
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 #import "SLVoicePackController.h"
+#import "SLAlignBox.h"
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.9.8"
+#define SLVersion @"0.4.9.9"
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 
@@ -43,40 +44,15 @@ static CGFloat SLMeasureLeading(UITableView *tv) {
 }
 
 // 系统 footer 在陌陌的 tableView 里会被算成单行并右侧截断，
-// 所以这里自己撑一个多行 label，高度交给自动布局。
+// 所以自己撑一个多行 label；左基线交给 SLAlignBox 自校正（见 SLAlignBox.h 里的说明）。
 static UIView *SLMakeFooter(NSString *text, CGFloat x, CGFloat width) {
-    if (!text.length) return nil;
-    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 0)];
-    UILabel *lab = [[UILabel alloc] init];
-    lab.translatesAutoresizingMaskIntoConstraints = NO;
-    lab.numberOfLines = 0;
-    lab.font = [UIFont systemFontOfSize:12];
-    lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = text;
-    [box addSubview:lab];
-    [NSLayoutConstraint activateConstraints:@[
-        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:MAX(0, x)],
-        [lab.trailingAnchor constraintEqualToAnchor:box.trailingAnchor constant:-16],
-        [lab.topAnchor constraintEqualToAnchor:box.topAnchor constant:5],
-        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-7],
-    ]];
-    return box;
+    return SLAlignFooter(text, x, width);
 }
 
 // v0.4.9.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
-// v0.4.9.6：x 与 footer 共用同一个左基线，三者对齐。
+// v0.4.9.9：不再把「表格坐标系的 x」当盒子内偏移用，改由 SLAlignBox 按盒子真实位置反推。
 static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
-    if (!text.length) return nil;
-    CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, MAX(0, w - x - 16), 17)];
-    lab.font = [UIFont systemFontOfSize:12];
-    lab.textColor = [UIColor secondaryLabelColor];
-    lab.text = text;
-    lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [box addSubview:lab];
-    return box;
+    return SLAlignHeader(text, x, width);
 }
 
 @interface SLSettingsPanel ()
@@ -111,9 +87,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 }
 
 // v0.4.9.6：语音包口令也开放自定义，跟合成口令彻底分开，互不抢
+// v0.4.9.9：默认值改成 #yyb
 - (NSString *)sl_packCommand {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackCmdKey];
-    return v.length ? v : @"yyb";
+    return v.length ? v : @"#yyb";
 }
 
 - (CGFloat)sl_leadingForTableView:(UITableView *)tv {
@@ -177,7 +154,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
                 [self sl_packCommand], [self sl_command]];
     }
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪";
-    if (section == 2) return @"触发口令：以这个口令开头发的文字才会转语音\n语音包口令：单独一条，命中后直接发所选语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
+    if (section == 2) return @"合成口令：以这个口令开头发的文字才会转语音\n语音包口令：单独一条，命中后直接发所选语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
     if (section == 3) return @"Key 只保存在本机，不会上传";
     if (section == 4) return @"没反应时先看这里";
     return nil;
@@ -280,7 +257,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
     if (ip.section == 2) {
         if (ip.row == 0) {
-            cell.textLabel.text = @"触发口令";
+            cell.textLabel.text = @"合成口令";
             cell.detailTextLabel.text = [self sl_command];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (ip.row == 1) {
@@ -368,7 +345,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 - (void)sl_editCommand {
     [self sl_editCommandForKey:kSLCommandKey
-                         title:@"触发口令"
+                         title:@"合成口令"
                        message:@"以这个口令开头时，文字会被转成语音消息发送"
                       fallback:@"#tts"];
 }
@@ -378,7 +355,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     [self sl_editCommandForKey:kSLPackCmdKey
                          title:@"语音包口令"
                        message:@"单独一条口令，命中后直接发出所选语音，不走合成"
-                      fallback:@"yyb"];
+                      fallback:@"#yyb"];
 }
 
 - (void)sl_editCommandForKey:(NSString *)key
