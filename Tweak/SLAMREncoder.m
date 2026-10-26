@@ -24,7 +24,12 @@
 }
 
 + (NSData *)pcm8kMono16AtPath:(NSString *)inPath {
+    return [self pcmMono16AtPath:inPath sampleRate:8000.0];
+}
+
++ (NSData *)pcmMono16AtPath:(NSString *)inPath sampleRate:(double)rate {
     if (inPath.length == 0) return nil;
+    if (rate < 8000.0) rate = 16000.0;
     NSURL *url = [NSURL fileURLWithPath:inPath];
     ExtAudioFileRef f = NULL;
     if (ExtAudioFileOpenURL((__bridge CFURLRef)url, &f) != noErr || !f) {
@@ -34,7 +39,7 @@
 
     AudioStreamBasicDescription cf;
     memset(&cf, 0, sizeof(cf));
-    cf.mSampleRate = 8000.0;
+    cf.mSampleRate = rate;
     cf.mFormatID = kAudioFormatLinearPCM;
     cf.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
     cf.mFramesPerPacket = 1;
@@ -44,12 +49,12 @@
     cf.mBytesPerPacket = 2;
 
     if (ExtAudioFileSetProperty(f, kExtAudioFileProperty_ClientDataFormat, sizeof(cf), &cf) != noErr) {
-        SLLog(@"set client format failed");
+        SLLog(@"set client format failed (rate=%.0f)", rate);
         ExtAudioFileDispose(f);
         return nil;
     }
 
-    const UInt32 kFrames = SL_AMR_FRAME_SAMPLES * 100;
+    const UInt32 kFrames = 1600 * 100;   // 100 个 100ms 块
     NSMutableData *out = [NSMutableData data];
     AudioBufferList abl;
     memset(&abl, 0, sizeof(abl));
@@ -68,7 +73,7 @@
 
     free(abl.mBuffers[0].mData);
     ExtAudioFileDispose(f);
-    SLLog(@"pcm bytes=%lu (%.2fs)", (unsigned long)out.length, (double)(out.length / 2) / 8000.0);
+    SLLog(@"pcm%.0f bytes=%lu (%.2fs)", rate, (unsigned long)out.length, (double)(out.length / 2) / rate);
     return out.length ? out : nil;
 }
 
