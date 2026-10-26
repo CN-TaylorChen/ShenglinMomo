@@ -95,7 +95,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 #pragma mark - 情绪标签管理模式
 
 - (void)aweca_setupEmotionMode {
-    self.title = [NSString stringWithFormat:@"%@ · 情绪标签", AWECAProductName];
+    self.title = [NSString stringWithFormat:@"%@ · 情绪", AWECAProductName];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
     UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(aweca_addEmotionTag)];
@@ -132,8 +132,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 - (void)aweca_addEmotionTag {
     AWECATTSManager *mgr = [AWECATTSManager shared];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"添加情绪标签"
-        message:[NSString stringWithFormat:@"情绪标签填英文（如 chuckle、whisper），当前模型 %@ 将自动加 %@；备注填中文，仅用于显示",
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"添加情绪"
+        message:[NSString stringWithFormat:@"情绪填英文（如 chuckle、whisper），当前模型 %@ 会自动加 %@\n备注填中文，仅用于显示",
                  mgr.fishModel ?: @"s2.1-pro-free",
                  [mgr.fishModel isEqualToString:@"s1"] ? @"圆括号" : @"方括号"]
         preferredStyle:UIAlertControllerStyleAlert];
@@ -141,7 +141,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         tf.placeholder = @"备注（选填，中文，如：开心 · 活泼一点）";
     }];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"情绪标签（英文，如 happy）";
+        tf.placeholder = @"情绪（英文，如 happy）";
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
@@ -169,8 +169,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     AWECATTSManager *mgr = [AWECATTSManager shared];
     if (idx < 0 || idx >= (NSInteger)mgr.fishEmotionAll.count) return;
     NSString *old = mgr.fishEmotionAll[idx];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"编辑情绪标签"
-        message:@"备注填中文仅用于显示；情绪标签填英文，改标签会自动同步已选状态"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"编辑情绪"
+        message:@"备注填中文，仅用于显示\n情绪填英文，改标签会自动同步已选状态"
         preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [mgr fishEmotionNoteAtIndex:idx];
@@ -178,7 +178,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     }];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.text = [self.class aweca_stripEmotionTag:old];
-        tf.placeholder = @"情绪标签（英文）";
+        tf.placeholder = @"情绪（英文）";
         tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
         tf.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
