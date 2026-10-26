@@ -93,6 +93,25 @@ static UIView *AWECAMakeFooter(NSString *text) {
     return box;
 }
 
+// v0.4.9.2：系统分区头会把英文强制全大写（Fish Audio → FISH AUDIO），
+// 改成自定义视图，保留原本大小写，同时把留白压到 22pt。
+static UIView *AWECAMakeHeader(NSString *text) {
+    if (!text.length) return nil;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectZero];
+    UILabel *lab = [[UILabel alloc] init];
+    lab.translatesAutoresizingMaskIntoConstraints = NO;
+    lab.font = [UIFont systemFontOfSize:12];
+    lab.textColor = [UIColor secondaryLabelColor];
+    lab.text = text;
+    [box addSubview:lab];
+    [NSLayoutConstraint activateConstraints:@[
+        [lab.leadingAnchor constraintEqualToAnchor:box.leadingAnchor constant:32],
+        [lab.trailingAnchor constraintLessThanOrEqualToAnchor:box.trailingAnchor constant:-32],
+        [lab.bottomAnchor constraintEqualToAnchor:box.bottomAnchor constant:-3],
+    ]];
+    return box;
+}
+
 @implementation AWECAAPISettingsController {
 
     AWECATTSManager *_mgr;
@@ -212,7 +231,7 @@ static NSString *AWECATrimStr(NSString *s) {
     if ([AWECATOSUploader hasCredentials]) {
         [AWECAUtils showToast:@"已保存" duration:1.5];
     } else {
-        [AWECAUtils showToast:@"已保存（TOS 配置不完整时，录音转音色不可用）" duration:2.0];
+        [AWECAUtils showToast:@"已保存（TOS 配置不完整时，语音转音色不可用）" duration:2.0];
     }
 }
 
@@ -228,10 +247,21 @@ static NSString *AWECATrimStr(NSString *s) {
     return 1 + (_advancedExpanded ? 5 : 0);   // 高级：1 个折叠行 + 5 个字段（TOS 4 个 + 识别资源 ID）
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+// v0.4.9.2：三处叫法统一为「语音转音色」，与本页可见功能名一致
+- (NSString *)aweca_headerForSection:(NSInteger)section {
     if (section == 0) return @"火山引擎（豆包音色）";
     if (section == 1) return @"Fish Audio";
-    return @"语音转语音设置";
+    return @"语音转音色";
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    return AWECAMakeHeader([self aweca_headerForSection:section]);
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    (void)tableView;
+    return section == 0 ? 26 : 22;
 }
 
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
@@ -244,7 +274,7 @@ static NSString *AWECATrimStr(NSString *s) {
     if (section == 0) return @"控制台 → API Key 管理获取，仅存本机";
     if (section == 1) return @"Fish Audio 官网 → 左侧「开发者」 → 创建 API 密钥";
     // v0.4.9.1：原句用「；」串了三件事，一行读不下来；按分号拆行，句末不再加句号
-    return @"对象存储（TOS）用于「录音转音色」功能的音频存储\n音频上传至存储桶后，再执行音色替换处理\n识别资源 ID 留空即标准版，一般不需要修改";
+    return @"对象存储（TOS）用于「语音转音色」功能的音频存储\n音频上传至存储桶后，再执行音色替换处理\n识别资源 ID 留空即标准版，一般不需要修改";
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
