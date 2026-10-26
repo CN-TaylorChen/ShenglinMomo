@@ -94,18 +94,30 @@ static UIView *AWECAMakeFooter(NSString *text) {
 }
 
 // v0.4.9.2：系统分区头会把英文强制全大写（Fish Audio → FISH AUDIO），改成自定义视图。
-// v0.4.9.3：与 footer 同一条基准线（x = 16）。
-static UIView *AWECAMakeHeader(NSString *text, CGFloat width) {
+// v0.4.9.4：x 取白色卡片实际左边缘，跟框线对齐。
+static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (!text.length) return nil;
     CGFloat w = width > 0 ? width : [UIScreen mainScreen].bounds.size.width;
     UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 22)];
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(16, 22 - 19, w - 32, 17)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 22 - 19, w - x - 16, 17)];
     lab.font = [UIFont systemFontOfSize:12];
     lab.textColor = [UIColor secondaryLabelColor];
     lab.text = text;
     lab.autoresizingMask = UIViewAutoresizingFlexibleWidth;
     [box addSubview:lab];
     return box;
+}
+
+static CGFloat AWECAHeaderLeading(UITableView *tv) {
+    UITableViewCell *c = tv.visibleCells.firstObject;
+    if (c) return CGRectGetMinX(c.frame);
+    for (NSInteger s = 0; s < tv.numberOfSections; s++) {
+        if ([tv numberOfRowsInSection:s] <= 0) continue;
+        UITableViewCell *first = [tv cellForRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:s]];
+        if (first) return CGRectGetMinX(first.frame);
+        break;
+    }
+    return 20;
 }
 
 @implementation AWECAAPISettingsController {
@@ -251,7 +263,7 @@ static NSString *AWECATrimStr(NSString *s) {
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    return AWECAMakeHeader([self aweca_headerForSection:section], tableView.bounds.size.width);
+    return AWECAMakeHeader([self aweca_headerForSection:section], AWECAHeaderLeading(tableView), tableView.bounds.size.width);
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
