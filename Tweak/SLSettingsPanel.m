@@ -18,7 +18,8 @@
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
-#define SLVersion @"0.4.6"
+#define kSLFillShortKey @"SLFillShort"
+#define SLVersion @"0.4.7"
 
 #pragma mark - 多行 footer
 
@@ -116,7 +117,7 @@ static UIView *SLMakeFooter(NSString *text) {
     (void)tv;
     if (section == 0) return 3;   // 开关 + 引擎 + 悬浮球图标
     if (section == 1) return 2;   // 音色库 + 情绪
-    if (section == 2) return 1;   // 口令（语音格式内部固定走陌陌自己的编码链路，不再暴露）
+    if (section == 2) return 2;   // 口令 + 短录音补全
     if (section == 3) return 1;   // API 凭证
     return 1;                     // 运行日志
 }
@@ -137,7 +138,7 @@ static UIView *SLMakeFooter(NSString *text) {
 - (NSString *)sl_footerForSection:(NSInteger)section {
     if (section == 0) return @"切换引擎后需要在下方重新选择音色";
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪标签";
-    if (section == 2) return @"以该口令开头的文字才会转语音";
+    if (section == 2) return @"以该口令开头才转语音；关闭「短录音补全」时只发录到的那一段";
     if (section == 3) return @"Key 只保存在本机，不会上传";
     if (section == 4) return @"#tts 没反应时先看这里";
     return nil;
@@ -221,9 +222,19 @@ static UIView *SLMakeFooter(NSString *text) {
     }
 
     if (ip.section == 2) {
-        cell.textLabel.text = @"触发口令";
-        cell.detailTextLabel.text = [self sl_command];
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        if (ip.row == 0) {
+            cell.textLabel.text = @"触发口令";
+            cell.detailTextLabel.text = [self sl_command];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else {
+            cell.textLabel.text = @"短录音补全";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+            sw.on = [d objectForKey:kSLFillShortKey] ? [d boolForKey:kSLFillShortKey] : YES;
+            [sw addTarget:self action:@selector(sl_fillChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        }
         return cell;
     }
 
@@ -304,6 +315,12 @@ static UIView *SLMakeFooter(NSString *text) {
     [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:kSLEnabledKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
     [AWECAUtils showToast:sw.on ? @"已启用文字转语音" : @"已关闭，只发文本" duration:1.5];
+}
+
+- (void)sl_fillChanged:(UISwitch *)sw {
+    [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:kSLFillShortKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [AWECAUtils showToast:sw.on ? @"短录音会补全 AI 语音" : @"只发录到的那一段" duration:1.5];
 }
 
 - (void)sl_engineChanged:(UISegmentedControl *)seg {
