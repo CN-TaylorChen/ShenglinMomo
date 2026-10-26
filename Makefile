@@ -22,6 +22,9 @@ ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/AWECAAPISettingsController.m \
 	Tweak/AWECATTSVoiceListController.m \
 	Tweak/SLVoiceImportController.m \
+	Tweak/SLVoicePack.m \
+	Tweak/SLVoicePackController.m \
+	Tweak/SLTrimController.m \
 	Tweak/AWECAAudioReplacer.m
 
 ShenglinMomo_CFLAGS = -fobjc-arc
