@@ -29,7 +29,7 @@
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.4.6"
+#define SLVersion @"0.4.7"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -368,12 +368,10 @@ static NSMutableSet *gSLHookedSels = nil;
 // —— v0.4.5：收尾补喂（用户松手比 AI 语音短时，把剩下的 PCM 补进编码器，避免被截断）——
 static NSUInteger gSLBusChunkSize = 0;  // 陌陌每次递进来的块大小（补喂按同样粒度，保持帧对齐）
 static BOOL gSLDrained = NO;            // 本次录音是否已经补喂过（只补一次）
-static IMP gSLDrainIMP = NULL;          // 喂 PCM 的原始实现（补喂直接走它，绕开自己的钩子）
-static SEL gSLDrainSel = NULL;          // 对应的选择子
-static int gSLDrainMode = 0;            // 0=对象+长度  1=裸指针+长度  2=只有对象（encodePcm:）
-// v0.4.6：IMP 是从谁身上取的就必须还给谁。v0.4.5 用 gSLBusRef（总线）当接收者，
-// 而 IMP/sel 取自 MDOpusEncoder -encodePcm: → 编码器实现收到总线对象 = 野指针闪退。
-static __strong id gSLDrainTarget = nil; // 记录 IMP 时的真实接收者（编码器 / 总线）
+// v0.4.7：补喂不再自己调编码器，而是走总线自己的 sendPcm:byteSize:。
+// 这些字节是我们塞进去的，encodePcm: 钩子必须原样放行（按字节数记账，异步也准）。
+static NSUInteger gSLForcePassBytes = 0;
+#define kSLFillShortKey @"SLFillShort"   // 短录音补全开关（默认开）
 static NSMutableSet *gSLDrainHooked = nil;
 static NSTimeInterval gSLArmedAt = 0;   // #tts 装填时刻（锁定“本次录音刚写的文件”）
 static int gSLRecDump = 0;
@@ -1020,47 +1018,64 @@ static NSData *SLBusNextChunk(NSUInteger size) {
     return d;
 }
 
-// v0.4.5：把还没喂完的 AI PCM 一次性补到编码器里。
 // 为什么要补：喂料节奏是「录音来一块、我换一块」，用户 1 秒就松手的话只剩 1 秒的量，
 // 剩下的 AI 语音永远发不出去 → 对端听到的语音被截断。
-// 补喂直接调原始实现（gSLDrainIMP），不经过自己的钩子，避免递归。
+// v0.4.7：补喂点改到 -stopRecord（主线程、收尾链路之前），并且走总线自己的
+// sendPcm:byteSize: —— 就是录音时一直在用的那条公开入口，编码器/文件都还是正常态。
+// v0.4.5/0.4.6 在 sendPcmOver 里直接同步调 encodePcm: 会卡死：那时已在收尾态，
+// 编码器锁/文件句柄被占，日志停在「PCM-OVER 开始」、后面一条都出不来，最后被看门狗杀掉。
+// 实际喂进编码器的时长（秒）：补喂没成功时用它，保证气泡和音频一致
+static double SLFedDuration(void) {
+    if (gSLArmRate <= 0 || gSLArmCh == 0 || gSLBusPCM.length == 0) return 0;
+    double bps = gSLArmRate * (double)gSLArmCh * 2.0;   // 16bit
+    if (bps <= 0) return 0;
+    double d = (double)gSLBusOffset / bps;
+    if (d > gSLTTSAudioDur) d = gSLTTSAudioDur;
+    return d;
+}
+
+static BOOL SLFillShortEnabled(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d objectForKey:kSLFillShortKey] == nil) return YES;
+    return [d boolForKey:kSLFillShortKey];
+}
+
 static void SLDrainRemainingPCM(NSString *why) {
     if (!gSLBusActive || !gSLBusPCM.length) return;
     if (gSLBusOffset >= gSLBusPCM.length) return;
     if (!gSLBusFed) return;              // 一块都没喂过 = 还没真正接管
     if (gSLDrained) return;
-    if (!gSLDrainIMP || !gSLDrainSel) return;
-    gSLDrained = YES;                    // 不论成败只尝试一次
-
-    id target = gSLDrainTarget;
-    BOOL ok = (target != nil && class_respondsToSelector(object_getClass(target), gSLDrainSel));
-    SLLog(@"PCM-OVER 开始 why=%@ 剩余=%lu target=%s sel=%@ mode=%d ok=%d",
-          why ?: @"-", (unsigned long)(gSLBusPCM.length - gSLBusOffset),
-          target ? object_getClassName(target) : "(nil)",
-          NSStringFromSelector(gSLDrainSel), gSLDrainMode, ok);
-    if (!ok) {
-        // 宁可截断也不再崩：接收者不可用时直接放行原收尾
-        SLLog(@"PCM-OVER 跳过补喂：接收者不响应 %@", NSStringFromSelector(gSLDrainSel));
+    if (!SLFillShortEnabled()) {
+        SLLog(@"PCM-OVER 跳过：短录音补全已关闭（只发录到的那一段）");
         return;
     }
-    static BOOL draining = NO;
-    if (draining) return;      // 防止重入（编码器内部又回调到收尾选择子）
-    draining = YES;
+    gSLDrained = YES;
+
+    id bus = gSLBusRef;
+    SEL feed = NSSelectorFromString(@"sendPcm:byteSize:");
+    BOOL ok = (bus != nil && [bus respondsToSelector:feed]);
     NSUInteger chunk = gSLBusChunkSize;
     if (chunk < 320 || chunk > 32768) chunk = 3200;   // 兜底 100ms@16k/mono/s16
+    SLLog(@"PCM-OVER 开始 why=%@ 剩余=%lu bus=%s chunk=%lu ok=%d",
+          why ?: @"-", (unsigned long)(gSLBusPCM.length - gSLBusOffset),
+          bus ? object_getClassName(bus) : "(nil)", (unsigned long)chunk, ok);
+    if (!ok) {
+        SLLog(@"PCM-OVER 跳过补喂：总线不响应 %@", NSStringFromSelector(feed));
+        return;
+    }
+
+    static BOOL draining = NO;
+    if (draining) return;
+    draining = YES;
     NSUInteger total = 0;
-    NSUInteger cap = 320000;                          // 单次最多补 10 秒，防异常数据死循环
+    NSUInteger cap = 320000;   // 单次最多补 10 秒
     int blocks = 0;
     while (gSLBusOffset < gSLBusPCM.length && blocks < 8000 && total < cap) {
         NSData *d = SLBusNextChunk(chunk);
         if (!d) break;
-        if (gSLDrainMode == 0) {
-            ((void (*)(id, SEL, id, unsigned long long))gSLDrainIMP)(target, gSLDrainSel, d, (unsigned long long)d.length);
-        } else if (gSLDrainMode == 1) {
-            ((void (*)(id, SEL, void *, unsigned long long))gSLDrainIMP)(target, gSLDrainSel, (void *)d.bytes, (unsigned long long)d.length);
-        } else {
-            ((void (*)(id, SEL, id))gSLDrainIMP)(target, gSLDrainSel, d);
-        }
+        // 先记账再喂：总线内部可能是异步编码，钩子要按字节数原样放行
+        gSLForcePassBytes += d.length;
+        ((void (*)(id, SEL, void *, unsigned int))objc_msgSend)(bus, feed, (void *)d.bytes, (unsigned int)d.length);
         total += d.length;
         blocks++;
     }
@@ -1091,9 +1106,6 @@ static void SLBusArmWithASBD(id bus, AudioStreamBasicDescription asbd) {
     gSLArmCh = asbd.mChannelsPerFrame;
     gSLBusChunkSize = 0;
     gSLDrained = NO;
-    gSLDrainIMP = NULL;
-    gSLDrainSel = NULL;
-    gSLDrainTarget = nil;
     NSString *opusPath = nil;
     @try { opusPath = [bus valueForKey:@"opusFilePath"]; } @catch (NSException *e) {}
     SLLog(@"BUS-PREP rate=%.0f ch=%u bits=%u aiPcm=%lu feedBytes=%lu opus=%@（开始接管 PCM 流）",
@@ -1124,7 +1136,6 @@ static void SLPcmFeedObjC(id self, SEL _cmd, id data, unsigned long long size) {
         (void (*)(id, SEL, id, unsigned long long))SLGetOrigIMP(self, _cmd);
     if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
         if (size > 0) gSLBusChunkSize = (NSUInteger)size;
-        if (orig) { gSLDrainIMP = (IMP)orig; gSLDrainSel = _cmd; gSLDrainMode = 0; gSLDrainTarget = self; }
         NSData *d = SLBusNextChunk((NSUInteger)size);
         if (!d) {
             if (gSLBusSwallowLog++ < 3) SLLog(@"BUS-FEED AI 语音已喂完，吞掉后续 %llu 字节", size);
@@ -1142,7 +1153,6 @@ static void SLPcmFeedRaw(id self, SEL _cmd, void *data, unsigned long long size)
         (void (*)(id, SEL, void *, unsigned long long))SLGetOrigIMP(self, _cmd);
     if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
         if (size > 0) gSLBusChunkSize = (NSUInteger)size;
-        if (orig) { gSLDrainIMP = (IMP)orig; gSLDrainSel = _cmd; gSLDrainMode = 1; gSLDrainTarget = self; }
         NSData *d = SLBusNextChunk((NSUInteger)size);
         if (!d) {
             if (gSLBusSwallowLog++ < 3) SLLog(@"BUS-FEED AI 语音已喂完，吞掉后续 %llu 字节", size);
@@ -1166,14 +1176,34 @@ static NSMethodSignature *SLSigOf(Class cls, SEL sel) {
 // 不同版本陌陌收尾选择子不完全一样，所以按名单探测（只钩无参方法）：
 //   sendPcmOver / close / closeFile / finish / flush / stop / end / over
 // 补喂只会发生一次，且必须已经喂过至少一块（否则说明还没真正接管）。
+// v0.4.7：这里只直通，绝对不喂数据（收尾态调编码器必卡死）
 static void SLDrainThenOrigHook(id self, SEL _cmd) {
     void (*orig)(id, SEL) = (void (*)(id, SEL))SLGetOrigIMP(self, _cmd);
     if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
-        @try { SLDrainRemainingPCM(NSStringFromSelector(_cmd)); } @catch (NSException *e) {
-            SLLog(@"PCM-OVER 异常 %@", e);
-        }
+        SLLog(@"PCM-OVER pass-through %@ drained=%d fed=%lu/%lu",
+              NSStringFromSelector(_cmd), (int)gSLDrained,
+              (unsigned long)gSLBusOffset, (unsigned long)gSLBusPCM.length);
     }
     if (orig) orig(self, _cmd);
+}
+
+// v0.4.7：补喂入口 —— 录音机停止时（主线程、收尾之前）
+static void SLStopRecordHook(id self, SEL _cmd) {
+    void (*orig)(id, SEL) = (void (*)(id, SEL))SLGetOrigIMP(self, _cmd);
+    @try { SLDrainRemainingPCM(NSStringFromSelector(_cmd)); } @catch (NSException *e) {
+        SLLog(@"PCM-OVER 异常 %@", e);
+    }
+    if (orig) orig(self, _cmd);
+}
+
+static void SLInstallStopRecordHook(Class cls) {
+    if (!cls) return;
+    SEL sel = NSSelectorFromString(@"stopRecord");
+    NSMethodSignature *sig = SLSigOf(cls, sel);
+    if (!sig || sig.numberOfArguments != 2) return;
+    if (SLRegisterMethod(cls, sel, (IMP)SLStopRecordHook)) {
+        SLLog(@"DRAIN-HOOK %s -> stopRecord", class_getName(cls));
+    }
 }
 
 static void SLInstallDrainHooksOnClass(Class cls) {
@@ -1314,9 +1344,6 @@ static BOOL SLFeedArm(id obj, AudioStreamBasicDescription asbd, NSString *tag) {
     gSLArmCh = asbd.mChannelsPerFrame;
     gSLBusChunkSize = 0;
     gSLDrained = NO;
-    gSLDrainIMP = NULL;
-    gSLDrainSel = NULL;
-    gSLDrainTarget = nil;
     SLInstallDrainHooksOnClass([obj class]);
     SLLog(@"PCM-ARM %@ rate=%.0f ch=%u bits=%u aiPcm=%lu feed=%lu（开始接管）",
           tag, asbd.mSampleRate, (unsigned)asbd.mChannelsPerFrame,
@@ -1328,6 +1355,13 @@ static BOOL SLFeedArm(id obj, AudioStreamBasicDescription asbd, NSString *tag) {
 // MDOpusEncoder -encodePcm:（参数 NSData*）
 static void SLEncodePcmDataHook(id self, SEL _cmd, id data) {
     void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
+    // 我们自己补喂的字节：原样放行，否则会被再换一遍变成无限套
+    if (gSLForcePassBytes > 0 && [data isKindOfClass:[NSData class]]) {
+        NSUInteger n = [data length];
+        gSLForcePassBytes = (n >= gSLForcePassBytes) ? 0 : (gSLForcePassBytes - n);
+        if (orig) orig(self, _cmd, data);
+        return;
+    }
     BOOL handled = NO;
     if (SLIsEnabled() && gSLTTSAudioPath && [data isKindOfClass:[NSData class]] && [data length] > 0) {
         AudioStreamBasicDescription a;
@@ -1348,7 +1382,6 @@ static void SLEncodePcmDataHook(id self, SEL _cmd, id data) {
         {
             SLFeedArm(self, a, @"MDOpusEncoder.encodePcm");
             if (gSLBusActive) {
-                if (orig) { gSLDrainIMP = (IMP)orig; gSLDrainSel = _cmd; gSLDrainMode = 2; gSLDrainTarget = self; }
                 if ([data length] > 0) gSLBusChunkSize = [data length];
                 NSData *chunk = SLBusNextChunk([data length]);
                 if (chunk) {
@@ -1439,6 +1472,7 @@ static BOOL SLInstallFunnelHooks(void) {
         Class c = NSClassFromString(n);
         if (!c) continue;
         SLRegisterMethod(c, NSSelectorFromString(@"addBus:"), (IMP)SLAddBusHook);
+        SLInstallStopRecordHook(c);
     }
     return YES;
 }
@@ -1475,22 +1509,25 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
             if (gSLBusFed) {
                 // 文件内容已由陌陌自己的编码器写成 AI 语音 → 只改 audiotime / audioTime
                 // 两个值都用 0.1 秒为单位（和陌陌 body 里的 audiotime 一致）
-                if (gSLTTSAudioDur > 0.05) {
-                    long long tenths = (long long)llround(gSLTTSAudioDur * 10.0);
+                double useDur = SLFedDuration();
+                if (useDur < 0.05) useDur = gSLTTSAudioDur;
+                SLLog(@"AUDIO-SEND 实际喂入 %.2f 秒（AI 全长 %.2f 秒）", useDur, gSLTTSAudioDur);
+                if (useDur > 0.05) {
+                    long long tenths = (long long)llround(useDur * 10.0);
                     if (tenths < 1) tenths = 1;
                     newT = (unsigned long long)tenths;
                     if (body) {
-                        NSString *nb = SLBodySetAudioTime(body, gSLTTSAudioDur);
+                        NSString *nb = SLBodySetAudioTime(body, useDur);
                         BOOL set = NO;
                         SEL bs = NSSelectorFromString(@"setBody:");
                         if ([model respondsToSelector:bs]) {
                             @try { ((void(*)(id,SEL,id))objc_msgSend)(model, bs, nb); set = YES; } @catch (NSException *e) {}
                         }
                         if (!set) { @try { [model setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {} }
-                        SLLog(@"AUDIO-SEND body audiotime -> %lld（=%.2f 秒）set=%d (%@)", tenths, gSLTTSAudioDur, set,
+                        SLLog(@"AUDIO-SEND body audiotime -> %lld（=%.2f 秒）set=%d (%@)", tenths, useDur, set,
                               nb.length > 160 ? [nb substringToIndex:160] : nb);
                     }
-                    SLLog(@"AUDIO-SEND bus 已接管，时长 %llu（0.1 秒单位）= %.2f 秒，原 t=%llu", newT, gSLTTSAudioDur, t);
+                    SLLog(@"AUDIO-SEND bus 已接管，时长 %llu（0.1 秒单位）= %.2f 秒，原 t=%llu", newT, useDur, t);
                 }
                 // 只做诊断：补喂后文件真实字节数 vs 陌陌原始 size 参数
                 NSString *fp = token.length ? SLFindFileByToken(token) : nil;
@@ -1519,9 +1556,6 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
             gSLArmCh = 0;
             gSLBusChunkSize = 0;
             gSLDrained = NO;
-            gSLDrainIMP = NULL;
-            gSLDrainSel = NULL;
-            gSLDrainTarget = nil;
         } @catch (NSException *e) {
             SLLog(@"AUDIO-SEND exception %@", e);
         }
