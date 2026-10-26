@@ -182,6 +182,39 @@ static UIView *SLFindViewWithCommandNear(UIView *bar, NSString **outText) {
     return SLFindViewWithCommand(bar.superview, outText);
 }
 
+// 无条件取输入框原始文本（不要求带口令），用于判断要不要拦截
+static NSString *SLFirstInputText(UIView *bar) {
+    if (![bar isKindOfClass:[UIView class]]) return nil;
+    // 1) inputTextView 属性（最常见）
+    SEL iv = @selector(inputTextView);
+    if ([bar respondsToSelector:iv]) {
+        @try {
+            id tv = ((id (*)(id, SEL))objc_msgSend)(bar, iv);
+            if ([tv isKindOfClass:[UITextView class]]) {
+                NSString *t = ((UITextView *)tv).text;
+                if (t.length) return t;
+                NSAttributedString *a = ((UITextView *)tv).attributedText;
+                if (a.length) return a.string;
+            }
+        } @catch (NSException *e) { }
+    }
+    // 2) inputText / text 属性
+    for (NSString *name in @[@"inputText", @"text", @"inputString"]) {
+        SEL s = NSSelectorFromString(name);
+        if (![bar respondsToSelector:s]) continue;
+        @try {
+            id v = ((id (*)(id, SEL))objc_msgSend)(bar, s);
+            if ([v isKindOfClass:[NSString class]] && [v length]) return v;
+        } @catch (NSException *e) { }
+    }
+    // 3) 扫描子视图
+    NSString *t = nil;
+    SLFindViewWithCommand(bar, &t);
+    if (t.length) return t;
+    SLFindViewWithCommand(bar.superview, &t);
+    return t;
+}
+
 static void SLClearTextInView(UIView *v) {
     @try {
         if ([v isKindOfClass:[UITextView class]]) ((UITextView *)v).text = @"";
@@ -199,7 +232,7 @@ static id SLAudioHandlerInObject(id obj) {
     for (unsigned i = 0; i < n && !found; i++) {
         const char *te = ivar_getTypeEncoding(ivars[i]);
         if (!te || te[0] != '@' || te[1] != '"') continue;
-        NSString *tn = [[NSString stringWithUTF8String:te + 2] stringByTrimmingCharactersInString:@"\""];
+        NSString *tn = [[NSString stringWithUTF8String:te + 2] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"\""]];
         if (!([tn hasSuffix:@"Hander"] || [tn hasSuffix:@"Handler"])) continue;
         __unsafe_unretained id v = nil;
         @try { v = object_getIvar(obj, ivars[i]); } @catch (NSException *e) { }
@@ -319,8 +352,10 @@ static void SLSendText(id self, SEL _cmd) {
     }
 
     UIView *bar = (UIView *)self;
-    NSString *text = nil;
+    NSString *text = SLFirstInputText(bar);
     UIView *tv = SLFindViewWithCommandNear(bar, &text);
+
+    SLLog(@"%@ -sendText text=%@", NSStringFromClass([self class]), SLShorten(text, 50));
 
     if (!SLTextHasCommand(text)) {
         if (orig) orig(self, _cmd);
