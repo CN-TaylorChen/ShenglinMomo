@@ -19,13 +19,15 @@
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
 #import "AWECATOSUploader.h"
+#import <math.h>
 #import "SLLog.h"
+#import "SLAMREncoder.h"
 #import "SLPipeline.h"
 #import "SLSettingsPanel.h"
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.3.8"
+#define SLVersion @"0.3.9"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -346,6 +348,7 @@ static id SLFindAudioHandlerNear(UIView *view) {
 
 static NSString *gSLTTSAudioPath = nil;
 static double gSLTTSAudioDur = 0;
+static NSTimeInterval gSLArmedAt = 0;   // #tts 装填时刻（锁定“本次录音刚写的文件”）
 static int gSLRecDump = 0;
 static int gSLModelDump = 0;
 
@@ -416,129 +419,217 @@ static void SLDumpSelfIvars(id selfObj) {
     }
 }
 
-// 只信任声明类型明确是 Foundation 对象的 ivar（这些一定是合法指针，发消息安全）。
-// MADAudioRecorder 里可能有把 AudioQueueRef 之类裸指针塞进 id 的情况，直接对它们发消息会 EXC_BAD_ACCESS（@try 抓不住）→ 闪退。
+// —— v0.3.9 真实录音文件定位 ——
+//
+// 真机日志 RECORDER-DEEP 给出的结构：
+//   MDAudioRecorder ivars = _manualCanceled(B) _timeTooShort(B) _startingRecord(B) _keepActive(B)
+//                           _peak(f) _innerRecorder(@"Recorder") _audioTime(Q)
+//                           _tempAudioPath(@"NSString") _timer(@"NSTimer")
+// 事实：回调那一刻 _tempAudioPath 是 nil，真正的录音机是 _innerRecorder（类名 Recorder），
+// 文件路径在它里面。v0.3.8 之前的「安全类型白名单」只放行 @"NSString"/@"NSURL"，
+// 把 _innerRecorder 整个跳过了 → 取不到路径 → 兜底扫描扫到我们自己刚写的 TTS 文件
+// → 覆盖空转 → 发出去还是原声。
+
+// 只认「声明了具体类名」的对象 ivar（@"NSString"、@"Recorder"…）。
+// 裸 @(id) 里可能塞了 AudioQueueRef 之类 C 指针，对它发消息会 EXC_BAD_ACCESS（@try 抓不住）。
+static BOOL SLTypeIsNamedObj(const char *te) {
+    return te && te[0] == '@' && te[1] == '"';
+}
+
 static BOOL SLTypeIsSafeObj(const char *te) {
-    if (!te || te[0] != '@') return NO;
-    static const char *safe[] = {"@\"NSString\"","@\"NSMutableString\"","@\"NSURL\"","@\"NSNumber\"","@\"NSData\"","@\"NSMutableData\""};
+    if (!SLTypeIsNamedObj(te)) return NO;
+    static const char *safe[] = {"@\"NSString\"","@\"NSMutableString\"","@\"NSURL\"",
+                                 @"@\"NSNumber\"","@\"NSData\"","@\"NSMutableData\""};
     for (int i = 0; i < 6; i++) {
-        size_t n = strlen(safe[i]);
-        if (strncmp(te, safe[i], n) == 0) return YES;
+        if (strncmp(te, safe[i], strlen(safe[i])) == 0) return YES;
     }
     return NO;
 }
 
-// 文件是否是「刚刚写好」的（避免覆盖到旧缓存文件）
-static BOOL SLFileFresh(NSString *p, double withinSeconds) {
+// 这个字符串像不像一条录音文件
+static BOOL SLIsAudioPath(NSString *p) {
+    if (![p isKindOfClass:[NSString class]] || p.length == 0) return NO;
+    if ([p hasPrefix:@"file://"]) p = [p stringByReplacingOccurrencesOfString:@"file://" withString:@""];
+    if (![p hasPrefix:@"/var/mobile"] && ![p hasPrefix:@"/private/var/mobile"]) return NO;
+    static NSArray *exts = nil;
+    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"aac",@"pcm"];
+    return [exts containsObject:p.pathExtension.lowercaseString];
+}
+
+// 是不是我们自己产出的文件（TTS 结果 / 临时 AMR / 导入音频）——绝不能当成陌陌录音
+static BOOL SLIsOurOwnFile(NSString *p) {
+    if (![p isKindOfClass:[NSString class]] || p.length == 0) return YES;
+    if (gSLTTSAudioPath && [p isEqualToString:gSLTTSAudioPath]) return YES;
+    if ([p rangeOfString:@"/ShenglinMomo/"].location != NSNotFound) return YES;
+    if ([p rangeOfString:@"Ai合成"].location != NSNotFound) return YES;
+    if ([p rangeOfString:@"导入音频"].location != NSNotFound) return YES;
+    if ([p rangeOfString:@"tts_result"].location != NSNotFound) return YES;
+    return NO;
+}
+
+// 文件是否「在 armed（#tts 装填）之后」被写过 —— 这条能精准锁定本次录音刚写的那个文件
+static BOOL SLFileFreshSince(NSString *p, NSTimeInterval since) {
     if (![p isKindOfClass:[NSString class]] || p.length == 0) return NO;
     NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:p error:nil];
     if (!a) return NO;
     NSDate *mt = a[NSFileModificationDate];
     if (!mt) return NO;
-    return ([[NSDate date] timeIntervalSinceDate:mt] <= withinSeconds);
+    return [mt timeIntervalSince1970] >= (since - 1.0);
 }
 
-// 从录音机对象里找它刚写好的录音文件路径（覆盖目标）。只读安全类型，且要求文件很新。
-static NSString *SLAudioRecordTargetPathFromRecorder(id rec) {
-    if (!rec) return nil;
-    NSArray *exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"aac"];
-    // 1) 安全 getter（respondsToSelector 对合法对象安全）
-    for (NSString *selName in @[@"filePath",@"recordFilePath",@"audioFilePath",@"path",
-                                @"currentFilePath",@"recordPath",@"audioPath",@"url",
-                                @"fileURL",@"recordFileURL",@"audioFileURL",@"outputURL",@"outputPath"]) {
+// AMR-NB 自己数帧算时长（AVFoundation 对 .amr 经常返回 0 或 nan，不能依赖）
+static double SLAMRDurationAtPath(NSString *p) {
+    NSData *d = [NSData dataWithContentsOfFile:p];
+    if (d.length < 7) return 0;
+    const unsigned char *b = (const unsigned char *)d.bytes;
+    NSUInteger i = 0;
+    if (memcmp(b, "#!AMR\n", 6) == 0) i = 6;
+    else if (memcmp(b, "#!AMR-WB\n", 9) == 0) return (double)(d.length - 9) / 61.0 * 0.02;
+    else return 0;
+    static const int sz[16] = {12,13,15,17,19,20,26,31, 0,0,0,0,0,0,0,0};
+    NSUInteger frames = 0;
+    while (i < d.length) {
+        int ft = (b[i] >> 3) & 0x0F;
+        NSUInteger step = (ft == 15) ? 1 : (NSUInteger)(sz[ft] + 1);
+        if (step == 0 || i + step > d.length) break;
+        i += step;
+        frames++;
+    }
+    return (double)frames * 0.02;
+}
+
+// 在对象里（含 _innerRecorder 递归）找「本次录音刚写好的音频文件路径」
+static NSString *SLFindRecordPathInObject(id obj, NSTimeInterval armedAt, int depth) {
+    if (!obj || depth > 3) return nil;
+
+    // 1) 常见 getter
+    static NSArray *getters = nil;
+    if (!getters) {
+        getters = @[@"url",@"filePath",@"recordFilePath",@"audioFilePath",@"path",
+                    @"currentFilePath",@"recordPath",@"audioPath",@"fileURL",
+                    @"recordFileURL",@"audioFileURL",@"outputURL",@"outputPath"];
+    }
+    for (NSString *selName in getters) {
         SEL s = NSSelectorFromString(selName);
-        if (![rec respondsToSelector:s]) continue;
+        if (![obj respondsToSelector:s]) continue;
         @try {
-            id v = ((id(*)(id,SEL))objc_msgSend)(rec, s);
+            id v = ((id(*)(id,SEL))objc_msgSend)(obj, s);
             NSString *p = nil;
-            if ([v isKindOfClass:[NSURL class]]) p = [v path];
-            else if ([v isKindOfClass:[NSString class]]) p = v;
-            if ([p isKindOfClass:[NSString class]] && p.length &&
-                [exts containsObject:p.pathExtension.lowercaseString] &&
-                [[NSFileManager defaultManager] fileExistsAtPath:p] && SLFileFresh(p, 20.0)) {
-                return p;
-            }
+            if ([v isKindOfClass:[NSURL class]]) p = [(NSURL *)v path];
+            else if ([v isKindOfClass:[NSString class]]) p = (NSString *)v;
+            if (SLIsAudioPath(p) && !SLIsOurOwnFile(p) && SLFileFreshSince(p, armedAt)) return p;
         } @catch (NSException *e) {}
     }
-    // 2) 只读「明确声明为 Foundation 对象」的 ivar
-    Class c = [rec class];
+
+    // 2) ivar：只读「命名对象类型」，并递归进去（_innerRecorder 里才有真路径）
+    Class c = [obj class];
     while (c && c != [NSObject class]) {
         unsigned int pc = 0;
         Ivar *list = class_copyIvarList(c, &pc);
-        for (unsigned i = 0; i < pc; i++) {
+        NSString *hit = nil;
+        for (unsigned i = 0; i < pc && !hit; i++) {
             const char *te = ivar_getTypeEncoding(list[i]);
-            if (!SLTypeIsSafeObj(te)) continue;
+            if (!SLTypeIsNamedObj(te)) continue;
             id v = nil;
-            @try { v = object_getIvar(rec, list[i]); } @catch (NSException *e) { continue; }
-            NSString *p = nil;
-            if ([v isKindOfClass:[NSURL class]]) p = [v path];
-            else if ([v isKindOfClass:[NSString class]]) p = v;
-            if ([p isKindOfClass:[NSString class]] && p.length &&
-                [exts containsObject:p.pathExtension.lowercaseString] &&
-                [[NSFileManager defaultManager] fileExistsAtPath:p] && SLFileFresh(p, 20.0)) {
-                free(list);
-                return p;
+            @try { v = object_getIvar(obj, list[i]); } @catch (NSException *e) { continue; }
+            if (!v) continue;
+            if ([v isKindOfClass:[NSString class]]) {
+                NSString *p = (NSString *)v;
+                if (SLIsAudioPath(p) && !SLIsOurOwnFile(p) && SLFileFreshSince(p, armedAt)) hit = [p copy];
+            } else if ([v isKindOfClass:[NSURL class]]) {
+                NSString *p = [(NSURL *)v path];
+                if (SLIsAudioPath(p) && !SLIsOurOwnFile(p) && SLFileFreshSince(p, armedAt)) hit = [p copy];
+            } else if (depth < 2) {
+                hit = SLFindRecordPathInObject(v, armedAt, depth + 1);
             }
         }
         free(list);
+        if (hit) return hit;
         c = class_getSuperclass(c);
     }
     return nil;
 }
 
-// 安全 dump：所有 ivar 都列「名+类型」，但只有 Foundation 安全类型才读值（绝不碰裸指针）
-static void SLDumpRecorderDeep(id rec) {
-    if (!rec) return;
-    Class c = [rec class];
+// dump 一个对象的全部 ivar：名字 + 类型 +（安全时）值。
+// primitive 用偏移直接读内存，不发任何消息，绝对安全。
+static void SLDumpIvarsShallow(id obj, NSString *tag) {
+    if (!obj) return;
+    Class c = [obj class];
     NSMutableArray *arr = [NSMutableArray array];
     while (c && c != [NSObject class]) {
         unsigned int pc = 0;
         Ivar *list = class_copyIvarList(c, &pc);
         for (unsigned i = 0; i < pc; i++) {
-            const char *te = ivar_getTypeEncoding(list[i]);
-            const char *nm = ivar_getName(list[i]);
+            Ivar iv = list[i];
+            const char *te = ivar_getTypeEncoding(iv);
+            const char *nm = ivar_getName(iv);
             NSString *vs = @"";
             if (SLTypeIsSafeObj(te)) {
                 id v = nil;
-                @try { v = object_getIvar(rec, list[i]); } @catch (NSException *e) {}
+                @try { v = object_getIvar(obj, iv); } @catch (NSException *e) {}
                 if ([v isKindOfClass:[NSURL class]]) vs = [NSString stringWithFormat:@"=%@", [(NSURL *)v path]];
                 else if ([v isKindOfClass:[NSString class]]) vs = [NSString stringWithFormat:@"=%@", v];
                 else if ([v isKindOfClass:[NSNumber class]]) vs = [NSString stringWithFormat:@"=#%@", v];
-                else if ([v isKindOfClass:[NSData class]]) vs = [NSString stringWithFormat:@"=<data %lu>", (unsigned long)[(NSData *)v length]];
+            } else if (SLTypeIsNamedObj(te)) {
+                id v = nil;
+                @try { v = object_getIvar(obj, iv); } @catch (NSException *e) {}
+                vs = v ? [NSString stringWithFormat:@"=<%@>", NSStringFromClass([v class])] : @"=(nil)";
+            } else if (te) {
+                char t0 = te[0];
+                char *base = (char *)(__bridge void *)obj + ivar_getOffset(iv);
+                if (t0 == 'Q') vs = [NSString stringWithFormat:@"=%llu", *(unsigned long long *)base];
+                else if (t0 == 'q') vs = [NSString stringWithFormat:@"=%lld", *(long long *)base];
+                else if (t0 == 'i' || t0 == 'I') vs = [NSString stringWithFormat:@"=%d", *(int *)base];
+                else if (t0 == 'd') vs = [NSString stringWithFormat:@"=%.3f", *(double *)base];
+                else if (t0 == 'f') vs = [NSString stringWithFormat:@"=%.2f", *(float *)base];
+                else if (t0 == 'B' || t0 == 'c') vs = [NSString stringWithFormat:@"=%d", (int)(*(BOOL *)base)];
             }
             [arr addObject:[NSString stringWithFormat:@"%s(%s)%@", nm, te ?: "", vs]];
         }
         free(list);
         c = class_getSuperclass(c);
     }
-    SLLog(@"RECORDER-DEEP class=%@ [%@]", NSStringFromClass([rec class]), [arr componentsJoinedByString:@" | "]);
+    SLLog(@"%@ class=%@ [%@]", tag, NSStringFromClass([obj class]), [arr componentsJoinedByString:@" | "]);
 }
 
-// 兜底：扫沙盒（仅 Documents + tmp）找最近修改的音频文件
-static NSString *SLNewestAudioFile(void) {
-    NSArray *exts = @[@"amr",@"m4a",@"caf",@"wav"];
+// 录音机 dump：自身 + 深挖 _innerRecorder
+static void SLDumpRecorderDeep(id rec) {
+    if (!rec) return;
+    SLDumpIvarsShallow(rec, @"RECORDER-DEEP");
+    Ivar inner = class_getInstanceVariable([rec class], "_innerRecorder");
+    if (inner) {
+        id v = nil;
+        @try { v = object_getIvar(rec, inner); } @catch (NSException *e) {}
+        if (v) SLDumpIvarsShallow(v, @"INNER-RECORDER");
+    }
+}
+
+// 兜底：在沙盒里找「armed 之后才写」的音频文件（排除我们自己产出的）
+static NSString *SLNewestRecordFileSince(NSTimeInterval since) {
+    static NSArray *exts = nil;
+    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav"];
+    NSString *home = NSHomeDirectory();
     NSArray *roots = @[
-        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
+        [home stringByAppendingPathComponent:@"Documents"],
+        [home stringByAppendingPathComponent:@"Library/Caches"],
         NSTemporaryDirectory()
     ];
+    NSFileManager *fm = [NSFileManager defaultManager];
     NSString *best = nil;
     NSTimeInterval bestT = 0;
-    NSFileManager *fm = [NSFileManager defaultManager];
     for (NSString *root in roots) {
         NSDirectoryEnumerator *e = [fm enumeratorAtPath:root];
         if (!e) continue;
         NSString *sub;
         int count = 0;
-        while ((sub = [e nextObject]) && count++ < 1500) {
+        while ((sub = [e nextObject]) && count++ < 3000) {
+            if (![exts containsObject:sub.pathExtension.lowercaseString]) continue;
             NSString *fp = [root stringByAppendingPathComponent:sub];
-            // 排除我们自己生成的 AI 音频目录，避免把自己当“最新录音”
-            if ([fp rangeOfString:@"/ShenglinMomo/"].location != NSNotFound) continue;
-            if ([exts containsObject:fp.pathExtension.lowercaseString]) {
-                NSDictionary *a = [fm attributesOfItemAtPath:fp error:nil];
-                NSDate *mt = a[NSFileModificationDate];
-                NSTimeInterval t = [mt timeIntervalSince1970];
-                if (t > bestT) { bestT = t; best = fp; }
-            }
+            if (SLIsOurOwnFile(fp)) continue;
+            NSDictionary *a = [fm attributesOfItemAtPath:fp error:nil];
+            NSDate *mt = a[NSFileModificationDate];
+            NSTimeInterval t = [mt timeIntervalSince1970];
+            if (t >= (since - 1.0) && t > bestT) { bestT = t; best = fp; }
         }
     }
     return best;
@@ -564,6 +655,7 @@ static void SLArmTTS(id handler,
             // 等用户真实录音，audioRecorder 钩子会把录音文件覆盖成这份 AI 音频。
             gSLTTSAudioPath = [outPath copy];
             gSLTTSAudioDur = dur;
+            gSLArmedAt = [[NSDate date] timeIntervalSince1970];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
             [AWECAUtils showToast:@"声临已就绪：现在录音将发 AI 语音" duration:2.0];
             // 60s 内未录音则自动解除，避免误替换普通语音
@@ -709,36 +801,83 @@ static BOOL SLInstallSendAudioHook(Class cls) {
 
 static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path, unsigned long long time) {
     void (*orig)(id, SEL, id, id, unsigned long long) = (void (*)(id, SEL, id, id, unsigned long long))SLGetOrigIMP(self, _cmd);
-    // 诊断：把真实录音机的内部结构打出来（前几次），定位文件路径与时长字段
-    if (gSLRecDump < 6) {
+    unsigned long long newTime = time;
+
+    if (gSLRecDump < 4) {
         gSLRecDump++;
-        SLLog(@"REC-DONE self=%@ recorderClass=%@ pathArg=%@",
+        SLLog(@"REC-DONE self=%@ recorderClass=%@ pathArg=%@ timeRaw=%llu armed=%d",
               NSStringFromClass([self class]),
-              recorder ? NSStringFromClass([recorder class]) : @"(nil)", path);
+              recorder ? NSStringFromClass([recorder class]) : @"(nil)", path, time,
+              gSLTTSAudioPath ? 1 : 0);
         if (recorder) SLDumpRecorderDeep(recorder);
         SLDumpSelfIvars(self);
     }
-    // 「录音替换」：若已装填 AI 音频，把真实录音文件覆盖成 AI 音频，再让陌陌发送。
-    // 严格守卫：找不到「够新的真实录音文件」就跳过（发原声），绝不冒险/崩溃。
+
+    // 「录音替换」：把本次真实录音文件覆盖成 AI 音频，再让陌陌发送。
     if (gSLTTSAudioPath) {
-        NSString *target = SLAudioRecordTargetPathFromRecorder(recorder);
-        if (!target) {
-            NSString *nf = SLNewestAudioFile();
-            if (nf && SLFileFresh(nf, 20.0)) target = nf;
-            else SLLog(@"TTS fsNewest not fresh: %@", nf ?: @"(none)");
+        NSTimeInterval armedAt = gSLArmedAt > 0 ? gSLArmedAt : ([[NSDate date] timeIntervalSince1970] - 300.0);
+        NSString *target = nil;
+        NSString *via = @"(none)";
+
+        // ① path 参数（通常是 nil）
+        if (SLIsAudioPath(path) && !SLIsOurOwnFile(path) && SLFileFreshSince(path, armedAt)) {
+            target = path; via = @"pathArg";
         }
-        NSData *d = [NSData dataWithContentsOfFile:gSLTTSAudioPath];
-        if (target && d.length && SLFileFresh(target, 20.0)) {
-            BOOL ok = [d writeToFile:target atomically:YES];
-            SLLog(@"TTS replace target=%@ ok=%d size=%lu", target, ok, (unsigned long)d.length);
-            if (ok) [AWECAUtils showToast:@"已发送 AI 语音" duration:1.5];
+        // ② 录音机内部（含 _innerRecorder 递归）
+        if (!target) {
+            NSString *p = SLFindRecordPathInObject(recorder, armedAt, 0);
+            if (p) { target = p; via = @"recorder"; }
+        }
+        // ③ 兜底扫描：只接受 armed 之后写的文件
+        if (!target) {
+            NSString *p = SLNewestRecordFileSince(armedAt);
+            if (p) { target = p; via = @"scan"; }
+        }
+
+        double ttsDur = gSLTTSAudioDur;
+        double origDur = 0;
+        if (target) {
+            if ([[target pathExtension].lowercaseString isEqualToString:@"amr"]) origDur = SLAMRDurationAtPath(target);
+            if (origDur <= 0.01) origDur = [AWECAUtils audioDurationAtPath:target];
+        }
+        SLLog(@"REPLACE target=%@ via=%@ origDur=%.2f ttsDur=%.2f timeRaw=%llu",
+              target ?: @"(nil)", via, origDur, ttsDur, time);
+
+        if (target) {
+            NSMutableData *payload = [NSMutableData dataWithContentsOfFile:gSLTTSAudioPath];
+            BOOL padded = NO;
+            NSString *ttsExt = [gSLTTSAudioPath pathExtension].lowercaseString;
+            if (payload.length && ttsDur > 0 && origDur > ttsDur + 0.06 && [ttsExt isEqualToString:@"amr"]) {
+                // AI 音频比真实录音短 → 补静音帧补到同长，语音条秒数就与音频一致
+                NSUInteger frames = (NSUInteger)llround((origDur - ttsDur) / 0.02);
+                NSData *sil = [SLAMREncoder amrSilenceForFrames:frames];
+                if (sil.length) { [payload appendData:sil]; padded = YES; }
+            }
+            if (payload.length) {
+                // 关键：必须原地覆盖（atomically:NO）。
+                // 陌陌可能还持有这个文件的 fd，原子写是换 inode，它读到的还是旧内容。
+                BOOL ok = [payload writeToFile:target atomically:NO];
+                SLLog(@"REPLACE write target=%@ ok=%d size=%lu padded=%d targetExt=%@ ttsExt=%@",
+                      target, ok, (unsigned long)payload.length, padded,
+                      [target pathExtension].lowercaseString, ttsExt);
+                if (ok) {
+                    if (!padded && origDur > 0.1 && ttsDur > origDur + 0.06) {
+                        // AI 音频比录音长：按同一比例改时长（单位无关）
+                        newTime = (unsigned long long)llround((double)time * (ttsDur / origDur));
+                        SLLog(@"REPLACE time adjusted %llu -> %llu", time, newTime);
+                    }
+                    [AWECAUtils showToast:@"已发送 AI 语音" duration:1.5];
+                }
+            } else {
+                SLLog(@"REPLACE read armed audio failed: %@", gSLTTSAudioPath);
+            }
         } else {
-            SLLog(@"TTS skip(no fresh target) target=%@ fresh=%d size=%lu",
-                  target ?: @"(nil)", (target && SLFileFresh(target, 20.0)) ? 1 : 0, (unsigned long)d.length);
+            SLLog(@"REPLACE skip: 没找到本次录音文件（armed=%.0f）", armedAt);
         }
         gSLTTSAudioPath = nil;
     }
-    if (orig) orig(self, _cmd, recorder, path, time);
+
+    if (orig) orig(self, _cmd, recorder, path, newTime);
 }
 
 static BOOL SLInstallAudioRecordHook(Class cls) {
