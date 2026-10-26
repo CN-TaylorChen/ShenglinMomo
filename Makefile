@@ -22,6 +22,8 @@ ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/SLAlignBox.m \
 	Tweak/SLVirtualLocation.m \
 	Tweak/SLMapPickerController.m \
+	Tweak/SLFavoriteStore.m \
+	Tweak/SLFavoriteController.m \
 	Tweak/SLAPIBackup.m \
 	Tweak/SLTTSAuditionPanel.m \
 	Tweak/AWECAAPISettingsController.m \

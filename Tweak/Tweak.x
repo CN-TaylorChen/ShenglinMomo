@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.17"
+#define SLVersion @"0.4.18"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -450,10 +450,6 @@ static NSUInteger gSLBusOffset = 0;     // 已喂字节数
 static BOOL gSLBusActive = NO;          // 正在接管
 static BOOL gSLBusFed = NO;             // 至少喂过一块 → 文件里已经是 AI 语音
 static int gSLBusSwallowLog = 0;
-// v0.4.16：本次录音写进去的那个 opus 路径（BUS-PREP 打印的那个），用来精确认领消息体
-static NSString *gSLBusOpusPath = nil;
-// v0.4.17：音波入口扫描函数定义在文件后半段，装填时要提前调用，先声明
-static void SLInstallWaveMsgHooks(void);
 // —— v0.4.3：通用 PCM 漏斗（编码器入口兜底）——
 static BOOL gSLPcmArmed = NO;
 static double gSLArmRate = 0;
@@ -974,7 +970,6 @@ static BOOL SLArmPackNow(void) {
     }
     SLLog(@"armed pack %@ dur=%.2f pcm=%lu — 等待用户录音替换",
           packPath.lastPathComponent, packDur, (unsigned long)pcm.length);
-    @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}   // v0.4.17：装填时再扫一次
     [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 语音包「%@」（%.1fs）",
                            pack[@"name"] ?: @"", packDur]
                  duration:2.0];
@@ -1010,7 +1005,6 @@ static void SLArmTTS(id handler,
             gSLTTSAudioDur = dur;
             gSLArmedAt = [[NSDate date] timeIntervalSince1970];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
-            @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}   // v0.4.17：装填时再扫一次
 
             // —— v0.4.2：不再自己造 Opus 文件 ——
             // v0.4.1 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
@@ -1334,8 +1328,6 @@ static void SLBusArmWithASBD(id bus, AudioStreamBasicDescription asbd) {
     SLLog(@"BUS-PREP rate=%.0f ch=%u bits=%u aiPcm=%lu feedBytes=%lu opus=%@（开始接管 PCM 流）",
           asbd.mSampleRate, (unsigned)asbd.mChannelsPerFrame, (unsigned)asbd.mBitsPerChannel,
           (unsigned long)gSLTTSPCM16k.length, (unsigned long)gSLBusPCM.length, opusPath ?: @"(nil)");
-    // v0.4.16：记住这次的 token，后面认领「哪条消息体是这次的音频」就靠它
-    gSLBusOpusPath = [opusPath isKindOfClass:[NSString class]] ? [opusPath copy] : nil;
 }
 
 // sendPcmPrepareWithASBD: 结构体按值传
@@ -2230,434 +2222,6 @@ void SLRunWaveProbeScan(void) {
     });
 }
 
-#pragma mark - 钩子 5：音波消息发送（补时长）
-
-// v0.4.14：音波录完之后，陌陌用 buildSingleWaveHandMessage: 造消息、再走
-// chatCell:handleSendWaveHandMessage: 发出去 —— 全程不经过 sendAudioMessage:。
-// 所以 PCM 换血这层是生效的（日志 fed=95108/95108），但没人改时长：
-// 气泡按「录音计时」显示（录 4 秒就 4 秒），文件里却是 2.97 秒的 AI 语音。
-// 这里在发送前把消息体里的 audiotime 改成 AI 真实长度，和语音消息那条链路对齐。
-static void SLWaveDumpMessage(id msg) {
-    if (!msg) return;
-    NSString *cls = NSStringFromClass([msg class]);
-
-    NSString *body = nil;
-    @try { body = [msg valueForKey:@"body"]; } @catch (NSException *e) {}
-    NSDictionary *extra = nil;
-    @try {
-        id v = [msg valueForKey:@"extra"];
-        if ([v isKindOfClass:[NSDictionary class]]) extra = v;
-    } @catch (NSException *e) {}
-
-    // 把名字里带 time/dur/sec/len 的数值型 ivar 全列出来，方便一眼看到时长存在哪
-    NSMutableArray *nums = [NSMutableArray array];
-    unsigned int cnt = 0;
-    Ivar *ivars = class_copyIvarList([msg class], &cnt);
-    for (unsigned int i = 0; ivars && i < cnt; i++) {
-        const char *nm = ivar_getName(ivars[i]);
-        const char *tp = ivar_getTypeEncoding(ivars[i]);
-        if (!nm || !tp) continue;
-        NSString *n = [NSString stringWithUTF8String:nm] ?: @"";
-        NSString *low = n.lowercaseString;
-        if ([low rangeOfString:@"time"].location == NSNotFound &&
-            [low rangeOfString:@"dur"].location == NSNotFound &&
-            [low rangeOfString:@"sec"].location == NSNotFound &&
-            [low rangeOfString:@"len"].location == NSNotFound) continue;
-        uint8_t *base = (uint8_t *)(__bridge void *)msg + ivar_getOffset(ivars[i]);
-        if (tp[0] == 'q' || tp[0] == 'Q') {
-            unsigned long long v = *(unsigned long long *)base;
-            [nums addObject:[NSString stringWithFormat:@"%@@%llu", n, v]];
-        } else if (tp[0] == 'd') {
-            double v = *(double *)base;
-            [nums addObject:[NSString stringWithFormat:@"%@@%.2f", n, v]];
-        } else if (tp[0] == 'i' || tp[0] == 'I') {
-            unsigned int v = *(unsigned int *)base;
-            [nums addObject:[NSString stringWithFormat:@"%@@%u", n, v]];
-        }
-    }
-    if (ivars) free(ivars);
-
-    SLLog(@"WAVE-MSG %@ body=%@ extra=%@ nums=[%@]", cls,
-          body.length > 200 ? [body substringToIndex:200] : (body ?: @"(nil)"),
-          extra.count ? extra : @"(nil)",
-          [nums componentsJoinedByString:@" "]);
-}
-
-static void SLFixWaveMessage(id msg) {
-    @try { SLWaveDumpMessage(msg); } @catch (NSException *e) {}
-
-    NSString *body = nil;
-    @try { body = [msg valueForKey:@"body"]; } @catch (NSException *e) {}
-    if (![body isKindOfClass:[NSString class]] || body.length == 0) return;
-
-    double useDur = SLFedDuration();
-    if (useDur < 0.05) useDur = gSLTTSAudioDur;
-    if (useDur < 0.05) return;
-
-    NSString *nb = SLBodySetAudioTime(body, useDur);
-    if (!nb || [nb isEqualToString:body]) {
-        SLLog(@"WAVE-MSG body 里没有 audiotime，没东西可改（时长 %.2f 秒）", useDur);
-        return;
-    }
-    BOOL set = NO;
-    SEL bs = NSSelectorFromString(@"setBody:");
-    if ([msg respondsToSelector:bs]) {
-        @try { ((void(*)(id,SEL,id))objc_msgSend)(msg, bs, nb); set = YES; } @catch (NSException *e) {}
-    }
-    if (!set) { @try { [msg setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {} }
-    SLLog(@"WAVE-MSG audiotime -> %.2f 秒 set=%d (%@)", useDur, set,
-          nb.length > 200 ? [nb substringToIndex:200] : nb);
-}
-
-static void SLWaveHandSendHook(id self, SEL _cmd, id cell, id msg) {
-    void (*orig)(id, SEL, id, id) = (void (*)(id, SEL, id, id))SLGetOrigIMP(self, _cmd);
-    if (SLIsEnabled() && gSLTTSAudioPath && msg) {
-        @try { SLFixWaveMessage(msg); } @catch (NSException *e) {}
-    }
-    if (orig) orig(self, _cmd, cell, msg);
-}
-
-static BOOL SLInstallWaveHandOnClass(Class c) {
-    if (!c) return NO;
-    SEL sel = NSSelectorFromString(@"chatCell:handleSendWaveHandMessage:");
-    Method m = class_getInstanceMethod(c, sel);
-    if (!m) return NO;
-
-    const char *t = method_getTypeEncoding(m);
-    NSMethodSignature *sig = nil;
-    @try { if (t) sig = [NSMethodSignature signatureWithObjCTypes:t]; } @catch (NSException *e) {}
-    // 只认 (对象, 对象) 两个参数：多一个少一个都可能是我们读不懂的调用约定，宁可不动
-    if (!sig || sig.numberOfArguments != 4 ||
-        [sig getArgumentTypeAtIndex:2][0] != '@' || [sig getArgumentTypeAtIndex:3][0] != '@') {
-        SLLog(@"WAVE-HOOK %@ 签名 %s 不符，跳过", NSStringFromClass(c), t ?: "?");
-        return NO;
-    }
-    if (SLRegisterMethod(c, sel, (IMP)SLWaveHandSendHook)) {
-        SLLog(@"WAVE-HOOK 装上 %@ chatCell:handleSendWaveHandMessage: type=%s",
-              NSStringFromClass(c), t ?: "?");
-        return YES;
-    }
-    return NO;
-}
-
-static void SLInstallWaveHandHook(void) {
-    static BOOL done = NO;
-    if (done) return;
-    done = YES;   // 只尝试一次：陌陌的类启动时已经全部加载，扫不到就是没有
-
-    // 先试几个最可能的宿主，命中就不用扫全表（0.4.10 的教训：扫全表会卡启动）
-    NSArray<NSString *> *cand = @[@"MDChatBaseHander", @"MDChatSingleHandler", @"MDChatUniverseHandler",
-                                  @"MDChatViewController", @"MDChatCell", @"MDMessageCell"];
-    for (NSString *n in cand) {
-        if (SLInstallWaveHandOnClass(NSClassFromString(n))) return;
-    }
-
-    int n = objc_getClassList(NULL, 0);
-    if (n <= 0) return;
-    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
-    if (!buf) return;
-    n = objc_getClassList(buf, n);
-    BOOL found = NO;
-    for (int i = 0; i < n; i++) {
-        Class c = buf[i];
-        if (!SLClassIsAppOwned(c)) continue;
-        if (SLInstallWaveHandOnClass(c)) { found = YES; break; }
-    }
-    free(buf);
-    if (!found) SLLog(@"WAVE-HOOK 没找到 chatCell:handleSendWaveHandMessage: 的宿主");
-}
-
-// ---------------------------------------------------------------------------
-// v0.4.15：音波时长兜底层（不再猜发送入口）
-//
-// 0.4.14 把 chatCell:handleSendWaveHandMessage: 装上了（日志确认 owner=MDChatSingleHandler），
-// 但两次实测在录音结束后的 30~40 秒里没有任何 WAVE-MSG，说明音波发送没走这个入口，
-// 或者走的是 Swift 侧另一条链（MDVoiceWavePublishVoiceManager 没有 OC 方法表可钩）。
-//
-// 于是换一层盯：音频消息的时长只存在于消息体里（语音实测 audiotime=18 就显示 1.8 秒），
-// 不管哪条路发出去，最终都得把 body 写到消息对象上。这里同时盯三个点：
-//   1) -setBody:                        赋值瞬间改写（最通用，不关心谁在发）
-//   2) -handleWaveHandMessage:handler:  音波消息处理入口
-//   3) -buildSingleWaveHandMessage:     音波消息构造入口（改它的返回值）
-// 只在「刚替换过 PCM 的 60 秒装填窗口内」生效，窗口外一行都不改。
-// ---------------------------------------------------------------------------
-static CFAbsoluteTime gSLBodyLogWin = 0;
-static NSMutableSet *gSLBodySeen = nil;
-
-// v0.4.16：上一版最多打 8 条，结果一次聊天刷新就把额度吃光（8 条全是历史语音消息），
-// 真正要看的音波 body 反而没打出来。改成「同一条 body 只打一次，每分钟最多 30 条」。
-static void SLBodyLogOnce(NSString *body, const char *tag, const char *cls) {
-    if (body.length == 0) return;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - gSLBodyLogWin > 60.0) { gSLBodyLogWin = now; [gSLBodySeen removeAllObjects]; }
-    if (!gSLBodySeen) gSLBodySeen = [NSMutableSet set];
-    NSString *k = body.length > 240 ? [body substringToIndex:240] : body;
-    if ([gSLBodySeen containsObject:k]) return;
-    if (gSLBodySeen.count >= 30) return;
-    [gSLBodySeen addObject:k];
-    SLLog(@"BODY-SEE %s <%s> len=%lu %@", tag, cls, (unsigned long)body.length, k);
-}
-
-// 本次录音的 token：.../Chat_Audios_Temp/68C-EAD868E3F45F.opus → 68C-EAD868E3F45F
-// 语音消息实测 body 里的 file= 就是这个值，所以它是认领「这条消息是这次的」最准的凭据。
-static NSString *SLBusOpusToken(void) {
-    if (gSLBusOpusPath.length == 0) return nil;
-    NSString *n = gSLBusOpusPath.lastPathComponent;
-    if ([n hasSuffix:@".opus"]) n = [n substringToIndex:n.length - 5];
-    return n.length ? n : nil;
-}
-
-// 待发状态的消息体特征：语音消息实测是 filesize=0 ... dummy=1。
-static BOOL SLBodyIsPending(NSString *b) {
-    if (b.length == 0) return NO;
-    return [b rangeOfString:@"dummy=1"].location != NSNotFound ||
-           [b rangeOfString:@"filesize=0"].location != NSNotFound;
-}
-
-// v0.4.16：唯一改判 —— 音波走的是「先上传、再建消息」，body 里的 filesize 已经是真实值，
-// 所以上一版的 dummy=1 / filesize=0 过滤会把它当成历史消息直接放过（BODY-SEE 里那批
-// filesize=6399/6511/4257 就是证据）。改成按 token 精确认领，历史消息的 token 不可能相同。
-static BOOL SLBodyIsOurs(NSString *b) {
-    if (b.length == 0) return NO;
-    NSString *tok = SLBusOpusToken();
-    if (tok.length == 0) return NO;
-    NSString *f = SLBodyValue(b, @"file");
-    if (f.length && [f isEqualToString:tok]) return YES;
-    return [b rangeOfString:tok].location != NSNotFound;
-}
-
-// 对任意「像消息」的对象尝试把时长改成实际喂进去的长度
-static BOOL SLTryFixMessageBody(id msg, const char *where) {
-    if (!SLIsEnabled() || msg == nil || gSLTTSAudioPath == nil) return NO;
-
-    NSString *body = nil;
-    @try { body = [msg valueForKey:@"body"]; } @catch (NSException *e) {}
-    if (![body isKindOfClass:[NSString class]] || body.length == 0) {
-        SLLog(@"WAVE-FIX %s 参数里没有 body（%s）", where, object_getClassName(msg));
-        return NO;
-    }
-    SLBodyLogOnce(body, where, object_getClassName(msg));
-
-    double d = SLFedDuration();
-    if (d < 0.05) d = gSLTTSAudioDur;
-    if (d < 0.05) return NO;
-
-    if ([body rangeOfString:@"audiotime="].location == NSNotFound) {
-        SLLog(@"WAVE-FIX %s body 里没有 audiotime（时长 %.2f 秒）", where, d);
-        return NO;
-    }
-    if (!SLBodyIsOurs(body) && !SLBodyIsPending(body)) {
-        SLLog(@"WAVE-FIX %s 不是这次的音频（token=%@），不动", where, SLBusOpusToken() ?: @"(nil)");
-        return NO;
-    }
-
-    NSString *nb = SLBodySetAudioTime(body, d);
-    if (nb.length == 0 || [nb isEqualToString:body]) return NO;
-
-    BOOL set = NO;
-    @try { [msg setValue:nb forKey:@"body"]; set = YES; } @catch (NSException *e) {}
-    SLLog(@"WAVE-FIX %s audiotime -> %.2f 秒 set=%d (%@)", where, d, set,
-          nb.length > 200 ? [nb substringToIndex:200] : nb);
-    return set;
-}
-
-static void SLSetMessageBodyHook(id self, SEL _cmd, NSString *body) {
-    void (*orig)(id, SEL, NSString *) = (void (*)(id, SEL, NSString *))SLGetOrigIMP(self, _cmd);
-    NSString *use = body;
-
-    if (SLIsEnabled() && gSLTTSAudioPath != nil &&
-        [body isKindOfClass:[NSString class]] && body.length > 0) {
-        SLBodyLogOnce(body, "setBody:", object_getClassName(self));
-        if ([body rangeOfString:@"audiotime="].location != NSNotFound &&
-            (SLBodyIsOurs(body) || SLBodyIsPending(body))) {
-            double d = SLFedDuration();
-            if (d < 0.05) d = gSLTTSAudioDur;
-            if (d >= 0.05) {
-                NSString *nb = SLBodySetAudioTime(body, d);
-                if (nb.length && ![nb isEqualToString:body]) {
-                    use = nb;
-                    SLLog(@"BODY-NET %s audiotime -> %.2f 秒", object_getClassName(self), d);
-                }
-            }
-        }
-    }
-    if (orig) orig(self, _cmd, use);
-}
-
-static void SLWaveHandleMessageHook(id self, SEL _cmd, id msg, id handler) {
-    void (*orig)(id, SEL, id, id) = (void (*)(id, SEL, id, id))SLGetOrigIMP(self, _cmd);
-    @try { SLTryFixMessageBody(msg, "handleWaveHandMessage:"); } @catch (NSException *e) {}
-    if (orig) orig(self, _cmd, msg, handler);
-}
-
-static id SLBuildWaveMessageHook(id self, SEL _cmd) {
-    id (*orig)(id, SEL) = NULL;
-    @try { orig = (id (*)(id, SEL))SLGetOrigIMP(self, _cmd); } @catch (NSException *e) {}
-    id msg = orig ? orig(self, _cmd) : nil;
-    @try { SLTryFixMessageBody(msg, "buildSingleWaveHandMessage:"); } @catch (NSException *e) {}
-    return msg;
-}
-
-// SLRegisterMethod 只走实例方法；类方法要自己记在元类上。
-// SLGetOrigIMP 用的是 object_getClass(obj)，类对象的 object_getClass 就是元类，能对上。
-static BOOL SLRegisterClassMethod(Class cls, SEL sel, IMP rep) {
-    if (!cls) return NO;
-    Method m = class_getClassMethod(cls, sel);
-    if (!m) return NO;
-    Class meta = object_getClass((id)cls);
-    if (SLOrigIMPs()[SLKey(meta, sel)]) return NO;
-    IMP cur = method_getImplementation(m);
-    if (!cur || cur == rep) return NO;
-    SLOrigIMPs()[SLKey(meta, sel)] = [NSValue valueWithPointer:cur];
-    method_setImplementation(m, rep);
-    SLLog(@"WAVE-HOOK 装上 +%@ %@ type=%s", NSStringFromClass(cls), NSStringFromSelector(sel),
-          method_getTypeEncoding(m) ?: "?");
-    return YES;
-}
-
-// 签名不符一律跳过：宁可不动，也不猜调用约定
-static BOOL SLInstallWaveMsgHooksOnClass(Class c) {
-    if (!c) return NO;
-    BOOL any = NO;
-
-    SEL h = NSSelectorFromString(@"handleWaveHandMessage:handler:");
-    Method mh = class_getInstanceMethod(c, h);
-    if (mh) {
-        const char *t = method_getTypeEncoding(mh);
-        NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
-        if (sig && sig.numberOfArguments == 4 &&
-            [sig getArgumentTypeAtIndex:2][0] == '@' && [sig getArgumentTypeAtIndex:3][0] == '@') {
-            if (SLRegisterMethod(c, h, (IMP)SLWaveHandleMessageHook)) {
-                SLLog(@"WAVE-HOOK 装上 %@ handleWaveHandMessage:handler: type=%s",
-                      NSStringFromClass(c), t ?: "?");
-                any = YES;
-            }
-        }
-    }
-
-    // v0.4.16：0.4.15 只扫了实例方法，结果 buildSingleWaveHandMessage: 一个都没装上 ——
-    // 它很可能是类方法（+），所以这里实例方法、类方法都试一遍。
-    SEL b = NSSelectorFromString(@"buildSingleWaveHandMessage:");
-    Method mb = class_getInstanceMethod(c, b);
-    if (mb) {
-        const char *t = method_getTypeEncoding(mb);
-        NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
-        const char *ret = (sig != nil) ? [sig methodReturnType] : NULL;
-        if (sig && sig.numberOfArguments == 2 && ret && ret[0] == '@') {
-            if (SLRegisterMethod(c, b, (IMP)SLBuildWaveMessageHook)) {
-                SLLog(@"WAVE-HOOK 装上 -%@ buildSingleWaveHandMessage: type=%s",
-                      NSStringFromClass(c), t ?: "?");
-                any = YES;
-            }
-        }
-    }
-    Method mbc = class_getClassMethod(c, b);
-    if (mbc) {
-        const char *t = method_getTypeEncoding(mbc);
-        NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
-        const char *ret = (sig != nil) ? [sig methodReturnType] : NULL;
-        if (sig && sig.numberOfArguments == 2 && ret && ret[0] == '@') {
-            if (SLRegisterClassMethod(c, b, (IMP)SLBuildWaveMessageHook)) any = YES;
-        }
-    }
-    return any;
-}
-
-// v0.4.16 诊断：只记录，不改。音波气泡上的秒数也可能来自消息对象自己的 audioTime 字段，
-// 而 MDSingleMessage 自己没有这个 ivar（0.4.14 的 ivar 清单里没有 _audioTime），
-// 父类中到底有没有、写入时是「秒」还是「0.1 秒」，这一版先打出来看清楚再动。
-static void SLSetAudioTimeQHook(id self, SEL _cmd, unsigned long long v) {
-    void (*orig)(id, SEL, unsigned long long) =
-        (void (*)(id, SEL, unsigned long long))SLGetOrigIMP(self, _cmd);
-    if (gSLTTSAudioPath != nil) {
-        SLLog(@"MSG-TIME(Q) %s = %llu   fed=%.2f 秒 token=%@", object_getClassName(self), v,
-              SLFedDuration(), SLBusOpusToken() ?: @"(nil)");
-    }
-    if (orig) orig(self, _cmd, v);
-}
-
-static void SLSetAudioTimeDHook(id self, SEL _cmd, double v) {
-    void (*orig)(id, SEL, double) = (void (*)(id, SEL, double))SLGetOrigIMP(self, _cmd);
-    if (gSLTTSAudioPath != nil) {
-        SLLog(@"MSG-TIME(d) %s = %.3f   fed=%.2f 秒 token=%@", object_getClassName(self), v,
-              SLFedDuration(), SLBusOpusToken() ?: @"(nil)");
-    }
-    if (orig) orig(self, _cmd, v);
-}
-
-static BOOL SLInstallAudioTimeProbe(void) {
-    Class c = NSClassFromString(@"MDSingleMessage");
-    if (!c) c = NSClassFromString(@"MDBaseMessage");
-    if (!c) return NO;
-    SEL sel = NSSelectorFromString(@"setAudioTime:");
-    Method m = class_getInstanceMethod(c, sel);
-    if (!m) { SLLog(@"MSG-TIME 没有 setAudioTime:，跳过"); return NO; }
-    const char *t = method_getTypeEncoding(m);
-    NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
-    const char *a2 = (sig && sig.numberOfArguments == 3) ? [sig getArgumentTypeAtIndex:2] : NULL;
-    if (!a2) return NO;
-    IMP rep = NULL;
-    if (a2[0] == 'Q' || a2[0] == 'q' || a2[0] == 'I' || a2[0] == 'i') rep = (IMP)SLSetAudioTimeQHook;
-    else if (a2[0] == 'd' || a2[0] == 'f') rep = (IMP)SLSetAudioTimeDHook;
-    if (!rep) { SLLog(@"MSG-TIME setAudioTime: 类型 %s 不认识，跳过", t ?: "?"); return NO; }
-    if (!SLRegisterMethod(c, sel, rep)) return NO;
-    SLLog(@"MSG-TIME 装上 %@ setAudioTime: type=%s（只记录不改）", NSStringFromClass(c), t ?: "?");
-    return YES;
-}
-
-static void SLInstallWaveMsgHooks(void) {
-    // v0.4.17：不再只扫一次。启动时 objc_getClassList 只返回「已经 realize」的类，
-    // 音波那套东西很可能是懒加载的（第一次进音波页才 realize），所以启动那次扫描
-    // 根本看不到它 —— 这就是为什么 buildSingleWaveHandMessage: 一直装不上。
-    // 改成：启动扫一次，5 秒 / 20 秒后再扫，并且每次装填音频时也顺带扫一次。
-    // 重复扫描没有副作用：SLRegisterMethod / SLRegisterClassMethod 都做了去重。
-    static int scanNo = 0;
-    scanNo++;
-
-    int total = objc_getClassList(NULL, 0);
-    if (total <= 0) return;
-    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)total);
-    if (!buf) return;
-    total = objc_getClassList(buf, total);
-    int hits = 0, appOwned = 0;
-    for (int i = 0; i < total; i++) {
-        if (!SLClassIsAppOwned(buf[i])) continue;
-        appOwned++;
-        if (SLInstallWaveMsgHooksOnClass(buf[i])) hits++;
-    }
-    free(buf);
-    SLLog(@"WAVE-SCAN 第 %d 次：陌陌的类 %d 个，本次装上 %d 个音波入口", scanNo, appOwned, hits);
-}
-
-static void SLScheduleWaveRescan(void) {
-    for (int sec = 5; sec <= 20; sec += 15) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(sec * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}
-        });
-    }
-}
-
-static BOOL SLInstallBodyNetHook(void) {
-    Class c = NSClassFromString(@"MDSingleMessage");
-    if (!c) c = NSClassFromString(@"MDBaseMessage");
-    if (!c) { SLLog(@"BODY-NET 找不到消息类，跳过"); return NO; }
-
-    SEL sel = @selector(setBody:);
-    Method m = class_getInstanceMethod(c, sel);
-    if (!m) { SLLog(@"BODY-NET %@ 没有 setBody:，跳过", NSStringFromClass(c)); return NO; }
-
-    const char *t = method_getTypeEncoding(m);
-    NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
-    if (!sig || sig.numberOfArguments != 3 || [sig getArgumentTypeAtIndex:2][0] != '@') {
-        SLLog(@"BODY-NET setBody: 签名 %s 不符，跳过", t ?: "?");
-        return NO;
-    }
-    if (!SLRegisterMethod(c, sel, (IMP)SLSetMessageBodyHook)) return NO;
-    SLLog(@"BODY-NET 装上 %@ setBody: type=%s", NSStringFromClass(c), t ?: "?");
-    return YES;
-}
-
 // v0.4.12：音波发布后闪退的兜底。
 // iOS 15 起，给「老式构造」的 UIButton（buttonWithType:）设 configurationUpdateHandler
 // 会直接 NSAssert：Invalid parameter not satisfying: configuration != nil。
@@ -2719,13 +2283,6 @@ static void SLInstallHooks(void) {
     @try { SLInstallVirtualLocationHooks(); } @catch (NSException *e) {}
     // v0.4.12：UIButton configuration 断言兜底
     @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
-    // v0.4.14：音波消息发送前补时长（音波不走 sendAudioMessage:）
-    @try { SLInstallWaveHandHook(); } @catch (NSException *e) {}
-    // v0.4.15：不再依赖发送入口，改为盯消息体赋值 + 音波消息的两个构造/处理入口
-    @try { SLInstallBodyNetHook(); } @catch (NSException *e) {}
-    @try { SLInstallWaveMsgHooks(); } @catch (NSException *e) {}
-    @try { SLScheduleWaveRescan(); } @catch (NSException *e) {}
-    @try { SLInstallAudioTimeProbe(); } @catch (NSException *e) {}
     // v0.4.11：音波探针默认关。0.4.10 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
     if (SLWaveProbeEnabled()) {
         @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
