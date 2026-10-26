@@ -372,6 +372,21 @@ static int aweca_mapPitchToV3(float ratio) {
     } mutableCopy];
     if ([model isEqualToString:@"s1"]) body[@"normalize"] = @YES;
 
+    // 语速/音量（v0.4.8）：prosody.speed 0.5~2.0；prosody.volume 是 dB 偏移，由倍率 20*log10 换算。
+    // 开着响度归一化时音量偏移会被抹平，所以调音量时顺带关掉 normalize_loudness
+    float sp = self.speedRatio; float vo = self.volumeRatio;
+    if (sp < 0.01f) sp = 1.0f;
+    if (vo < 0.01f) vo = 1.0f;
+    if (fabsf(sp - 1.0f) > 0.005f || fabsf(vo - 1.0f) > 0.005f) {
+        NSMutableDictionary *prosody = [NSMutableDictionary dictionary];
+        if (fabsf(sp - 1.0f) > 0.005f) prosody[@"speed"] = @(sp);
+        if (fabsf(vo - 1.0f) > 0.005f) {
+            prosody[@"volume"] = @(20.0 * log10f(vo));
+            body[@"normalize_loudness"] = @NO;
+        }
+        body[@"prosody"] = prosody;
+    }
+
     NSError *jsonErr = nil;
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&jsonErr];
     if (jsonErr || !jsonData) {
