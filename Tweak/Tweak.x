@@ -30,9 +30,10 @@
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 
-#define SLVersion @"0.4.9.4"
+#define SLVersion @"0.4.9.5"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
+#define kSLPackCmdKey @"SLPackCommand"
 
 #pragma mark - 配置
 
@@ -46,6 +47,27 @@ static NSString *SLCommand(void) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLCommandKey];
     if (v.length == 0) v = @"#tts";
     return v;
+}
+
+// v0.4.9.5：语音包单独一条口令，跟合成口令彻底分开 ——
+// 「yyb」= 直接发所选语音包，「#tts 文字」= 合成，互不抢。
+static NSString *SLPackCommand(void) {
+    NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackCmdKey];
+    if (v.length == 0) v = @"yyb";
+    return v;
+}
+
+// 前缀匹配（不区分大小写，兼容全角井号）
+static BOOL SLHasPrefixCommand(NSString *text, NSString *cmd) {
+    if (![text isKindOfClass:[NSString class]] || !text.length || !cmd.length) return NO;
+    NSRange r = [text rangeOfString:cmd options:NSCaseInsensitiveSearch | NSAnchoredSearch];
+    if (r.location == 0) return YES;
+    NSString *alt = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@"＃"];
+    if (![alt isEqualToString:cmd]) {
+        r = [text rangeOfString:alt options:NSCaseInsensitiveSearch | NSAnchoredSearch];
+        if (r.location == 0) return YES;
+    }
+    return NO;
 }
 
 #pragma mark - 原实现记账（key = 类名#selector）
@@ -210,29 +232,50 @@ static NSString *SLTextFromArgument(id arg) {
     return nil;
 }
 
-static BOOL SLTextHasCommand(NSString *text) {
+// 口令变体：原样、去掉井号、全角井号 —— 用户手打「tts 你好」也能命中，不强制带 #
+static NSArray<NSString *> *SLCommandVariants(NSString *cmd) {
+    NSMutableArray *out = [NSMutableArray array];
+    if (!cmd.length) return out;
+    [out addObject:cmd];
+    NSString *noHash = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@""];
+    noHash = [noHash stringByReplacingOccurrencesOfString:@"＃" withString:@""];
+    if (noHash.length && ![out containsObject:noHash]) [out addObject:noHash];
+    NSString *fullHash = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@"＃"];
+    if (![out containsObject:fullHash]) [out addObject:fullHash];
+    return out;
+}
+
+// 命中口令时把「去掉口令后的正文」写进 outRest；无井号变体要求后一位不是英文字母（防 ttsabc 误判）
+static BOOL SLMatchCommand(NSString *text, NSString **outRest) {
     if (![text isKindOfClass:[NSString class]] || text.length == 0) return NO;
-    NSString *cmd = SLCommand();
-    NSRange r = [text rangeOfString:cmd options:NSCaseInsensitiveSearch | NSAnchoredSearch];
-    if (r.location != 0) {
-        NSString *alt = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@"＃"];
-        r = [text rangeOfString:alt options:NSCaseInsensitiveSearch | NSAnchoredSearch];
-        if (r.location != 0) return NO;
+    for (NSString *cmd in SLCommandVariants(SLCommand())) {
+        NSRange r = [text rangeOfString:cmd options:NSCaseInsensitiveSearch | NSAnchoredSearch];
+        if (r.location != 0) continue;
+        BOOL hasHash = ([cmd rangeOfString:@"#"].location != NSNotFound)
+                    || ([cmd rangeOfString:@"＃"].location != NSNotFound);
+        if (!hasHash && text.length > r.length) {
+            unichar c = [text characterAtIndex:r.length];
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) continue;
+        }
+        if (outRest) {
+            NSString *rest = [text substringFromIndex:r.length];
+            rest = [rest stringByTrimmingCharactersInSet:
+                    [NSCharacterSet characterSetWithCharactersInString:@" :：\t"]];
+            *outRest = [rest stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        }
+        return YES;
     }
-    return YES;
+    return NO;
+}
+
+static BOOL SLTextHasCommand(NSString *text) {
+    return SLMatchCommand(text, NULL);
 }
 
 static NSString *SLTextAfterCommand(NSString *text) {
-    NSString *cmd = SLCommand();
-    NSRange r = [text rangeOfString:cmd options:NSCaseInsensitiveSearch | NSAnchoredSearch];
-    if (r.location != 0) {
-        NSString *alt = [cmd stringByReplacingOccurrencesOfString:@"#" withString:@"＃"];
-        r = [text rangeOfString:alt options:NSCaseInsensitiveSearch | NSAnchoredSearch];
-        if (r.location != 0) return @"";
-    }
-    NSString *rest = [text substringFromIndex:r.length];
-    rest = [rest stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" :：\t"]];
-    return [rest stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *rest = @"";
+    if (!SLMatchCommand(text, &rest)) return @"";
+    return rest;
 }
 
 static NSString *SLShorten(NSString *s, NSUInteger max) {
@@ -254,7 +297,7 @@ static UIView *SLFindViewWithCommand(UIView *root, NSString **outText) {
         NSString *t = nil;
         if ([v isKindOfClass:[UITextView class]]) t = ((UITextView *)v).text;
         else if ([v isKindOfClass:[UITextField class]]) t = ((UITextField *)v).text;
-        if (t.length && SLTextHasCommand(t)) {
+        if (t.length && SLTextHasAnyCommand(t)) {
             if (outText) *outText = t;
             return v;
         }
@@ -839,48 +882,66 @@ static void SLDumpMethodNames(id obj) {
 
 #pragma mark - #tts 处理（录音替换：装填 AI 音频，等真实录音时覆盖）
 
+// v0.4.9.5：语音包装填 —— yyb 口令专用。返回 NO 表示没装成，并且已经提示过原因。
+static BOOL SLArmPackNow(void) {
+    if (![SLVoicePack isEnabled]) {
+        [AWECAUtils showToast:@"语音包没启用：设置 → 语音包 里打开开关" duration:2.4];
+        SLLog(@"yyb: pack disabled");
+        return NO;
+    }
+    NSDictionary *pack = [SLVoicePack activePack];
+    if (!pack) {
+        [AWECAUtils showToast:@"还没选语音包：去「语音包」里点一条" duration:2.4];
+        SLLog(@"yyb: no active pack");
+        return NO;
+    }
+    NSString *packPath = [SLVoicePack pathOfPack:pack];
+    if (!packPath.length) {
+        [AWECAUtils showToast:@"这条语音包的文件不见了，重新导入" duration:2.4];
+        SLLog(@"yyb: missing file rel=%@", pack[@"rel"] ?: @"-");
+        return NO;
+    }
+    double packDur = [AWECAUtils audioDurationAtPath:packPath];
+    if (packDur <= 0.05) {
+        [AWECAUtils showToast:@"这段音频解不了（iOS 不支持 oga/ogg），先转成 m4a 或 wav" duration:3.0];
+        SLLog(@"yyb: undecodable %@", packPath.lastPathComponent);
+        return NO;
+    }
+    if (packDur > 60.0) packDur = 60.0;   // 陌陌语音条上限
+    gSLTTSAudioPath = [packPath copy];
+    gSLTTSAudioDur = packDur;
+    gSLArmedAt = [[NSDate date] timeIntervalSince1970];
+    NSData *pcm = [SLAMREncoder pcmMono16AtPath:packPath sampleRate:16000.0];
+    NSUInteger cap = (NSUInteger)(60.0 * 16000.0) * 2;
+    if (pcm.length > cap) pcm = [pcm subdataWithRange:NSMakeRange(0, cap)];
+    if (pcm.length > 1600) {
+        gSLTTSPCM16k = pcm;
+        gSLTTSPCM16kDur = (double)(pcm.length / 2) / 16000.0;
+    } else {
+        gSLTTSPCM16k = nil;
+        gSLTTSPCM16kDur = 0;
+    }
+    SLLog(@"armed pack %@ dur=%.2f pcm=%lu — 等待用户录音替换",
+          packPath.lastPathComponent, packDur, (unsigned long)pcm.length);
+    [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 语音包「%@」（%.1fs）",
+                           pack[@"name"] ?: @"", packDur]
+                 duration:2.0];
+    NSString *armedPack = [gSLTTSAudioPath copy];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armedPack]) {
+            gSLTTSAudioPath = nil;
+            SLLog(@"armed pack expired (60s), cleared");
+        }
+    });
+    return YES;
+}
+
 static void SLArmTTS(id handler,
                      NSString *content,
                      void (^fallback)(void)) {
     (void)handler;
 
-    // v0.4.9.3：语音包优先 —— 开着就直接装填所选音频，不联网合成
-    if ([SLVoicePack isEnabled]) {
-        NSDictionary *pack = [SLVoicePack activePack];
-        NSString *packPath = pack ? [SLVoicePack pathOfPack:pack] : nil;
-        double packDur = packPath.length ? [AWECAUtils audioDurationAtPath:packPath] : 0;
-        if (packPath.length && packDur > 0.05) {
-            if (packDur > 60.0) packDur = 60.0;   // 陌陌语音条上限
-            gSLTTSAudioPath = [packPath copy];
-            gSLTTSAudioDur = packDur;
-            gSLArmedAt = [[NSDate date] timeIntervalSince1970];
-            NSData *pcm = [SLAMREncoder pcmMono16AtPath:packPath sampleRate:16000.0];
-            NSUInteger cap = (NSUInteger)(60.0 * 16000.0) * 2;
-            if (pcm.length > cap) pcm = [pcm subdataWithRange:NSMakeRange(0, cap)];
-            if (pcm.length > 1600) {
-                gSLTTSPCM16k = pcm;
-                gSLTTSPCM16kDur = (double)(pcm.length / 2) / 16000.0;
-            } else {
-                gSLTTSPCM16k = nil;
-                gSLTTSPCM16kDur = 0;
-            }
-            SLLog(@"armed pack %@ dur=%.2f pcm=%lu — 等待用户录音替换",
-                  packPath.lastPathComponent, packDur, (unsigned long)pcm.length);
-            [AWECAUtils showToast:[NSString stringWithFormat:@"已就绪 · 语音包「%@」（%.1fs）",
-                                   pack[@"name"] ?: @"", packDur]
-                         duration:2.0];
-            NSString *armedPack = [gSLTTSAudioPath copy];
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:armedPack]) {
-                    gSLTTSAudioPath = nil;
-                    SLLog(@"armed pack expired (60s), cleared");
-                }
-            });
-            return;
-        }
-        SLLog(@"pack enabled but selection unusable, fallback to tts");
-    }
-
+    // v0.4.9.5：语音包已改走独立口令（默认 yyb），这里只负责合成，两者不再互相抢。
     [AWECAUtils showToast:@"合成中..." duration:2.0];
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -948,6 +1009,17 @@ static void SLSendText(id self, SEL _cmd) {
 
     SLLog(@"%@ -sendText text=%@", NSStringFromClass([self class]), SLShorten(text, 50));
 
+    // v0.4.9.5：yyb = 直接发语音包，不联网合成
+    if (SLHasPrefixCommand(text, SLPackCommand())) {
+        if (!SLClaimText(text)) {
+            SLLog(@"sendText yyb duplicate ignored");
+            return;
+        }
+        SLLog(@"yyb hit via %@ -sendText", NSStringFromClass([self class]));
+        if (SLArmPackNow()) SLClearTextInView(tv);
+        return;
+    }
+
     if (!SLTextHasCommand(text)) {
         if (orig) orig(self, _cmd);
         return;
@@ -991,7 +1063,18 @@ static void SLSendTextMessage(id self, SEL _cmd, id arg) {
               NSStringFromClass([self class]), NSStringFromClass([arg class]), SLShorten(text, 40));
     }
 
-    if (!SLIsEnabled() || !SLTextHasCommand(text)) {
+    if (!SLIsEnabled()) {
+        if (orig) orig(self, _cmd, arg);
+        return;
+    }
+    // v0.4.9.5：yyb = 直接发语音包
+    if (SLHasPrefixCommand(text, SLPackCommand())) {
+        if (!SLClaimText(text)) return;
+        SLLog(@"yyb hit via %@ -sendTextMessage:", NSStringFromClass([self class]));
+        if (SLArmPackNow()) SLClearInputBars();
+        return;
+    }
+    if (!SLTextHasCommand(text)) {
         if (orig) orig(self, _cmd, arg);
         return;
     }
@@ -1019,7 +1102,18 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
     void (*orig)(id, SEL, id, id, BOOL) = (void (*)(id, SEL, id, id, BOOL))SLGetOrigIMP(self, _cmd);
     NSString *str = SLTextFromArgument(text);
 
-    if (!SLIsEnabled() || !SLTextHasCommand(str)) {
+    if (!SLIsEnabled()) {
+        if (orig) orig(self, _cmd, text, targetID, isSingle);
+        return;
+    }
+    // v0.4.9.5：yyb = 直接发语音包
+    if (SLHasPrefixCommand(str, SLPackCommand())) {
+        if (!SLClaimText(str)) return;
+        SLLog(@"yyb hit via MMCommonServiceImpl");
+        if (SLArmPackNow()) SLClearInputBars();
+        return;
+    }
+    if (!SLTextHasCommand(str)) {
         if (orig) orig(self, _cmd, text, targetID, isSingle);
         return;
     }
