@@ -4,12 +4,13 @@
 #import <PhotosUI/PhotosUI.h>
 
 // ===================== 悬浮球图标 =====================
-// 存一个字符串，三种形态：
-//   text:声临        纯文字（默认）
-//   emoji:🎙️        表情
+// v0.4.7：去掉「文字图标」（声临/AI/TTS/语 那四个），只留表情与自选图片，
+// 表情支持自定义输入。存一个字符串：
+//   emoji:🎙️        表情（默认）
 //   image:icon.png   相册选的自定义图片（已裁成圆形，存沙盒）
+//   text:xxx         旧版遗留值，读取时自动迁移成默认表情
 #define kSLFloatIconKey @"SLFloatIcon"
-#define kSLFloatIconDefault @"text:声临"
+#define kSLFloatIconDefault @"emoji:🎙️"
 
 static NSString *SLFloatIconDir(void) {
     NSString *dir = [[AWECAUtils documentsPath] stringByAppendingPathComponent:@"ShenglinMomo/float"];
@@ -26,16 +27,15 @@ static NSString *SLFloatIconImagePath(NSString *name) {
 
 static NSString *SLFloatIconValue(void) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLFloatIconKey];
-    return v.length ? v : kSLFloatIconDefault;
+    if (!v.length) return kSLFloatIconDefault;
+    if ([v hasPrefix:@"text:"]) return kSLFloatIconDefault;   // 旧版文字图标 → 默认表情
+    return v;
 }
 
 NSString *SLFloatIconSummary(void) {
     NSString *v = SLFloatIconValue();
     if ([v hasPrefix:@"image:"]) return @"自定义图片";
     if ([v hasPrefix:@"emoji:"]) return [v substringFromIndex:6];
-    if ([v hasPrefix:@"text:"]) {
-        return [NSString stringWithFormat:@"文字「%@」", [v substringFromIndex:5]];
-    }
     return @"默认";
 }
 
@@ -135,14 +135,11 @@ static void SLApplyFloatIcon(UIButton *btn) {
     }
     btn.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
     [btn setBackgroundImage:nil forState:UIControlStateNormal];
-    if ([v hasPrefix:@"emoji:"]) {
-        [btn setTitle:[v substringFromIndex:6] forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:24];
-    } else {
-        NSString *t = [v hasPrefix:@"text:"] ? [v substringFromIndex:5] : v;
-        [btn setTitle:(t.length ? t : @"声临") forState:UIControlStateNormal];
-        btn.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
-    }
+    NSString *t = [v hasPrefix:@"emoji:"] ? [v substringFromIndex:6] : @"🎙️";
+    [btn setTitle:t forState:UIControlStateNormal];
+    btn.titleLabel.font = [UIFont systemFontOfSize:22];
+    btn.titleLabel.adjustsFontSizeToFitWidth = YES;   // 自定义两个字符也塞得下
+    btn.titleLabel.minimumScaleFactor = 0.6;
 }
 
 // iOS15 SDK 起 -[UIApplication windows] 被弃用，工程开了 -Werror，这里局部抑制并优先走场景 API
@@ -209,6 +206,11 @@ void SLStartEntryWatcher(void) {
 
 @implementation SLFloatIconController
 
+- (instancetype)init {
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
+    return self;
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"悬浮球图标";
@@ -226,31 +228,25 @@ void SLStartEntryWatcher(void) {
     }
 }
 
-- (NSArray<NSString *> *)sl_textItems {
-    return @[@"声临", @"AI", @"TTS", @"语"];
-}
-
 - (NSArray<NSString *> *)sl_emojiItems {
-    return @[@"🎙️", @"🔊", @"✨", @"🐻"];
+    return @[@"🎙️", @"🔊", @"✨", @"🐻", @"🌸", @"🎀"];
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    return 3;
+    return 2;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return [self sl_textItems].count;
-    if (section == 1) return [self sl_emojiItems].count;
+    if (section == 0) return [self sl_emojiItems].count + 1;   // 预设 + 自定义表情
     return 2;   // 从相册选择 / 恢复默认
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return @"文字";
-    if (section == 1) return @"表情";
-    return @"自定义";
+    if (section == 0) return @"表情";
+    return @"图片";
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
@@ -261,18 +257,25 @@ void SLStartEntryWatcher(void) {
 
     NSString *cur = SLFloatIconValue();
     if (ip.section == 0) {
-        NSString *t = [self sl_textItems][ip.row];
-        cell.textLabel.text = t;
-        cell.textLabel.font = [UIFont systemFontOfSize:16];
-        if ([cur isEqualToString:[@"text:" stringByAppendingString:t]]) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
-        }
-    } else if (ip.section == 1) {
-        NSString *e = [self sl_emojiItems][ip.row];
-        cell.textLabel.text = e;
-        cell.textLabel.font = [UIFont systemFontOfSize:22];
-        if ([cur isEqualToString:[@"emoji:" stringByAppendingString:e]]) {
-            cell.accessoryType = UITableViewCellAccessoryCheckmark;
+        NSArray<NSString *> *items = [self sl_emojiItems];
+        if (ip.row < items.count) {
+            NSString *e = items[ip.row];
+            cell.textLabel.text = e;
+            cell.textLabel.font = [UIFont systemFontOfSize:22];
+            if ([cur isEqualToString:[@"emoji:" stringByAppendingString:e]]) {
+                cell.accessoryType = UITableViewCellAccessoryCheckmark;
+            }
+        } else {
+            cell.textLabel.text = @"自定义表情";
+            cell.textLabel.font = [UIFont systemFontOfSize:16];
+            NSString *e = [cur hasPrefix:@"emoji:"] ? [cur substringFromIndex:6] : nil;
+            BOOL isCustom = e.length > 0 && ![items containsObject:e];
+            if (isCustom) {
+                cell.accessoryType = UITableViewCellAccessoryCheckmark;
+                cell.textLabel.text = [NSString stringWithFormat:@"自定义表情    %@", e];
+            } else {
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            }
         }
     } else {
         cell.textLabel.font = [UIFont systemFontOfSize:16];
@@ -280,7 +283,7 @@ void SLStartEntryWatcher(void) {
             cell.textLabel.text = @"从相册选择图片";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
-            cell.textLabel.text = @"恢复默认（文字「声临」）";
+            cell.textLabel.text = @"恢复默认（🎙️）";
             if ([cur isEqualToString:kSLFloatIconDefault]) {
                 cell.accessoryType = UITableViewCellAccessoryCheckmark;
             }
@@ -294,15 +297,14 @@ void SLStartEntryWatcher(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
 
     if (ip.section == 0) {
-        [d setObject:[@"text:" stringByAppendingString:[self sl_textItems][ip.row]] forKey:kSLFloatIconKey];
-        [d synchronize];
-        [self sl_applied];
-        return;
-    }
-    if (ip.section == 1) {
-        [d setObject:[@"emoji:" stringByAppendingString:[self sl_emojiItems][ip.row]] forKey:kSLFloatIconKey];
-        [d synchronize];
-        [self sl_applied];
+        NSArray<NSString *> *items = [self sl_emojiItems];
+        if (ip.row < items.count) {
+            [d setObject:[@"emoji:" stringByAppendingString:items[ip.row]] forKey:kSLFloatIconKey];
+            [d synchronize];
+            [self sl_applied];
+        } else {
+            [self sl_askCustomEmoji];
+        }
         return;
     }
     if (ip.row == 0) {
@@ -313,6 +315,48 @@ void SLStartEntryWatcher(void) {
     [d synchronize];
     [[NSFileManager defaultManager] removeItemAtPath:SLFloatIconImagePath(@"icon.png") error:nil];
     [self sl_applied];
+}
+
+// 自定义表情：弹框输入，最多取前 2 个组合字符（emoji 由多个 code point 组成，不能按字节切）
+- (void)sl_askCustomEmoji {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"自定义表情"
+                                                               message:@"输入一个表情或 1~2 个字符，显示在悬浮球上"
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"🎙️";
+        tf.textAlignment = NSTextAlignmentCenter;
+        tf.font = [UIFont systemFontOfSize:22];
+        NSString *cur = SLFloatIconValue();
+        if ([cur hasPrefix:@"emoji:"]) tf.text = [cur substringFromIndex:6];
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) ws = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *v = [ws sl_firstChars:ac.textFields.firstObject.text count:2];
+        if (!v.length) {
+            [AWECAUtils showToast:@"至少输入一个字符" duration:1.5];
+            return;
+        }
+        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+        [d setObject:[@"emoji:" stringByAppendingString:v] forKey:kSLFloatIconKey];
+        [d synchronize];
+        [ws sl_applied];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (NSString *)sl_firstChars:(NSString *)text count:(NSUInteger)count {
+    NSString *t = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+    NSMutableString *out = [NSMutableString string];
+    NSUInteger i = 0, n = 0;
+    while (i < t.length && n < count) {
+        NSRange r = [t rangeOfComposedCharacterSequenceAtIndex:i];
+        if (r.length == 0) break;
+        [out appendString:[t substringWithRange:r]];
+        i = r.location + r.length;
+        n++;
+    }
+    return out;
 }
 
 - (void)sl_applied {
