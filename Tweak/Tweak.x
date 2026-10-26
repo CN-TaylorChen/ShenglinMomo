@@ -22,12 +22,13 @@
 #import <math.h>
 #import "SLLog.h"
 #import "SLAMREncoder.h"
+#import "SLOpusBridge.h"
 #import "SLPipeline.h"
 #import "SLSettingsPanel.h"
 #import "SLLogViewController.h"
 #import "SLEntry.h"
 
-#define SLVersion @"0.4.0"
+#define SLVersion @"0.4.1"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -348,6 +349,8 @@ static id SLFindAudioHandlerNear(UIView *view) {
 
 static NSString *gSLTTSAudioPath = nil;
 static double gSLTTSAudioDur = 0;
+static NSData *gSLTTSPCM16k = nil;      // 合成音频解出来的 16k/mono/s16le PCM（Opus 编码原料）
+static double gSLTTSPCM16kDur = 0;
 static NSTimeInterval gSLArmedAt = 0;   // #tts 装填时刻（锁定“本次录音刚写的文件”）
 static int gSLRecDump = 0;
 static int gSLModelDump = 0;
@@ -454,7 +457,7 @@ static BOOL SLIsAudioPath(NSString *p) {
     if ([p hasPrefix:@"file://"]) p = [p stringByReplacingOccurrencesOfString:@"file://" withString:@""];
     if (![p hasPrefix:@"/var/mobile"] && ![p hasPrefix:@"/private/var/mobile"]) return NO;
     static NSArray *exts = nil;
-    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"aac",@"pcm"];
+    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav",@"mp3",@"aac",@"pcm",@"opus",@"ogg"];
     return [exts containsObject:p.pathExtension.lowercaseString];
 }
 
@@ -609,7 +612,7 @@ static void SLDumpRecorderDeep(id rec) {
 // 兜底：在沙盒里找「armed 之后才写」的音频文件（排除我们自己产出的）
 static NSString *SLNewestRecordFileSince(NSTimeInterval since) {
     static NSArray *exts = nil;
-    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav"];
+    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav",@"opus",@"ogg"];
     NSString *home = NSHomeDirectory();
     NSArray *roots = @[
         [home stringByAppendingPathComponent:@"Documents"],
@@ -658,6 +661,8 @@ static NSArray *SLSearchRoots(void) {
     return roots;
 }
 
+static NSString *SLMagicAtPath(NSString *path);   // 见下方实现
+
 // 按文件名片段全容器找文件（file token）
 static NSString *SLFindFileByToken(NSString *token) {
     if (![token isKindOfClass:[NSString class]] || token.length < 5) return nil;
@@ -676,7 +681,8 @@ static NSString *SLFindFileByToken(NSString *token) {
             if (![fm fileExistsAtPath:fp isDirectory:&isDir] || isDir) continue;
             if (SLIsOurOwnFile(fp)) continue;
             NSDictionary *a = [fm attributesOfItemAtPath:fp error:nil];
-            SLLog(@"TOKEN hit %@ name=%@ size=%lld", fp, name, (long long)[a fileSize]);
+            SLLog(@"TOKEN hit %@ name=%@ size=%lld magic=%@",
+                  fp, name, (long long)[a fileSize], SLMagicAtPath(fp));
             return fp;
         }
     }
@@ -687,7 +693,7 @@ static NSString *SLFindFileByToken(NSString *token) {
 static NSString *SLNewestAudioInDir(NSString *dir, NSTimeInterval since) {
     if (![dir isKindOfClass:[NSString class]] || dir.length == 0) return nil;
     static NSArray *exts = nil;
-    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav"];
+    if (!exts) exts = @[@"amr",@"m4a",@"caf",@"wav",@"opus",@"ogg"];
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *names = [fm contentsOfDirectoryAtPath:dir error:nil];
     NSString *best = nil;
@@ -757,8 +763,22 @@ static NSString *SLBodySetAudioTime(NSString *body, double dur) {
                                    withTemplate:[NSString stringWithFormat:@"audiotime=%lld", secs]];
 }
 
+// 读文件前 4 字节的十六进制（判断容器：OggS = Ogg Opus，#!AM = AMR）
+static NSString *SLMagicAtPath(NSString *path) {
+    if (![path isKindOfClass:[NSString class]] || path.length == 0) return @"(none)";
+    NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!fh) return @"(none)";
+    NSData *h = nil;
+    @try { h = [fh readDataOfLength:4]; } @catch (NSException *e) {}
+    @try { [fh closeFile]; } @catch (NSException *e) {}
+    if (h.length < 4) return @"(short)";
+    const uint8_t *b = h.bytes;
+    return [NSString stringWithFormat:@"%02X%02X%02X%02X", b[0], b[1], b[2], b[3]];
+}
+
 // 把 AI 音频原地写进陌陌的真实录音文件（必须 atomically:NO：换 inode 陌陌读到的还是旧内容）
-static BOOL SLOverwriteWithAI(NSString *target) {
+// outSize 返回写入的字节数（要同步给 sendAudioMessage 的 audioFileSize）
+static BOOL SLOverwriteWithAI(NSString *target, NSUInteger *outSize) {
     if (![target isKindOfClass:[NSString class]] || target.length == 0) return NO;
     if (![gSLTTSAudioPath isKindOfClass:[NSString class]] || gSLTTSAudioPath.length == 0) return NO;
     NSData *payload = [NSData dataWithContentsOfFile:gSLTTSAudioPath];
@@ -766,9 +786,12 @@ static BOOL SLOverwriteWithAI(NSString *target) {
         SLLog(@"OVERWRITE read AI failed: %@", gSLTTSAudioPath);
         return NO;
     }
+    NSString *oldMagic = SLMagicAtPath(target);
     BOOL ok = [payload writeToFile:target atomically:NO];
-    SLLog(@"OVERWRITE target=%@ ok=%d size=%lu aiExt=%@",
-          target, ok, (unsigned long)payload.length, [gSLTTSAudioPath pathExtension]);
+    if (outSize) *outSize = payload.length;
+    SLLog(@"OVERWRITE target=%@ ok=%d aiBytes=%lu aiExt=%@ aiMagic=%@ oldMagic=%@",
+          target, ok, (unsigned long)payload.length,
+          [gSLTTSAudioPath pathExtension], SLMagicAtPath(gSLTTSAudioPath), oldMagic);
     return ok;
 }
 
@@ -812,6 +835,44 @@ static void SLArmTTS(id handler,
             gSLArmedAt = [[NSDate date] timeIntervalSince1970];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
             [AWECAUtils showToast:@"声临已就绪：现在录音将发 AI 语音" duration:2.0];
+
+            // —— v0.4.1 关键修复：把合成音频重新编成陌陌真正使用的 Ogg Opus ——
+            // 真机日志证明陌陌录音落盘是 Chat_Audios_Temp/<token>.opus（Ogg Opus 容器）。
+            // v0.4.0 直接往这个文件里写 AMR 字节 → 陌陌/对端解码失败 → 0 秒空白语音。
+            // 这里借陌陌自己的 MDAudioStreamBus 编码，容器/页结构/OpusHead 与原生录音完全一致。
+            NSString *rawPath = [SLPipeline shared].lastRawAudioPath ?: outPath;
+            NSData *pcm = [SLAMREncoder pcmMono16AtPath:rawPath sampleRate:16000.0];
+            if (pcm.length > 1600 && [SLOpusBridge available]) {
+                gSLTTSPCM16k = pcm;
+                gSLTTSPCM16kDur = (double)(pcm.length / 2) / 16000.0;
+                NSString *outDir = [[AWECAUtils documentsPath] stringByAppendingPathComponent:@"ShenglinMomo/out"];
+                [[NSFileManager defaultManager] createDirectoryAtPath:outDir
+                                          withIntermediateDirectories:YES attributes:nil error:nil];
+                NSString *opusPath = [outDir stringByAppendingPathComponent:
+                                      [NSString stringWithFormat:@"%@.opus", [[NSUUID UUID] UUIDString]]];
+                NSString *amrPath = [outPath copy];
+                SLLog(@"opus encode start pcm=%lu dur=%.2f raw=%@", (unsigned long)pcm.length, gSLTTSPCM16kDur, rawPath);
+                [SLOpusBridge encodePCM:pcm sampleRate:16000.0 channels:1 toOpusPath:opusPath
+                             completion:^(BOOL ok, NSString *p, double d, unsigned long long bytes) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (!ok || p.length == 0) {
+                            SLLog(@"OPUS 编码失败，本次仍用 AMR（对端可能解不出来）");
+                            return;
+                        }
+                        if (!(gSLTTSAudioPath && [gSLTTSAudioPath isEqualToString:amrPath])) {
+                            SLLog(@"OPUS ready 但装填已变化，丢弃 %@", p);
+                            return;
+                        }
+                        gSLTTSAudioPath = p;
+                        if (d > 0) gSLTTSAudioDur = d;
+                        SLLog(@"OPUS ready %@ bytes=%llu dur=%.2f（录音将被覆盖成 Ogg Opus）",
+                              p, bytes, gSLTTSAudioDur);
+                    });
+                }];
+            } else {
+                SLLog(@"opus 不可用 pcm=%lu bus=%d，退回 AMR",
+                      (unsigned long)pcm.length, (int)[SLOpusBridge available]);
+            }
             // 60s 内未录音则自动解除，避免误替换普通语音
             NSString *armed = outPath;
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -936,6 +997,7 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
     void (*orig)(id, SEL, id, unsigned long long, unsigned long long) =
         (void (*)(id, SEL, id, unsigned long long, unsigned long long))SLGetOrigIMP(self, _cmd);
     unsigned long long newT = t;
+    unsigned long long newSize = size;
 
     if (!gSLModelDump) {
         gSLModelDump = 1;
@@ -950,8 +1012,10 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
             @try { body = [model valueForKey:@"body"]; } @catch (NSException *e) {}
             if (![body isKindOfClass:[NSString class]] || body.length == 0) body = nil;
             NSString *token = SLBodyValue(body, @"file");
-            SLLog(@"AUDIO-SEND model=%@ t=%llu size=%llu token=%@ armedDur=%.2f",
-                  NSStringFromClass([model class]), t, size, token ?: @"(nil)", gSLTTSAudioDur);
+            SLLog(@"AUDIO-SEND model=%@ t=%llu size=%llu token=%@ armedDur=%.2f payloadExt=%@ pcm16k=%lu/%.2fs",
+                  NSStringFromClass([model class]), t, size, token ?: @"(nil)", gSLTTSAudioDur,
+                  [gSLTTSAudioPath pathExtension] ?: @"(nil)",
+                  (unsigned long)gSLTTSPCM16k.length, gSLTTSPCM16kDur);
 
             NSString *target = nil;
             if (token.length) target = SLFindFileByToken(token);
@@ -961,7 +1025,9 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
                 target = SLNewestRecordFileSince(since);
             }
             if (target) {
-                if (SLOverwriteWithAI(target)) {
+                NSUInteger aiSize = 0;
+                if (SLOverwriteWithAI(target, &aiSize)) {
+                    if (aiSize > 0) newSize = (unsigned long long)aiSize;
                     if (gSLTTSAudioDur > 0) {
                         double nd = gSLTTSAudioDur;
                         long long secs = (long long)llround(nd);
@@ -998,7 +1064,7 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
         }
     }
 
-    if (orig) orig(self, _cmd, model, newT, size);
+    if (orig) orig(self, _cmd, model, newT, newSize);
 }
 
 static BOOL SLInstallSendAudioHook(Class cls) {
@@ -1113,7 +1179,7 @@ static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path
               target ?: @"(nil)", via, origDur, ttsDur, time);
 
         if (target) {
-            replaced = SLOverwriteWithAI(target);
+            replaced = SLOverwriteWithAI(target, NULL);
             if (replaced) SLLog(@"REPLACE ok via=%@（时长将在 sendAudio 钩子里改成 %.2fs）", via, ttsDur);
         } else {
             SLLog(@"REPLACE miss: 这次没定位到录音文件，留给 sendAudio 钩子按 token 再试（armed 保留）");
