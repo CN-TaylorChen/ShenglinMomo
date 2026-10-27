@@ -13,7 +13,8 @@ NSString *SLFloatIconSummary(void);     // 设置页右侧显示当前图标
 UIImage *SLBrandIconImage(CGFloat side);
 UIImage *SLBrandIconImageTinted(CGFloat side, UIColor *bg);
 
-// v0.4.34：悬浮球三态。录音中变红、合成中变蓝、就绪时蓝环合拢后自动回空闲。
+// v0.4.34：悬浮球三态。录音红 / 合成蓝 / 就绪蓝常亮（直到语音真正发出去）。
+// v0.4.36：就绪不再自动回空闲；Ready → Idle 的切换会外扩一圈涟漪。
 // Tweak.x 只在钩子里调这个，界面细节全部留在 SLEntry.m。
 typedef NS_ENUM(NSInteger, SLFloatState) {
     SLFloatStateIdle = 0,

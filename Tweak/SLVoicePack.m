@@ -8,6 +8,7 @@
 #define kSLPacksKey   @"SLVoicePacks"       // 数组：[{name, rel, folder, dur}]
 #define kSLPackOnKey  @"SLVoicePackOn"      // 开关
 #define kSLPackSelKey @"SLVoicePackActive"  // 选中的 rel
+#define kSLOriginalKey @"SLVoicePackOriginal"  // v0.4.36：原声模式（不替换）
 #define kSLPackAutoKey @"SLVoicePackAuto"   // v0.4.34：选中后录音直接替换，不用口令
 
 static NSArray<NSString *> *SLAudioExts(void) {    static NSArray<NSString *> *exts = nil;
@@ -394,6 +395,19 @@ static NSString *SLRelOfPath(NSString *path) {
     NSString *rel = pack[@"rel"];
     if (rel.length) [d setObject:rel forKey:kSLPackSelKey];
     else [d removeObjectForKey:kSLPackSelKey];
+    [d synchronize];
+}
+
+// v0.4.36：原声模式。选语音包会自动把它关掉（见 selectPack 的调用方），
+// 所以这里只负责读写；替换判定在 Tweak.x 的 SLArmPackAutoQuiet 里。
++ (BOOL)isOriginalMode {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:kSLOriginalKey];
+    return v ? [v boolValue] : NO;
+}
+
++ (void)setOriginalMode:(BOOL)on {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setBool:on forKey:kSLOriginalKey];
     [d synchronize];
 }
 

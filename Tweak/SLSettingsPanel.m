@@ -1,11 +1,11 @@
 // 声临·陌陌版 设置面板
 // 复用声临的 TTS 引擎设置（火山/Fish）、音色库、情绪标签、API 凭证页
 //
-// v0.4.35 排版规则（解决长文案被截断）：
+// v0.4.36 排版规则（解决长文案被截断）：
 //   R1 单元格右侧只放状态词（≤8 字），解释性长句一律下沉到分组 footer
 //   R2 footer 全部用自定义视图（UILabel numberOfLines = 0），不再用系统 titleForFooterInSection
 //   R3 折叠/跳转统一用系统 chevron，箭头不写进标题文字
-// v0.4.35 顺带删除「语音格式 AMR / 原始音频」开关（已是死代码）
+// v0.4.36 顺带删除「语音格式 AMR / 原始音频」开关（已是死代码）
 
 #import "SLSettingsPanel.h"
 #import "AWECATTSManager.h"
@@ -26,9 +26,9 @@
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.35"
+#define SLVersion @"0.4.36"
 
-// v0.4.35：设置页浮窗化后，单元格改成半透明玻璃片，背后的陌陌界面能透上来一点。
+// v0.4.36：设置页浮窗化后，单元格改成半透明玻璃片，背后的陌陌界面能透上来一点。
 // 深色下用 8% 白提亮，浅色下用 62% 白压住，两边都能保证文字对比度。
 static UIColor *SLGlassCellColor(void) {
     return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
@@ -40,10 +40,10 @@ static UIColor *SLGlassCellColor(void) {
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 
-// v0.4.35.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
+// v0.4.36.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
 // 三者永远差几像素。现在只认一个基准：单元格文字的真实左边缘（表格坐标系）。
 // 首帧 cell 还没生成时用卡片左缘 + 内边距兜底，值恒定，不再逐帧校正。
-// v0.4.35.7：只读已存在的 cell，不再调 rectForRowAtIndexPath。
+// v0.4.36.7：只读已存在的 cell，不再调 rectForRowAtIndexPath。
 // 那个 API 内部要算分区总高 → 回调 heightForFooterInSection → 又要这个值，会无限递归。
 static CGFloat SLMeasureLeading(UITableView *tv) {
     for (UITableViewCell *c in tv.visibleCells) {
@@ -62,8 +62,8 @@ static UIView *SLMakeFooter(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignFooter(text, x, width);
 }
 
-// v0.4.35.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
-// v0.4.35.9：不再把「表格坐标系的 x」当盒子内偏移用，改由 SLAlignBox 按盒子真实位置反推。
+// v0.4.36.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
+// v0.4.36.9：不再把「表格坐标系的 x」当盒子内偏移用，改由 SLAlignBox 按盒子真实位置反推。
 static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignHeader(text, x, width);
 }
@@ -81,14 +81,14 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 @implementation SLSettingsPanel
 
-// v0.4.35：改成 insetGrouped —— UITableViewController 默认走 Plain，行直通屏幕两边、方角，
+// v0.4.36：改成 insetGrouped —— UITableViewController 默认走 Plain，行直通屏幕两边、方角，
 // 看着像草稿。insetGrouped 自带 16pt 边距 + 每组首尾行圆角，等于系统原生「设置卡片」。
 - (instancetype)init {
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
     return self;
 }
 
-// v0.4.35：标题栏 = 品牌图标 + 「声临 · 陌陌版」+ 缩小版版本号。
+// v0.4.36：标题栏 = 品牌图标 + 「声临 · 陌陌版」+ 缩小版版本号。
 // 版本号不再跟名字挤在同一句里，改成 11pt 灰字贴在名字右下角，只做标注不抢视线。
 - (UIView *)sl_titleView {
     UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 100, 22)];
@@ -133,7 +133,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     self.tableView.backgroundView = veil;
     self.tableView.estimatedSectionFooterHeight = 28;
     self.tableView.estimatedSectionHeaderHeight = 26;
-    // v0.4.35.2：删掉顶部说明（tableHeaderView），首个分组直接跟标题栏
+    // v0.4.36.2：删掉顶部说明（tableHeaderView），首个分组直接跟标题栏
 }
 
 - (NSString *)sl_command {
@@ -141,8 +141,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return v.length ? v : @"#tts";
 }
 
-// v0.4.35.6：语音包口令也开放自定义，跟合成口令彻底分开，互不抢
-// v0.4.35.9：默认值改成 #yyb
+// v0.4.36.6：语音包口令也开放自定义，跟合成口令彻底分开，互不抢
+// v0.4.36.9：默认值改成 #yyb
 - (NSString *)sl_packCommand {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackCmdKey];
     return v.length ? v : @"#yyb";
@@ -153,10 +153,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return self.slLeading;
 }
 
-// v0.4.35.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
+// v0.4.36.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
 
 - (void)sl_close {
-    // v0.4.35：设置页跑在浮窗里（子控制器），直接 dismiss 自己不会关窗
+    // v0.4.36：设置页跑在浮窗里（子控制器），直接 dismiss 自己不会关窗
     SLCloseHostingPanel(self);
 }
 
@@ -176,7 +176,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     (void)tv;
     if (section == 0) return 4;   // 开关 + 引擎 + 语音包 + 悬浮球图标
     if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
-    if (section == 2) return 4;   // 合成口令 + 语音包口令 + 短录音补全 + 合成后先试听
+    if (section == 2) return 5;   // 合成口令 + 语音包口令 + 语音包直发 + 短录音补全 + 合成后先试听
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
     return 1;                     // 运行日志
@@ -206,16 +206,15 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 // 每组都带 footer：既解释状态，也撑出分组间距（footer 高度为 0 时分组会粘在一起）
 - (NSString *)sl_footerForSection:(NSInteger)section {
     if (section == 0) {
-        // v0.4.35.6：口令可自定义，文案跟着实际设置走，不再写死 yyb / #tts
-        // v0.4.35：主路径改成「选中即生效」，口令退为备用手段
-        NSDictionary *pack = [SLVoicePack activePack];
-        NSString *packName = pack[@"name"] ?: @"未选语音包";
+        // v0.4.36.6：口令可自定义，文案跟着实际设置走，不再写死 yyb / #tts
+        // v0.4.36：主路径改成「选中即生效」，口令退为备用手段
         return [NSString stringWithFormat:
-                @"语音包直发：当前「%@」，选中后按住说话录的那一句会直接换成它，不用发口令\n语音包口令：「%@」仍可用（关掉上面的开关后就只能靠它）\n合成语音：发「%@」正常联网合成；切换引擎后需要重新选音色",
-                packName, [self sl_packCommand], [self sl_command]];
+                @"语音包：里面可以选一条语音包，也可以选「原声」用自己录的\n选中后按住说话，录下的那一句会换成它（长按悬浮球也能直接进设置）\n合成语音：发「%@」正常联网合成；切换引擎后需要重新选音色",
+                [self sl_command]];
     }
     if (section == 1) return @"仅 Fish Audio 引擎支持情绪";
-    if (section == 2) return @"合成口令：以这个口令开头发的文字才会转语音\n语音包口令：单独一条，命中后直接发所选语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完";
+    if (section == 2) return [NSString stringWithFormat:
+                              @"语音包直发：开着时，选中语音包后按住说话会直接替换；关掉只能发口令\n原声：语音包里选「原声」这一行就不替换，用你录的原声（比关开关快）\n合成口令：以这个口令开头发的文字才会转语音\n语音包口令：单独一条，命中后直接发所选语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完"];
     if (section == 3) return @"Key 只保存在本机，不会上传";
     if (section == 4) return @"开启后陌陌上报的坐标会替换为你选的点\n只影响本机陌陌，不改系统定位\n坐标与 IP 归属地差太远时可能触发风控，建议固定一个常用位置";
     if (section == 5) return @"记录插件的运行过程。出问题时把最后一段发给我\n日志只写在本机，不会上传";
@@ -276,14 +275,16 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.accessoryView = seg;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else if (ip.row == 2) {
-            // v0.4.35：原来是「语音包」跳转行；语音包现在只从悬浮球胶囊长按进入，
-            // 这一行改成「选中就生效」的总开关，直接决定录音要不要被替换。
-            cell.textLabel.text = @"语音包直发";
-            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-            sw.on = [SLVoicePack isAutoReplaceEnabled];
-            [sw addTarget:self action:@selector(sl_autoPackChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            // v0.4.36：恢复成正常的「语音包」入口（上一版把它删了，用户要求加回来）。
+            // 右侧只显示状态词，「直发」那个开关搬到「发送方式」里。
+            cell.textLabel.text = @"语音包";
+            if ([SLVoicePack isOriginalMode]) {
+                cell.detailTextLabel.text = @"原声";
+            } else {
+                NSDictionary *active = [SLVoicePack activePack];
+                cell.detailTextLabel.text = active ? (active[@"name"] ?: @"已选") : @"未选";
+            }
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else {
             cell.textLabel.text = @"悬浮球图标";
             cell.detailTextLabel.text = SLFloatIconSummary();
@@ -328,6 +329,14 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.detailTextLabel.text = [self sl_packCommand];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (ip.row == 2) {
+            // v0.4.36：从「基本设置」搬过来 —— 它管的是「发什么」，不是基础开关
+            cell.textLabel.text = @"语音包直发";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = [SLVoicePack isAutoReplaceEnabled];
+            [sw addTarget:self action:@selector(sl_autoPackChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else if (ip.row == 3) {
             cell.textLabel.text = @"短录音补全";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
@@ -393,7 +402,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
-    // v0.4.35：0.2 现在是开关行，语音包页只从悬浮球胶囊长按进入
+    if (ip.section == 0 && ip.row == 2) {
+        [self.navigationController pushViewController:[[SLVoicePackController alloc] init] animated:YES];
+        return;
+    }
     if (ip.section == 0 && ip.row == 3) {
         [self.navigationController pushViewController:[[SLFloatIconController alloc] init] animated:YES];
         return;
@@ -443,7 +455,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         [self sl_clearLocation];
         return;
     }
-    if (ip.section == 2 && ip.row == 3) return;   // 「合成后先试听」是开关行
+    if (ip.section == 2 && (ip.row == 2 || ip.row == 4)) return;   // 两个开关行
     if (ip.section == 5) {
         SLLogViewController *vc = [[SLLogViewController alloc] init];
         [self.navigationController pushViewController:vc animated:YES];
@@ -455,7 +467,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     [SLTTSAuditionPanel setEnabled:sw.on];
 }
 
-// v0.4.35：选中语音包后录音即替换的总开关
+// v0.4.36：选中语音包后录音即替换的总开关
 - (void)sl_autoPackChanged:(UISwitch *)sw {
     [SLVoicePack setAutoReplaceEnabled:sw.on];
     NSDictionary *pack = [SLVoicePack activePack];
@@ -537,7 +549,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
                       fallback:@"#tts"];
 }
 
-// v0.4.35.6：语音包口令也开放自定义（存 SLPackCommand），跟合成口令各走各的
+// v0.4.36.6：语音包口令也开放自定义（存 SLPackCommand），跟合成口令各走各的
 - (void)sl_editPackCommand {
     [self sl_editCommandForKey:kSLPackCmdKey
                          title:@"语音包口令"

@@ -556,7 +556,7 @@ static UIImage *SLPauseGlyph(void) {
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
     if (!self.isRoot) return self.items.count;
-    if (section == 0) return 1;
+    if (section == 0) return 2;   // v0.4.36：原声 + 启用语音包
     if (section == [self sl_folderSection]) return self.folderList.count;
     return self.ungrouped.count;
 }
@@ -586,7 +586,7 @@ static UIImage *SLPauseGlyph(void) {
             : nil;
     }
     if (section == 0) {
-        return [NSString stringWithFormat:@"选中一条之后，按住说话录下的一句就会直接换成它（不用发「%@」）\n点文件夹进入 · 左滑文件夹可重命名 / 删除", SLPackCmdValue()];
+        return [NSString stringWithFormat:@"选中一条之后，按住说话录下的一句就会直接换成它（不用发「%@」）\n选「原声」就不替换，用你自己录的 · 点文件夹进入，左滑可重命名 / 删除", SLPackCmdValue()];
     }
     return nil;
 }
@@ -614,6 +614,31 @@ static UIImage *SLPauseGlyph(void) {
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     if (self.isRoot && ip.section == 0) {
+        if (ip.row == 0) {
+            // v0.4.36：「原声」不是关掉功能，而是「这次用我自己录的」。
+            // 做成一行可选项，比让人理解一个开关要直观。
+            static NSString *oid = @"orig";
+            UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:oid];
+            if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:oid];
+            cell.backgroundColor = SLPackGlassColor();
+            cell.textLabel.text = @"原声";
+            cell.detailTextLabel.text = @"不替换，按住说话发自己录的";
+            cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.textLabel.textColor = [UIColor labelColor];
+            cell.imageView.image = [UIImage systemImageNamed:@"mic.fill"];
+            cell.imageView.tintColor = [UIColor secondaryLabelColor];
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.accessoryView = nil;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            BOOL on = [SLVoicePack isOriginalMode];
+            cell.accessoryType = on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+            if (on) {
+                cell.textLabel.textColor = [UIColor systemBlueColor];
+                cell.imageView.tintColor = [UIColor systemBlueColor];
+            }
+            return cell;
+        }
         static NSString *sid = @"switch";
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:sid];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:sid];
@@ -705,7 +730,15 @@ static UIImage *SLPauseGlyph(void) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (self.isRoot && ip.section == 0) return;
+    if (self.isRoot && ip.section == 0) {
+        if (ip.row == 0) {   // v0.4.36：选原声 = 不替换
+            [SLVoicePack setOriginalMode:YES];
+            [self.tableView reloadData];
+            SLRefreshFloatButton();
+            [AWECAUtils showToast:@"原声：之后录的都按你自己的发" duration:2.0];
+        }
+        return;
+    }
 
     if (self.isRoot && ip.section == [self sl_folderSection]) {
         NSString *name = self.folderList[ip.row];
@@ -718,6 +751,7 @@ static UIImage *SLPauseGlyph(void) {
     if (!pack) return;
     [SLVoicePack selectPack:pack];
     [SLVoicePack setEnabled:YES];
+    [SLVoicePack setOriginalMode:NO];   // v0.4.36：选包就是退出原声
     [self.tableView reloadData];
     SLRefreshFloatButton();   // v0.4.34：胶囊上显示的包名跟着换
     SLPackPrewarm();          // v0.4.34：后台先把 PCM 解好，录音时不用现等

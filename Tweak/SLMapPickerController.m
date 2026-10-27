@@ -74,7 +74,6 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) UIButton *confirmBtn;
 @property (nonatomic, strong) UIButton *starBtn;
 @property (nonatomic, strong) UIButton *tuneBtn;
-@property (nonatomic, strong) UIView *brandView;
 
 @property (nonatomic, strong) UIScrollView *quickRow;      // 快捷位置（收藏过的点）
 @property (nonatomic, copy) NSArray<SLFavoriteItem *> *quickItems;
@@ -117,7 +116,6 @@ static UIColor *SLHairline(void) {
 - (void)sl_buildPanel;
 - (void)sl_buildResult;
 - (void)sl_buildQuick;
-- (void)sl_buildBrand;
 - (UILabel *)sl_capLabel:(NSString *)text;
 - (void)sl_reloadQuick;
 - (CLLocationCoordinate2D)sl_currentCoord;
@@ -171,7 +169,6 @@ static UIColor *SLHairline(void) {
     [self sl_buildPanel];
     [self sl_buildQuick];
     [self sl_buildResult];
-    [self sl_buildBrand];
     // 先把快捷位置排出来，第一帧的卡片高度就是最终高度，避免进场后「长高」一下
     [self sl_reloadQuick];
 
@@ -194,7 +191,9 @@ static UIColor *SLHairline(void) {
     nb.scrollEdgeAppearance = ap;
     nb.tintColor = [UIColor labelColor];
     self.navigationItem.title = @"";
-    self.navigationItem.titleView = self.brandView;
+    // v0.4.36：搜索栏并进导航栏，顶部不再有「虚拟定位」那行药丸，
+    // 省掉 50pt 以上的竖向占用，针尖和结果卡跟着上移。
+    self.navigationItem.titleView = self.searchCapsule;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -267,25 +266,29 @@ static UIColor *SLHairline(void) {
     self.starBtn.frame = CGRectMake(pad + mainW + gap, btnY, side, 50);
     self.tuneBtn.frame = CGRectMake(pad + mainW + gap * 2 + side, btnY, side, 50);
 
-    // 3) 搜索胶囊（下移，给顶部品牌胶囊让位）
-    CGFloat capsuleY = safeTop + 50;
-    self.searchCapsule.frame = CGRectMake(16, capsuleY, w - 32, 48);
-    CGFloat capW = self.searchCapsule.bounds.size.width;
-    self.searchIcon.frame = CGRectMake(14, 14, 20, 20);
-    self.locateBtn.frame = CGRectMake(capW - 8 - 30, 9, 30, 30);
-    self.bookmarkBtn.frame = CGRectMake(capW - 8 - 30 - 6 - 30, 9, 30, 30);
-    CGFloat fieldX = 42;
-    self.searchField.frame = CGRectMake(fieldX, 0, self.bookmarkBtn.frame.origin.x - 8 - fieldX, 48);
+    // 3) 搜索栏跑在导航栏里：高度 40，左右各留出返回箭头 / 右边距
+    CGFloat capH = 40.0;
+    CGFloat capW = w - 108.0;          // 44 返回键 + 安全边距，剩下都给搜索框
+    if (capW < 170.0) capW = MAX(140.0, w - 88.0);
+    self.searchCapsule.frame = CGRectMake(0, 0, capW, capH);
+    self.searchIcon.frame = CGRectMake(12, 10, 18, 18);
+    self.locateBtn.frame = CGRectMake(capW - 4 - 28, (capH - 28) / 2.0, 28, 28);
+    self.bookmarkBtn.frame = CGRectMake(CGRectGetMinX(self.locateBtn.frame) - 6 - 28,
+                                        (capH - 28) / 2.0, 28, 28);
+    CGFloat fieldX = 38;
+    self.searchField.frame = CGRectMake(fieldX, 0,
+                                        CGRectGetMinX(self.bookmarkBtn.frame) - 8 - fieldX, capH);
+    CGFloat capsuleY = safeTop + 44.0;   // 导航栏下沿
 
     // 4) 搜索结果卡
-    self.resultCard.frame = CGRectMake(16, capsuleY + 48 + 8, w - 32,
-                                       MIN(232, panelY - (capsuleY + 48 + 8) - 12));
+    self.resultCard.frame = CGRectMake(16, capsuleY + 8, w - 32,
+                                       MIN(232, panelY - (capsuleY + 8) - 12));
     self.resultTable.frame = self.resultCard.bounds;
 
     // 5) 针尖落在「搜索栏下沿 ~ 卡片上沿」这段可视区的中心，不再是屏幕中心
     //    （地图全屏后屏幕中心会被卡片挡住，针就藏在卡片后面了）
     CLLocationCoordinate2D keep = [self sl_currentCoord];   // 先用旧针位算出当前坐标
-    CGFloat visTop = capsuleY + 48 + 6;
+    CGFloat visTop = capsuleY + 8;
     CGFloat visBottom = panelY - 12;
     CGFloat tipY = (visTop + visBottom) / 2.0;
     self.pinView.center = CGPointMake(w / 2.0, tipY - kSLPinTipOffset);
@@ -354,20 +357,19 @@ static UIColor *SLHairline(void) {
 - (void)sl_buildSearch {
     UIView *cap = [[UIView alloc] initWithFrame:CGRectZero];
     cap.backgroundColor = [UIColor clearColor];
-    cap.layer.cornerRadius = 24;
+    cap.layer.cornerRadius = 20;
     cap.layer.cornerCurve = kCACornerCurveContinuous;
-    cap.layer.borderWidth = 1;
-    cap.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.6].CGColor;
+    cap.layer.borderWidth = 0.5;
+    cap.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.55].CGColor;
     cap.layer.shadowColor = [UIColor blackColor].CGColor;
-    cap.layer.shadowOpacity = 0.12;
-    cap.layer.shadowRadius = 16;
-    cap.layer.shadowOffset = CGSizeMake(0, 6);
-    self.searchCapsule = cap;
-    [self.view addSubview:cap];
+    cap.layer.shadowOpacity = 0.10;
+    cap.layer.shadowRadius = 10;
+    cap.layer.shadowOffset = CGSizeMake(0, 3);
+    self.searchCapsule = cap;   // v0.4.36：作为 navigationItem.titleView，不再加到 view 上
 
     // 毛玻璃底板：半透明磨砂，浮在地图上像原生搜索栏
     UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
-    blur.layer.cornerRadius = 24;
+    blur.layer.cornerRadius = 20;
     blur.layer.cornerCurve = kCACornerCurveContinuous;
     blur.layer.masksToBounds = YES;
     blur.frame = cap.bounds;
@@ -1318,30 +1320,7 @@ static UIColor *SLHairline(void) {
     });
 }
 
-#pragma mark - 品牌 / 轨迹占位
-
-- (void)sl_buildBrand {
-    // 顶部导航栏品牌胶囊：定位针 + 「虚拟定位」（v0.4.28 起，不再显示「声临 陌陌版」）。
-    // 白底蓝边，和整体蓝主色统一；底部卡片显示地点名，品牌不占底部空间。
-    UIView *b = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 120, 30)];
-    b.userInteractionEnabled = NO;
-    b.backgroundColor = [UIColor whiteColor];
-    b.layer.cornerRadius = 15;
-    b.layer.cornerCurve = kCACornerCurveContinuous;
-    b.layer.borderWidth = 1;
-    b.layer.borderColor = SLAccent().CGColor;
-    UIImageView *g = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"mappin.fill"]];
-    g.tintColor = SLAccent();
-    g.contentMode = UIViewContentModeScaleAspectFit;
-    g.frame = CGRectMake(12, 7, 16, 16);
-    [b addSubview:g];
-    UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(30, 0, 84, 30)];
-    t.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
-    t.textColor = SLAccent();
-    t.text = @"虚拟定位";
-    [b addSubview:t];
-    self.brandView = b;
-}
+#pragma mark - 辅助
 
 - (UILabel *)sl_capLabel:(NSString *)text {
     UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];

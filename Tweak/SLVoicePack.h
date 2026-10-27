@@ -34,6 +34,11 @@
 + (BOOL)isPackActive:(NSDictionary *)pack;
 + (void)selectPack:(NSDictionary *)pack;
 
+/// v0.4.36：「原声」——选了它就不替换，用自己录的声音。
+/// 和「语音包直发」是两件事：直发决定要不要自动替换，原声决定这一刻是不是不替换。
++ (BOOL)isOriginalMode;
++ (void)setOriginalMode:(BOOL)on;
+
 /// 导入整个文件夹（递归），返回新增条数
 + (NSInteger)importFolderAtURL:(NSURL *)url error:(NSString **)err;
 /// 导入单个音频文件到指定文件夹（nil = 未分组）
