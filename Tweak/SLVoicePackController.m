@@ -53,6 +53,106 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 @property (nonatomic, assign) CGFloat slLeading;
 @end
 
+// ===================== 语音包列表单元格 =====================
+// v0.4.33：只显示原文件名，一个字都不改。名字比行宽长时，在行内横向缓慢滚动，
+// 放得下就静止。用自定义 cell 而不是 Value1：系统的 textLabel 会溢出到右侧试听按钮上。
+@interface SLPackCell : UITableViewCell
+@property (nonatomic, strong) UIView *badge;
+@property (nonatomic, strong) UIView *clip;
+@property (nonatomic, strong) UILabel *nameLabel;
+@property (nonatomic, strong) UILabel *durLabel;
+- (void)sl_setName:(NSString *)name active:(BOOL)active;
+- (void)sl_refreshMarquee;
+@end
+
+@implementation SLPackCell {
+    NSString *_marqueeText;
+    CGFloat _marqueeClipW;
+}
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        _badge = [[UIView alloc] initWithFrame:CGRectZero];
+        _badge.backgroundColor = [UIColor secondarySystemFillColor];
+        _badge.layer.cornerRadius = 6.0;
+        [self.contentView addSubview:_badge];
+
+        _clip = [[UIView alloc] initWithFrame:CGRectZero];
+        _clip.clipsToBounds = YES;
+        [self.contentView addSubview:_clip];
+
+        _nameLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _nameLabel.font = [UIFont systemFontOfSize:16];
+        _nameLabel.textColor = [UIColor labelColor];
+        _nameLabel.lineBreakMode = NSLineBreakByClipping;
+        [_clip addSubview:_nameLabel];
+
+        _durLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        _durLabel.font = [UIFont systemFontOfSize:13];
+        _durLabel.textColor = [UIColor secondaryLabelColor];
+        _durLabel.textAlignment = NSTextAlignmentRight;
+        [self.contentView addSubview:_durLabel];
+    }
+    return self;
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    [_nameLabel.layer removeAllAnimations];
+    _nameLabel.layer.transform = CATransform3DIdentity;
+    _marqueeText = nil;
+    _marqueeClipW = 0;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGRect b = self.contentView.bounds;
+    CGFloat h = CGRectGetHeight(b);
+    CGFloat pad = 16.0, badgeW = 22.0, gap = 9.0, durW = 50.0;
+    _badge.frame = CGRectMake(pad, (h - badgeW) / 2.0, badgeW, badgeW);
+    _durLabel.frame = CGRectMake(CGRectGetWidth(b) - durW - pad, 0, durW, h);
+    CGFloat x = CGRectGetMaxX(_badge.frame) + gap;
+    CGFloat w = CGRectGetMinX(_durLabel.frame) - gap - x;
+    if (w < 0) w = 0;
+    _clip.frame = CGRectMake(x, 0, w, h);
+    [self sl_refreshMarquee];
+}
+
+- (void)sl_setName:(NSString *)name active:(BOOL)active {
+    _nameLabel.text = name ?: @"";
+    _nameLabel.textColor = active ? [UIColor systemBlueColor] : [UIColor labelColor];
+    _badge.backgroundColor = active ? [UIColor systemBlueColor] : [UIColor secondarySystemFillColor];
+    [self setNeedsLayout];
+}
+
+- (void)sl_refreshMarquee {
+    CGFloat cw = CGRectGetWidth(_clip.bounds);
+    CGFloat ch = CGRectGetHeight(_clip.bounds);
+    if (cw <= 1.0 || ch <= 1.0) return;
+    NSString *t = _nameLabel.text ?: @"";
+    if ([_marqueeText isEqualToString:t] && fabs(_marqueeClipW - cw) < 0.5) return;
+    _marqueeText = [t copy];
+    _marqueeClipW = cw;
+    [_nameLabel.layer removeAllAnimations];
+    _nameLabel.layer.transform = CATransform3DIdentity;
+
+    CGFloat lw = [_nameLabel sizeThatFits:CGSizeMake(CGFLOAT_MAX, ch)].width;
+    _nameLabel.frame = CGRectMake(0, 0, lw, ch);
+    if (lw <= cw + 1.0) return;   // 放得下就不动
+
+    CGFloat d = cw - lw;          // 负值：往左滚
+    CAKeyframeAnimation *a = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
+    a.values = @[@(0.0), @(0.0), @(d), @(d)];
+    a.keyTimes = @[@(0.0), @(0.14), @(0.86), @(1.0)];
+    a.duration = 2.0 + (lw - cw) / 26.0;   // 约 26pt/s，长名字也不会太快
+    a.repeatCount = HUGE_VALF;
+    a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_nameLabel.layer addAnimation:a forKey:@"marquee"];
+}
+
+@end
+
 @implementation SLVoicePackController
 
 - (instancetype)init {
@@ -84,7 +184,24 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    // v0.4.33：长按悬浮球会把它当 sheet 弹出，此时是模态根页，需要一个「完成」收起入口
+    BOOL modalRoot = self.isRoot && self.navigationController.presentingViewController != nil
+                     && self.navigationController.viewControllers.firstObject == self;
+    if (modalRoot) {
+        if (!self.navigationItem.leftBarButtonItem) {
+            self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
+                                                                                     style:UIBarButtonItemStyleDone
+                                                                                    target:self
+                                                                                    action:@selector(sl_closeModal)];
+        }
+    } else {
+        self.navigationItem.leftBarButtonItem = nil;
+    }
     [self sl_reload];
+}
+
+- (void)sl_closeModal {
+    [self dismissViewControllerAnimated:YES completion:nil];
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -448,22 +565,21 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
     }
 
     static NSString *rid = @"pack";
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:rid];
+    SLPackCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
+    if (!cell) cell = [[SLPackCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:rid];
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-    cell.textLabel.textColor = [UIColor labelColor];
-    cell.imageView.image = nil;
 
     NSDictionary *pack = [self sl_packAt:ip];
-    if (!pack) return cell;
+    if (!pack) {
+        [cell sl_setName:@"" active:NO];
+        cell.durLabel.text = nil;
+        return cell;
+    }
     BOOL active = [SLVoicePack isPackActive:pack];
-    NSString *name = pack[@"name"] ?: @"未命名";
-    cell.textLabel.text = active ? [@"✓ " stringByAppendingString:name] : name;
-    cell.detailTextLabel.text = [SLVoicePack displayDuration:pack];
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:13];
-    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    [cell sl_setName:(pack[@"name"] ?: @"未命名") active:active];
+    cell.durLabel.text = [SLVoicePack displayDuration:pack];
 
     // 试听按钮
     UIButton *play = [UIButton buttonWithType:UIButtonTypeSystem];

@@ -1,16 +1,19 @@
 #import "SLEntry.h"
 #import "SLSettingsPanel.h"
+#import "SLVoicePackController.h"
 #import "AWECAUtils.h"
 #import <PhotosUI/PhotosUI.h>
 
 // ===================== 悬浮球图标 =====================
-// v0.4.7：去掉「文字图标」（声临/AI/TTS/语 那四个），只留表情与自选图片，
-// 表情支持自定义输入。存一个字符串：
-//   emoji:🎙️        表情（默认）
+// v0.4.33：默认图标换成「双声波」品牌图形（代码绘制，黑底 + 六根条：
+// 左三根 30% 白表示被替换掉的原声，右三根纯白表示合成声）。
+// 存一个字符串：
+//   brand            品牌图形（默认）
+//   emoji:🎙️        表情
 //   image:icon.png   相册选的自定义图片（已裁成圆形，存沙盒）
-//   text:xxx         旧版遗留值，读取时自动迁移成默认表情
+//   text:xxx         旧版遗留值，读取时自动迁移成默认
 #define kSLFloatIconKey @"SLFloatIcon"
-#define kSLFloatIconDefault @"emoji:🎙️"
+#define kSLFloatIconDefault @"brand"
 
 static NSString *SLFloatIconDir(void) {
     NSString *dir = [[AWECAUtils documentsPath] stringByAppendingPathComponent:@"ShenglinMomo/float"];
@@ -28,15 +31,51 @@ static NSString *SLFloatIconImagePath(NSString *name) {
 static NSString *SLFloatIconValue(void) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLFloatIconKey];
     if (!v.length) return kSLFloatIconDefault;
-    if ([v hasPrefix:@"text:"]) return kSLFloatIconDefault;   // 旧版文字图标 → 默认表情
+    if ([v hasPrefix:@"text:"]) return kSLFloatIconDefault;        // 旧版文字图标 → 默认
+    if ([v isEqualToString:@"emoji:🎙️"]) return kSLFloatIconDefault;  // 旧默认表情 → 新品牌图形
     return v;
 }
 
 NSString *SLFloatIconSummary(void) {
     NSString *v = SLFloatIconValue();
+    if ([v isEqualToString:kSLFloatIconDefault]) return @"默认";
     if ([v hasPrefix:@"image:"]) return @"自定义图片";
     if ([v hasPrefix:@"emoji:"]) return [v substringFromIndex:6];
     return @"默认";
+}
+
+// 品牌图形：黑底圆 + 六根圆角条。100 单位为画布基准，跟设计稿一一对应，
+// 线条宽度、间距、条高都按比例缩放，48pt 球和 20pt 标题栏图标是同一张图。
+static UIImage *SLBrandIcon(CGFloat side, UIColor *bg) {
+    if (side <= 0) side = 96;
+    UIColor *base = bg ?: [UIColor blackColor];
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef c = ctx.CGContext;
+        CGContextSetFillColorWithColor(c, base.CGColor);
+        CGContextFillEllipseInRect(c, CGRectMake(0, 0, side, side));
+        CGFloat u = side / 100.0;
+        CGFloat xs[6] = {20, 30, 40, 54, 64, 74};
+        CGFloat hs[6] = {16, 26, 20, 22, 32, 24};
+        CGFloat as[6] = {0.30, 0.30, 0.30, 1.0, 1.0, 1.0};
+        for (int i = 0; i < 6; i++) {
+            CGFloat w = 6.0 * u;
+            CGFloat h = hs[i] * u;
+            CGRect bar = CGRectMake(xs[i] * u, (side - h) / 2.0, w, h);
+            [[UIColor colorWithWhite:1.0 alpha:as[i]] setFill];
+            [[UIBezierPath bezierPathWithRoundedRect:bar cornerRadius:w / 2.0] fill];
+        }
+    }];
+}
+
+UIImage *SLBrandIconImage(CGFloat side) {
+    return SLBrandIcon(side, nil);
+}
+
+UIImage *SLBrandIconImageTinted(CGFloat side, UIColor *bg) {
+    return SLBrandIcon(side, bg);
 }
 
 // 把任意图片居中裁成圆形（直接当 backgroundImage 用，省得给按钮加裁剪打断阴影）
@@ -74,6 +113,14 @@ static void SLApplyFloatIcon(UIButton *btn);
 
 #define SLBtnTag 20931
 
+// ===================== 设置浮窗 =====================
+// v0.4.33：设置页不再用 PageSheet 从底部整页推上来，改成一张固定尺寸的
+// 圆角毛玻璃浮窗，浮在陌陌界面中间。尺寸写死，只有窗内内容能滚动。
+
+@interface SLFloatPanelController : UIViewController
++ (void)presentFrom:(UIViewController *)host;
+@end
+
 @interface SLFloatButton : UIButton
 @end
 
@@ -81,15 +128,22 @@ static void SLApplyFloatIcon(UIButton *btn);
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
+        self.backgroundColor = [UIColor clearColor];
         self.layer.cornerRadius = 24;
-        self.layer.shadowOpacity = 0.25;
-        self.layer.shadowRadius = 6;
+        self.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.layer.shadowOpacity = 0.22;
+        self.layer.shadowRadius = 7;
+        self.layer.shadowOffset = CGSizeMake(0, 2);
         self.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
         [self setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
         [self addTarget:self action:@selector(sl_openPanel) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(sl_pan:)];
         [self addGestureRecognizer:pan];
+        // 长按直接弹语音包，省掉「进设置 → 找语音包 → 再选」这串层级
+        UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(sl_longPress:)];
+        lp.minimumPressDuration = 0.45;
+        lp.allowableMovement = 12;
+        [self addGestureRecognizer:lp];
         SLApplyFloatIcon(self);
     }
     return self;
@@ -106,23 +160,119 @@ static void SLApplyFloatIcon(UIButton *btn);
 - (void)sl_openPanel {
     UIViewController *top = [AWECAUtils topViewController];
     if (!top) return;
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[[SLSettingsPanel alloc] init]];
+    [SLFloatPanelController presentFrom:top];
+}
+- (void)sl_longPress:(UILongPressGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    UIViewController *top = [AWECAUtils topViewController];
+    if (!top) return;
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[[SLVoicePackController alloc] init]];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
     if (@available(iOS 15.0, *)) {
         UISheetPresentationController *sheet = nav.sheetPresentationController;
         if (sheet) {
             sheet.detents = @[UISheetPresentationControllerDetent.mediumDetent, UISheetPresentationControllerDetent.largeDetent];
             sheet.prefersGrabberVisible = YES;
+            sheet.preferredCornerRadius = 22;
         }
     }
-    nav.modalPresentationStyle = UIModalPresentationPageSheet;
     [top presentViewController:nav animated:YES completion:nil];
 }
+@end
+
+@interface SLFloatPanelController ()
+@property (nonatomic, strong) UIControl *dim;
+@property (nonatomic, strong) UIView *cardWrap;
+@property (nonatomic, strong) UIVisualEffectView *blur;
+@property (nonatomic, strong) UINavigationController *nav;
+@end
+
+@implementation SLFloatPanelController
+
++ (void)presentFrom:(UIViewController *)host {
+    if (!host) return;
+    SLFloatPanelController *vc = [[SLFloatPanelController alloc] init];
+    vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [host presentViewController:vc animated:YES completion:nil];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [UIColor clearColor];
+
+    // 背板：轻压暗，点空白处收起。不做全黑，背后的聊天内容还要看得见
+    self.dim = [[UIControl alloc] initWithFrame:CGRectZero];
+    self.dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.16];
+    [self.dim addTarget:self action:@selector(sl_dismiss) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:self.dim];
+
+    // 尺寸在 viewWillLayoutSubviews 里算：viewDidLoad 时 bounds 还没定下来
+    self.cardWrap = [[UIView alloc] initWithFrame:CGRectZero];
+    self.cardWrap.layer.shadowColor = [UIColor blackColor].CGColor;
+    self.cardWrap.layer.shadowOpacity = 0.22;
+    self.cardWrap.layer.shadowRadius = 24;
+    self.cardWrap.layer.shadowOffset = CGSizeMake(0, 10);
+    [self.view addSubview:self.cardWrap];
+
+    self.blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    self.blur.layer.cornerRadius = 26;
+    self.blur.layer.cornerCurve = kCACornerCurveContinuous;
+    self.blur.clipsToBounds = YES;
+    [self.cardWrap addSubview:self.blur];
+
+    SLSettingsPanel *root = [[SLSettingsPanel alloc] init];
+    self.nav = [[UINavigationController alloc] initWithRootViewController:root];
+    self.nav.view.backgroundColor = [UIColor clearColor];
+    [self addChildViewController:self.nav];
+    [self.blur.contentView addSubview:self.nav.view];
+    [self.nav didMoveToParentViewController:self];
+}
+
+- (void)viewWillLayoutSubviews {
+    [super viewWillLayoutSubviews];
+    CGSize ss = self.view.bounds.size;
+    if (ss.width < 1.0 || ss.height < 1.0) return;
+    self.dim.frame = self.view.bounds;
+    // 宽度留 12pt 边，高度固定占屏幕 66%（上限 560），不做拖拽
+    CGFloat w = MIN(ss.width - 24.0, 380.0);
+    CGFloat h = MIN(ss.height * 0.66, 560.0);
+    CGRect r = CGRectMake(round((ss.width - w) / 2.0), round((ss.height - h) / 2.0) - 18.0, w, h);
+    if (!CGRectEqualToRect(self.cardWrap.frame, r)) self.cardWrap.frame = r;
+    self.blur.frame = self.cardWrap.bounds;
+    self.nav.view.frame = self.blur.contentView.bounds;
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    self.cardWrap.alpha = 0.0;
+    self.cardWrap.transform = CGAffineTransformMakeScale(0.94, 0.94);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [UIView animateWithDuration:0.26 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        self.cardWrap.alpha = 1.0;
+        self.cardWrap.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)sl_dismiss {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
 @end
 
 // 按当前设置把图标套到按钮上
 static void SLApplyFloatIcon(UIButton *btn) {
     if (!btn) return;
     NSString *v = SLFloatIconValue();
+    if ([v isEqualToString:kSLFloatIconDefault]) {
+        btn.backgroundColor = [UIColor clearColor];
+        [btn setBackgroundImage:SLBrandIconImage(96) forState:UIControlStateNormal];
+        [btn setTitle:nil forState:UIControlStateNormal];
+        return;
+    }
     if ([v hasPrefix:@"image:"]) {
         UIImage *img = [UIImage imageWithContentsOfFile:SLFloatIconImagePath([v substringFromIndex:6])];
         if (img) {
@@ -263,7 +413,7 @@ void SLStartEntryWatcher(void) {
         cell.detailTextLabel.text = [cur hasPrefix:@"image:"] ? @"已设置" : @"";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     } else {
-        cell.textLabel.text = @"恢复默认（🎙️）";
+        cell.textLabel.text = @"恢复默认图标";
         if ([cur isEqualToString:kSLFloatIconDefault]) {
             cell.accessoryType = UITableViewCellAccessoryCheckmark;
         }

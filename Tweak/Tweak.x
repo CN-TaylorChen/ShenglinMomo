@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.32"
+#define SLVersion @"0.4.33"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -53,9 +53,9 @@ static NSString *SLCommand(void) {
     return v;
 }
 
-// v0.4.32.5：语音包单独一条口令，跟合成口令彻底分开 ——
+// v0.4.33.5：语音包单独一条口令，跟合成口令彻底分开 ——
 // 「#yyb」= 直接发所选语音包，「#tts 文字」= 合成，互不抢。
-// v0.4.32.9：默认值从 yyb 改成 #yyb，跟合成口令一样带井号，避免两条口令长得不一样。
+// v0.4.33.9：默认值从 yyb 改成 #yyb，跟合成口令一样带井号，避免两条口令长得不一样。
 static NSString *SLPackCommand(void) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackCmdKey];
     if (v.length == 0) v = @"#yyb";
@@ -75,7 +75,7 @@ static void SLMigratePackCommandDefault(void) {
     [d synchronize];
 }
 
-// v0.4.32.6：口令严格匹配 —— 只认用户设置的那一条，不再生成「去掉井号」的变体。
+// v0.4.33.6：口令严格匹配 —— 只认用户设置的那一条，不再生成「去掉井号」的变体。
 // 口令本身可以自定义，靠猜出来的变体只会让「到底哪条生效」变得不可预测。
 // 唯一的容错是半角/全角井号互认：中文输入法下「＃」和「#」肉眼一样，属于输入法问题不是口误。
 static NSString *SLNormHash(NSString *s) {
@@ -118,7 +118,7 @@ static NSString *SLKey(Class cls, SEL sel) {
 // 也是父类那份实现。之前拿调用方 cls 做记账 key，埋了两个雷：
 //   ① 兄弟子类（同父不同类）走同一份 IMP，沿链查不到 key → orig=NULL → 原实现被静默吞掉；
 //   ② 同一个 Method 被二次注册时，第二次读到的 cur 已经是「上一次的钩子」，
-//      于是 key 被改写成钩子自己 → 钩子调钩子 → 无限递归爆栈（0.4.32 语音闪退的真因）。
+//      于是 key 被改写成钩子自己 → 钩子调钩子 → 无限递归爆栈（0.4.33 语音闪退的真因）。
 static Class SLClassOwningMethod(Class cls, SEL sel) {
     Class c = cls;
     while (c) {
@@ -156,7 +156,7 @@ static BOOL SLRegisterMethod(Class cls, SEL sel, IMP replacement) {
     const char *t = method_getTypeEncoding(m) ?: "";
 
     // ① 同一个 Method 只允许装一次：沿 owner 的父链检查是否已登记。
-    // v0.4.32：重试安装时这里会反复命中，原来每次都写一行日志（一次启动刷上百行），
+    // v0.4.33：重试安装时这里会反复命中，原来每次都写一行日志（一次启动刷上百行），
     // 现在静默跳过 —— 只有真正的安装才记账。
     Class owner = SLClassOwningMethod(cls, sel);
     for (Class c = owner; c; c = class_getSuperclass(c)) {
@@ -177,8 +177,8 @@ static BOOL SLRegisterMethod(Class cls, SEL sel, IMP replacement) {
     return YES;
 }
 
-// v0.4.32：NSClassFromString 取不到的兜底。
-// 实测（0.4.32 日志）：MDChatUniverseInputBar 能取到并装上钩子，但同一个模块里的
+// v0.4.33：NSClassFromString 取不到的兜底。
+// 实测（0.4.33 日志）：MDChatUniverseInputBar 能取到并装上钩子，但同一个模块里的
 // MDChatUniverseHandler 用 NSClassFromString 却是 nil（懒加载/Swift 暴露类的常见坑），
 // 于是 sendTextMessage:/sendAudioMessage: 全部静默跳过。这里直接遍历运行时类表兜底，
 // 和 CENSUS 用的是同一条路径（它确实能列出这个类）。
@@ -299,8 +299,8 @@ static void SLClearInputBars(void) {
     } @catch (NSException *e) {}
 }
 
-// v0.4.32：安全取字符串 getter —— 先确认方法返回类型是对象（'@'）再调。
-// 0.4.32 闪退根因：对「返回结构体/基本类型」的属性盲调 getter，arm64 上返回值 ABI 不匹配，直接崩。
+// v0.4.33：安全取字符串 getter —— 先确认方法返回类型是对象（'@'）再调。
+// 0.4.33 闪退根因：对「返回结构体/基本类型」的属性盲调 getter，arm64 上返回值 ABI 不匹配，直接崩。
 static NSString *SLStringGetter(id obj, NSString *name) {
     if (!obj || !name.length) return nil;
     SEL s = NSSelectorFromString(name);
@@ -470,7 +470,7 @@ static id SLAudioHandlerInObject(id obj) {
     return found;
 }
 
-// v0.4.32：放宽版 —— 不再要求 ivar 静态类型名以 Hander/Handler 结尾。
+// v0.4.33：放宽版 —— 不再要求 ivar 静态类型名以 Hander/Handler 结尾。
 // 小宇宙那套页面把发送器可能挂在 id / 协议类型的 ivar 上，只要对象真的响应
 // sendAudioMessage:audioTime:audioFileSize: 就认它（这个选择器足够特异）。
 static id SLAudioHandlerAnyInObject(id obj) {
@@ -518,23 +518,23 @@ static NSString *gSLTTSAudioPath = nil;
 static double gSLTTSAudioDur = 0;
 static NSData *gSLTTSPCM16k = nil;      // 合成音频解出来的 16k/mono/s16le PCM
 static double gSLTTSPCM16kDur = 0;
-// —— v0.4.32：接管陌陌录音的 PCM 流（MDAudioStreamBus → MDOpusEncoder）——
+// —— v0.4.33：接管陌陌录音的 PCM 流（MDAudioStreamBus → MDOpusEncoder）——
 static id gSLBusRef = nil;              // 本次录音的 bus 实例（身份校验，别喂错对象）
 static NSData *gSLBusPCM = nil;         // 按 bus 的 ASBD 预处理好的 PCM
 static NSUInteger gSLBusOffset = 0;     // 已喂字节数
 static BOOL gSLBusActive = NO;          // 正在接管
 static BOOL gSLBusFed = NO;             // 至少喂过一块 → 文件里已经是 AI 语音
 static int gSLBusSwallowLog = 0;
-// —— v0.4.32：通用 PCM 漏斗（编码器入口兜底）——
+// —— v0.4.33：通用 PCM 漏斗（编码器入口兜底）——
 static BOOL gSLPcmArmed = NO;
 static double gSLArmRate = 0;
 static unsigned gSLArmCh = 0;
 static int gSLFunnelLog = 0;
 static NSMutableSet *gSLHookedSels = nil;
-// —— v0.4.32：收尾补喂（用户松手比 AI 语音短时，把剩下的 PCM 补进编码器，避免被截断）——
+// —— v0.4.33：收尾补喂（用户松手比 AI 语音短时，把剩下的 PCM 补进编码器，避免被截断）——
 static NSUInteger gSLBusChunkSize = 0;  // 陌陌每次递进来的块大小（补喂按同样粒度，保持帧对齐）
 static BOOL gSLDrained = NO;            // 本次录音是否已经补喂过（只补一次）
-// v0.4.32：补喂不再自己调编码器，而是走总线自己的 sendPcm:byteSize:。
+// v0.4.33：补喂不再自己调编码器，而是走总线自己的 sendPcm:byteSize:。
 // 这些字节是我们塞进去的，encodePcm: 钩子必须原样放行（按字节数记账，异步也准）。
 static NSUInteger gSLForcePassBytes = 0;
 #define kSLFillShortKey @"SLFillShort"   // 短录音补全开关（默认开）
@@ -828,7 +828,7 @@ __attribute__((unused)) static NSString *SLNewestRecordFileSince(NSTimeInterval 
     return best;
 }
 
-// —— v0.4.32：按语音消息 body 里的 file token 精确定位陌陌真实录音文件 ——
+// —— v0.4.33：按语音消息 body 里的 file token 精确定位陌陌真实录音文件 ——
 //
 // 真机日志 MODEL-DEEP 已给出铁证：
 //   body = http://www.immomo.com/chataudio?mode=GUID&filesize=0&file=3B9-F2528F92A310
@@ -940,7 +940,7 @@ static NSString *SLBodyValue(NSString *body, NSString *key) {
 }
 
 // 把 body 里 audiotime=N 改成我们的真实时长
-// 单位是 0.1 秒（v0.4.32 日志实测：audiotime=18 显示 1.8 秒），所以要 ×10；
+// 单位是 0.1 秒（v0.4.33 日志实测：audiotime=18 显示 1.8 秒），所以要 ×10；
 // 早先按「秒」写，2.5 秒写成 2~3 → 对端只显示 0.2~0.3 秒，看起来就是「0 秒」。
 static NSString *SLBodySetAudioTime(NSString *body, double dur) {
     if (![body isKindOfClass:[NSString class]] || body.length == 0) return body;
@@ -1004,7 +1004,7 @@ static void SLDumpMethodNames(id obj) {
 
 #pragma mark - #tts 处理（录音替换：装填 AI 音频，等真实录音时覆盖）
 
-// v0.4.32.5：语音包装填 —— yyb 口令专用。返回 NO 表示没装成，并且已经提示过原因。
+// v0.4.33.5：语音包装填 —— yyb 口令专用。返回 NO 表示没装成，并且已经提示过原因。
 static BOOL SLArmPackNow(void) {
     if (![SLVoicePack isEnabled]) {
         [AWECAUtils showToast:@"语音包没启用：设置 → 语音包 里打开开关" duration:2.4];
@@ -1063,7 +1063,7 @@ static void SLArmTTS(id handler,
                      void (^fallback)(void)) {
     (void)handler;
 
-    // v0.4.32.5：语音包已改走独立口令（默认 yyb），这里只负责合成，两者不再互相抢。
+    // v0.4.33.5：语音包已改走独立口令（默认 yyb），这里只负责合成，两者不再互相抢。
     [AWECAUtils showToast:@"合成中..." duration:2.0];
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1081,8 +1081,8 @@ static void SLArmTTS(id handler,
             gSLArmedAt = [[NSDate date] timeIntervalSince1970];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
 
-            // —— v0.4.32：不再自己造 Opus 文件 ——
-            // v0.4.32 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
+            // —— v0.4.33：不再自己造 Opus 文件 ——
+            // v0.4.33 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
             // 陌陌内部才有的 opus 配置，外部 alloc 出来的实例跑不通）。
             // 改成：录音时接管陌陌自己的 PCM 流（见 SLPcmPrepareHook / SLPcmFeedHook），
             // 编码器和容器全部由陌陌自己做 —— 格式必然正确。
@@ -1101,7 +1101,7 @@ static void SLArmTTS(id handler,
             }
 
             // 60s 内未录音则自动解除，避免误替换普通语音。
-            // v0.4.32：倒计时改成「确认使用之后」才启动 —— 否则用户在里面反复试听，
+            // v0.4.33：倒计时改成「确认使用之后」才启动 —— 否则用户在里面反复试听，
             // 还没听完装填就过期了。
             NSString *armed = outPath;
             void (^startDisarmTimer)(void) = ^{
@@ -1116,7 +1116,7 @@ static void SLArmTTS(id handler,
 
             if ([SLTTSAuditionPanel isEnabled]) {
                 // 试听期间不清空装填：用户点「用这条」才算数，点「取消」才撤销。
-                // v0.4.32：把 16k PCM 一起递进去，面板拿它封 WAV 试听（AMR 播不动）
+                // v0.4.33：把 16k PCM 一起递进去，面板拿它封 WAV 试听（AMR 播不动）
                 [SLTTSAuditionPanel presentWithAudioPath:outPath
                                                  pcm16k:gSLTTSPCM16k
                                                duration:dur
@@ -1165,7 +1165,7 @@ static void SLSendText(id self, SEL _cmd) {
 
     SLLog(@"%@ -sendText text=%@", NSStringFromClass([self class]), SLShorten(text, 50));
 
-    // v0.4.32.5：yyb = 直接发语音包，不联网合成
+    // v0.4.33.5：yyb = 直接发语音包，不联网合成
     if (SLHasPrefixCommand(text, SLPackCommand())) {
         if (!SLClaimText(text)) {
             SLLog(@"sendText yyb duplicate ignored");
@@ -1195,7 +1195,7 @@ static void SLSendText(id self, SEL _cmd) {
     SLLog(@"#tts hit via %@ -sendText, text=%@", NSStringFromClass([self class]), SLShorten(text, 40));
     id handler = SLFindAudioHandlerNear(bar);
     if (!handler) {
-        // v0.4.32：小宇宙私聊的发送器 MDChatUniverseHandler 不在输入栏响应链上，
+        // v0.4.33：小宇宙私聊的发送器 MDChatUniverseHandler 不在输入栏响应链上，
         // 老逻辑会误判「没找到语音发送入口」→ 退回文字，于是私聊口令完全没反应。
         // 实际替换由全局编码器接管（MDAudioStreamBus → MDOpusEncoder），SLArmTTS 不使用
         // handler 实参（只用来判空），所以这里对小宇宙输入栏直接装填，不再退回文字。
@@ -1208,7 +1208,7 @@ static void SLSendText(id self, SEL _cmd) {
             return;
         }
         SLLog(@"no audio handler near input bar -> fallback to text");
-        // v0.4.32：不再静默退回文本，给个可见提示。
+        // v0.4.33：不再静默退回文本，给个可见提示。
         [AWECAUtils showToast:@"没找到语音发送入口，这条按文字发了" duration:2.0];
         if (orig) orig(self, _cmd);
         return;
@@ -1237,7 +1237,7 @@ static void SLSendTextMessage(id self, SEL _cmd, id arg) {
         if (orig) orig(self, _cmd, arg);
         return;
     }
-    // v0.4.32.5：yyb = 直接发语音包
+    // v0.4.33.5：yyb = 直接发语音包
     if (SLHasPrefixCommand(text, SLPackCommand())) {
         if (!SLClaimText(text)) return;
         SLLog(@"yyb hit via %@ -sendTextMessage:", NSStringFromClass([self class]));
@@ -1276,7 +1276,7 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
         if (orig) orig(self, _cmd, text, targetID, isSingle);
         return;
     }
-    // v0.4.32.5：yyb = 直接发语音包
+    // v0.4.33.5：yyb = 直接发语音包
     if (SLHasPrefixCommand(str, SLPackCommand())) {
         if (!SLClaimText(str)) return;
         SLLog(@"yyb hit via MMCommonServiceImpl");
@@ -1299,14 +1299,14 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
     return;
 }
 
-#pragma mark - 钩子 3.5：MDAudioStreamBus 的 PCM 流接管（v0.4.32 核心）
+#pragma mark - 钩子 3.5：MDAudioStreamBus 的 PCM 流接管（v0.4.33 核心）
 
 // 陌陌录音链路：MDAudioRecorder → MDAudioStreamBus
 //   -sendPcmPrepareWithASBD:（开场）→ -sendPcm:byteSize:（逐块喂 PCM）→ -sendPcmOver（收尾）
 //   → MDOpusEncoder → Ogg Opus 文件（Library/Application Support/Chat_Audios_Temp/<token>.opus）
 //
 // 为什么不在外面自己造 .opus：陌陌语音是 Ogg Opus，AMR 写进去对端解码失败 = 0 秒空语音；
-// 而 v0.4.32 试过直接 alloc 陌陌的 MDAudioStreamBus 来自编码，会在 init 阶段闪退
+// 而 v0.4.33 试过直接 alloc 陌陌的 MDAudioStreamBus 来自编码，会在 init 阶段闪退
 // （它依赖陌陌内部才有的 opus 配置）。所以改成接管「陌陌自己正在用的这条流」：
 // 编码器、容器、页结构全部由陌陌自己产出，我们只把 PCM 换成 AI 语音。
 // AI 语音喂完就把后续的块全吞掉，等陌陌自己 sendPcmOver 收尾 ——
@@ -1326,9 +1326,9 @@ static NSData *SLBusNextChunk(NSUInteger size) {
 
 // 为什么要补：喂料节奏是「录音来一块、我换一块」，用户 1 秒就松手的话只剩 1 秒的量，
 // 剩下的 AI 语音永远发不出去 → 对端听到的语音被截断。
-// v0.4.32：补喂点改到 -stopRecord（主线程、收尾链路之前），并且走总线自己的
+// v0.4.33：补喂点改到 -stopRecord（主线程、收尾链路之前），并且走总线自己的
 // sendPcm:byteSize: —— 就是录音时一直在用的那条公开入口，编码器/文件都还是正常态。
-// v0.4.32/0.4.32 在 sendPcmOver 里直接同步调 encodePcm: 会卡死：那时已在收尾态，
+// v0.4.33/0.4.33 在 sendPcmOver 里直接同步调 encodePcm: 会卡死：那时已在收尾态，
 // 编码器锁/文件句柄被占，日志停在「PCM-OVER 开始」、后面一条都出不来，最后被看门狗杀掉。
 // 实际喂进编码器的时长（秒）：补喂没成功时用它，保证气泡和音频一致
 static double SLFedDuration(void) {
@@ -1473,7 +1473,7 @@ static void SLPcmFeedRaw(id self, SEL _cmd, void *data, unsigned long long size)
 // 注意：这里**不要**再补 uint32（'I'）分支。
 // sendPcm:byteSize: 内部会调用 MDOpusEncoder encodePcm:，而那一层已经由 SLEncodePcmDataHook 做替换了。
 // 两层同时接管 = 同一块录音被换两次，每块消耗两块 AI 数据，音素被跳读 → 发出去是乱码噪音
-//（v0.4.32.7 就是这样坏掉的）。只保留编码器单层替换。
+//（v0.4.33.7 就是这样坏掉的）。只保留编码器单层替换。
 
 static NSMethodSignature *SLSigOf(Class cls, SEL sel) {
     Method m = class_getInstanceMethod(cls, sel);
@@ -1483,11 +1483,11 @@ static NSMethodSignature *SLSigOf(Class cls, SEL sel) {
     @try { return [NSMethodSignature signatureWithObjCTypes:t]; } @catch (NSException *e) { return nil; }
 }
 
-// v0.4.32：收尾点补喂 —— 在「关文件 / 收尾」前把 AI 语音剩下的部分喂完。
+// v0.4.33：收尾点补喂 —— 在「关文件 / 收尾」前把 AI 语音剩下的部分喂完。
 // 不同版本陌陌收尾选择子不完全一样，所以按名单探测（只钩无参方法）：
 //   sendPcmOver / close / closeFile / finish / flush / stop / end / over
 // 补喂只会发生一次，且必须已经喂过至少一块（否则说明还没真正接管）。
-// v0.4.32：这里只直通，绝对不喂数据（收尾态调编码器必卡死）
+// v0.4.33：这里只直通，绝对不喂数据（收尾态调编码器必卡死）
 static void SLDrainThenOrigHook(id self, SEL _cmd) {
     void (*orig)(id, SEL) = (void (*)(id, SEL))SLGetOrigIMP(self, _cmd);
     if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
@@ -1498,7 +1498,7 @@ static void SLDrainThenOrigHook(id self, SEL _cmd) {
     if (orig) orig(self, _cmd);
 }
 
-// v0.4.32：补喂入口 —— 录音机停止时（主线程、收尾之前）
+// v0.4.33：补喂入口 —— 录音机停止时（主线程、收尾之前）
 static void SLStopRecordHook(id self, SEL _cmd) {
     void (*orig)(id, SEL) = (void (*)(id, SEL))SLGetOrigIMP(self, _cmd);
     @try { SLDrainRemainingPCM(NSStringFromSelector(_cmd)); } @catch (NSException *e) {
@@ -1588,10 +1588,10 @@ static BOOL SLInstallBusPCMHooks(void) {
     return YES;
 }
 
-#pragma mark - 钩子 3.6：通用 PCM 漏斗接管（v0.4.32）
+#pragma mark - 钩子 3.6：通用 PCM 漏斗接管（v0.4.33）
 
 // 为什么要再加一层：
-// v0.4.32 只钩了 MDAudioStreamBus 的 sendPcm*，但如果聊天语音实际上不走这个对象
+// v0.4.33 只钩了 MDAudioStreamBus 的 sendPcm*，但如果聊天语音实际上不走这个对象
 // （或被包装成别的类），钩子就永远不触发 —— 表现出来就是「一点没变，还是原声」。
 // 而不管中间绕多少层，语音最终一定要经过 MDOpusEncoder -encodePcm: 才会变成 opus。
 // 所以这里在「编码器入口」再兜一层：谁把 PCM 递给编码器，就在那一刻换成 AI 语音。
@@ -1805,7 +1805,7 @@ static void SLSendAudioMessageHook(id self, SEL _cmd, id model, unsigned long lo
         SLDumpModelDeep(model);
     }
 
-    // 发送前的最后一步（v0.4.32）：录音阶段已把陌陌的 PCM 流换成 AI 语音，
+    // 发送前的最后一步（v0.4.33）：录音阶段已把陌陌的 PCM 流换成 AI 语音，
     // 这里只需要把时长（气泡秒数）改成 AI 语音的真实时长。
     // bus 没接管成功时绝不覆盖文件 —— 往 .opus 里写 AMR 只会得到「0 秒空语音」，比原声更糟。
     if (gSLTTSAudioPath) {
@@ -1947,7 +1947,7 @@ static void SLAudioRecordDoneHook(id self, SEL _cmd, id recorder, NSString *path
         SLDumpMethodNames(recorder);
     }
 
-    // v0.4.32：这里不再覆盖文件。
+    // v0.4.33：这里不再覆盖文件。
     // 录音过程中陌陌自己的编码器已经把 AI 语音写进 .opus（见 SLPcmFeedObjC），
     // 此刻再往 .opus 里写 AMR 反而会把刚生成的好文件毁掉（= 0 秒空语音）。
     // 只剩诊断：录音结束后 bus 是否真的接管过。
@@ -2033,7 +2033,7 @@ static BOOL SLInstallServiceHook(void) {
     return SLRegisterMethod(cls, sel, (IMP)SLSendTextMessageService);
 }
 
-#pragma mark - 虚拟定位（v0.4.32）
+#pragma mark - 虚拟定位（v0.4.33）
 
 // 只在「开关开 + 已选点」时返回非 nil；返回 nil 就原样透传，对陌陌现状零影响。
 static CLLocation *SLVirtualLocationNow(void) {
@@ -2105,7 +2105,7 @@ static void SLInstallVirtualLocationHooks(void) {
     SLLog(@"VLOC 当前 %@", [SLVirtualLocation summary]);
 }
 
-// v0.4.32：音波发布后闪退的兜底。
+// v0.4.33：音波发布后闪退的兜底。
 // iOS 15 起，给「老式构造」的 UIButton（buttonWithType:）设 configurationUpdateHandler
 // 会直接 NSAssert：Invalid parameter not satisfying: configuration != nil。
 // 陌陌音波发布页在自己那套旧按钮上就是这么干的，所以一发布就闪退（栈里只有 MomoChat + UIKitCore）。
@@ -2137,7 +2137,7 @@ static void SLInstallUIButtonGuard(void) {
     }
 }
 
-// v0.4.32：小宇宙私聊发口令时日志「零记录」—— 说明它的发送链完全不经过我们钩的
+// v0.4.33：小宇宙私聊发口令时日志「零记录」—— 说明它的发送链完全不经过我们钩的
 // sendText / sendTextMessage:。不再猜类名，直接钩事件分发：任何按钮点下去都会过
 // -[UIApplication sendAction:to:from:forEvent:]，日志里就能看到真实的 target 类 + action 名。
 // 只记录，不改变任何行为。
@@ -2209,7 +2209,7 @@ static void SLInstallActionProbe(void) {
     SLRegisterMethod([UIApplication class], sel, (IMP)SLAppSendActionHook);
 }
 
-// v0.4.32：小宇宙 sendContent: 正式接管（0.4.32 探针实测确认它就是私聊发送入口）。
+// v0.4.33：小宇宙 sendContent: 正式接管（0.4.33 探针实测确认它就是私聊发送入口）。
 // 坑：发送时刻拿到的条目对象，其 text 字段往往只剩「正文」，口令已被上层剥掉，
 // 所以不能只读 text —— SLCommandTextIn 会把对象上的字符串字段全扫一遍，捞出带口令的那份。
 static NSString *SLCommandTextIn(id obj) {
@@ -2224,7 +2224,7 @@ static NSString *SLCommandTextIn(id obj) {
     objc_property_t *props = class_copyPropertyList([obj class], &pc);
     for (unsigned int i = 0; i < pc; i++) {
         // 只认「声明为 NSString 的属性」。对 imageInfo/siteinfo 这类非字符串属性调 getter
-        // 会踩 ABI（返回结构体时尤其致命），0.4.32 就是死在这里。
+        // 会踩 ABI（返回结构体时尤其致命），0.4.33 就是死在这里。
         const char *attrs = property_getAttributes(props[i]);
         if (!attrs || strncmp(attrs, "T@\"NSString\"", 12) != 0) continue;
         const char *nm = property_getName(props[i]);
@@ -2238,7 +2238,7 @@ static NSString *SLCommandTextIn(id obj) {
     return nil;
 }
 
-// v0.4.32：小宇宙语音气泡秒数对齐。
+// v0.4.33：小宇宙语音气泡秒数对齐。
 // 小宇宙不发 sendAudioMessage:audioTime:audioFileSize:，发送时只给一个 MDSendContentItem，
 // 秒数写在它的 audioSecs 上 —— 实测单位是 0.1 秒（和陌陌 body 里的 audiotime 一致）：
 //   AI 2.24s + 录音尾巴 0.37s -> audioSecs=26（2.6 秒）；AI 0.94s + 0.32s -> 13（1.3 秒）
@@ -2261,7 +2261,7 @@ static BOOL SLUniverseFixAudioDuration(id item) {
     long long tenths = (long long)llround(useDur * 10.0);   // 0.1 秒单位
     if (tenths < 1) tenths = 1;
 
-    // 读旧值只做日志（类型不对就跳过，绝不错位调用 —— 0.4.32 就是踩在这上面崩的）
+    // 读旧值只做日志（类型不对就跳过，绝不错位调用 —— 0.4.33 就是踩在这上面崩的）
     unsigned long long oldSecs = 0;
     BOOL hasOld = NO;
     SEL getSel = NSSelectorFromString(@"audioSecs");
@@ -2312,13 +2312,13 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
 
     if (!SLIsEnabled()) { orig(self, _cmd, arg); return; }
 
-    // v0.4.32：语音消息（content 无文本、带 audioUUID）先把气泡秒数改成 AI 语音的真实时长。
+    // v0.4.33：语音消息（content 无文本、带 audioUUID）先把气泡秒数改成 AI 语音的真实时长。
     // 必须在「无文本直接透传」之前，否则永远走不到这里。
     SLUniverseFixAudioDuration(arg);
 
     NSString *shown = SLTextFromArgument(arg);
     // 音频 / 图片 / 表情这类 content 没有文本：立刻透传，绝不进字段扫描。
-    // 小宇宙发语音时 arg 就是这种对象（text=nil），0.4.32 在这里扫属性扫崩了。
+    // 小宇宙发语音时 arg 就是这种对象（text=nil），0.4.33 在这里扫属性扫崩了。
     if (!shown.length) { orig(self, _cmd, arg); return; }
     NSString *full = SLTextHasAnyCommand(shown) ? shown : SLCommandTextIn(arg);
 
@@ -2356,9 +2356,9 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
 }
 
 static void SLInstallHooks(void) {
-    // v0.4.32：去掉「只装 3 轮」的硬上限。
-    // 0.4.32 为了少刷日志把窗口从 6 轮/10 秒砍到 3 轮/3 秒，代价是：
-    // 小宇宙这类懒加载模块的类在启动 3 秒后才 realize，就永远装不上钩子（0.4.32.9 能用、0.4.32 不能的真因）。
+    // v0.4.33：去掉「只装 3 轮」的硬上限。
+    // 0.4.33 为了少刷日志把窗口从 6 轮/10 秒砍到 3 轮/3 秒，代价是：
+    // 小宇宙这类懒加载模块的类在启动 3 秒后才 realize，就永远装不上钩子（0.4.33.9 能用、0.4.33 不能的真因）。
     // 现在改成按时间节流 + 永不过期：定时轮次、App 回前台都会补装，已装的静默跳过。
     static NSTimeInterval lastT = 0;
     NSTimeInterval nowT = [[NSDate date] timeIntervalSince1970];
@@ -2380,7 +2380,7 @@ static void SLInstallHooks(void) {
     SLInstallAudioRecordHook(SLClassByName("MDChatSingleHandler"));
     SLInstallAudioRecordHook(SLClassByName("MDChatBaseHander"));
     SLInstallAudioRecordHook(SLClassByName("MDChatUniverseHandler"));
-    // v0.4.32：小宇宙 handler 诊断（只打一次）+ sendContent: 正式接管
+    // v0.4.33：小宇宙 handler 诊断（只打一次）+ sendContent: 正式接管
     {
         Class uh = SLClassByName("MDChatUniverseHandler");
         static BOOL loggedUH = NO;
@@ -2401,15 +2401,15 @@ static void SLInstallHooks(void) {
     }
     // 录音机临时路径（拿得到就直接命中真实录音文件）
     SLInstallTempPathHook(NSClassFromString(@"MDAudioRecorder"));
-    // v0.4.32 核心：接管陌陌录音的 PCM 流（AI 语音替换的落地位置）
+    // v0.4.33 核心：接管陌陌录音的 PCM 流（AI 语音替换的落地位置）
     SLInstallBusPCMHooks();
     SLInstallFunnelHooks();
     SLInstallServiceHook();
-    // v0.4.32：虚拟定位（不开时全透传）
+    // v0.4.33：虚拟定位（不开时全透传）
     @try { SLInstallVirtualLocationHooks(); } @catch (NSException *e) {}
-    // v0.4.32：UIButton configuration 断言兜底
+    // v0.4.33：UIButton configuration 断言兜底
     @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
-    // v0.4.32：事件探针（抓小宇宙私聊的真实发送入口，只记录不改行为）
+    // v0.4.33：事件探针（抓小宇宙私聊的真实发送入口，只记录不改行为）
     @try { SLInstallActionProbe(); } @catch (NSException *e) {}
 }
 
@@ -2429,14 +2429,14 @@ NSString *SLHookStatusSummary(void) {
         @try { [AWECAUtils ensureDirectoriesExist]; } @catch (NSException *e) {}
         @try { SLStartEntryWatcher(); } @catch (NSException *e) {}
         SLInstallHooks();
-        // v0.4.32：轮次从 2 次拉回 6 次（覆盖启动后 12 秒）。状态摘要仍只在最后一轮打一次。
+        // v0.4.33：轮次从 2 次拉回 6 次（覆盖启动后 12 秒）。状态摘要仍只在最后一轮打一次。
         for (int i = 1; i <= 6; i++) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 @try { SLInstallHooks(); } @catch (NSException *e) {}
                 if (i == 6) SLLog(@"%@", SLHookStatusSummary());
             });
         }
-        // v0.4.32：App 每次回前台都补装一次。小宇宙这些模块是「第一次点进去才加载类」，
+        // v0.4.33：App 每次回前台都补装一次。小宇宙这些模块是「第一次点进去才加载类」，
         // 只在启动那几秒装钩子必然漏；回前台 = 模块已加载，这一轮就能补上。
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                           object:nil
