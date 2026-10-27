@@ -183,12 +183,11 @@ static UIColor *SLHairline(void) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    // v0.4.40：这里不再改导航栏外观 —— 外观只由浮窗容器统一管理。
+    // 之前本页 viewWillDisappear 会把导航栏设回 configureWithDefaultBackground（不透明浅底 +
+    // 0.5pt 投影线），所以「进过一次地图页再退回设置页」顶部就一直白，冷启动直接开设置页反而正常。
     UINavigationBar *nb = self.navigationController.navigationBar;
     if (!nb) return;
-    UINavigationBarAppearance *ap = [[UINavigationBarAppearance alloc] init];
-    [ap configureWithTransparentBackground];
-    nb.standardAppearance = ap;
-    nb.scrollEdgeAppearance = ap;
     nb.tintColor = [UIColor labelColor];
     self.navigationItem.title = @"";
     // v0.4.36：搜索栏并进导航栏，顶部不再有「虚拟定位」那行药丸，
@@ -198,12 +197,9 @@ static UIColor *SLHairline(void) {
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    // 只收自己的 titleView / tintColor，不碰 appearance（那是容器的职责）
     UINavigationBar *nb = self.navigationController.navigationBar;
     if (!nb) return;
-    UINavigationBarAppearance *ap = [[UINavigationBarAppearance alloc] init];
-    [ap configureWithDefaultBackground];
-    nb.standardAppearance = ap;
-    nb.scrollEdgeAppearance = ap;
     nb.tintColor = nil;
     self.navigationItem.title = @"";
     self.navigationItem.titleView = nil;

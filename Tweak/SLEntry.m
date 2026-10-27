@@ -137,6 +137,10 @@ static BOOL SLSaveFloatIconImage(UIImage *img) {
 
 static void SLApplyFloatIcon(UIButton *btn);
 static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包名
+// v0.4.40：位置相关的三个工具（定义在文件后面，拖动手势要用到）
+static CGPoint SLClampFloatPos(CGPoint c, CGSize size);
+static void SLStoreFloatPos(CGPoint c, CGSize size);
+static CGPoint SLLoadFloatPos(CGSize size);
 
 // ===================== 浮动入口 =====================
 
@@ -185,7 +189,7 @@ static const CGFloat kSLPanelTopPad = 14.0;
 @property (nonatomic, strong) UIButton *play;
 @property (nonatomic, strong) UIImageView *icon;
 @property (nonatomic, strong) UILabel *title;
-@property (nonatomic, strong) UIView *check;
+@property (nonatomic, strong) UIImageView *check;
 @end
 
 @implementation SLPackMenuRow
@@ -214,10 +218,12 @@ static const CGFloat kSLPanelTopPad = 14.0;
         _title.userInteractionEnabled = NO;
         [self addSubview:_title];
 
-        // 选中标记从 14pt 对勾换成 8pt 蓝点：同宽列表里对勾太占地方，点更轻
-        _check = [[UIView alloc] initWithFrame:CGRectZero];
-        _check.backgroundColor = [UIColor systemBlueColor];
-        _check.layer.cornerRadius = 4.0;
+        // v0.4.40：原声不再是列表里的一行 —— 撤销靠「再点一次已选中的那条」。
+        // 所以右侧标记从「蓝点（已选）」换成「xmark.circle（可清除）」：
+        // 圆叉在 iOS 里读作「清除这个选择」，不会被误认成「删除这条语音包」（那是红垃圾桶）。
+        _check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"xmark.circle"]];
+        _check.contentMode = UIViewContentModeScaleAspectFit;
+        _check.tintColor = [UIColor secondaryLabelColor];
         _check.hidden = YES;
         _check.userInteractionEnabled = NO;
         [self addSubview:_check];
@@ -234,7 +240,7 @@ static const CGFloat kSLPanelTopPad = 14.0;
     _icon.frame = CGRectMake(12.0, (h - 30.0) / 2.0, 30.0, 30.0);
     _icon.layer.cornerRadius = 15.0;
     CGFloat right = CGRectGetWidth(b) - 12.0;
-    _check.frame = CGRectMake(right - 8.0, (h - 8.0) / 2.0, 8.0, 8.0);
+    _check.frame = CGRectMake(right - 18.0, (h - 18.0) / 2.0, 18.0, 18.0);
     CGFloat tw = CGRectGetMinX(_check.frame) - 8.0 - 50.0;
     _title.frame = CGRectMake(50.0, 0, MAX(0, tw), h);
 }
@@ -265,6 +271,8 @@ static const CGFloat kSLPanelTopPad = 14.0;
     CAShapeLayer *_pulse;
     UIView *_readyDot;
     CFTimeInterval _longPressAt;
+    // v0.4.40：球在哪半边，胶囊就往哪边「挂」—— 图标端留在球原位，箭头端伸向屏内
+    BOOL _mirrored;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -344,6 +352,9 @@ static const CGFloat kSLPanelTopPad = 14.0;
         _name.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
         _name.textColor = [UIColor labelColor];
         _name.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        // v0.4.40：两端各留 48 热区，名字在中间 100pt 里居中 —— 原来贴左对齐，
+        // 右边空一大片，看着像没排好。
+        _name.textAlignment = NSTextAlignmentCenter;
         _name.userInteractionEnabled = NO;
         [self addSubview:_name];
 
@@ -532,9 +543,12 @@ static const CGFloat kSLPanelTopPad = 14.0;
     CGRect f = self.frame;
     CGRect nf = f;
     nf.size = target;
-    // 贴右边就向左长，贴左边就向右长，尽量不越出屏幕
+    // 贴右边就向左长，贴左边就向右长，尽量不越出屏幕。
+    // v0.4.40：这个方向同时决定胶囊内部镜像 —— 图标端永远停在球原来的位置，
+    // 否则球在右边时图标被顶到最左、箭头正好压在球原位上，看起来像整颗球瞬移了。
     BOOL growLeft = YES;
     if (self.superview) growLeft = (CGRectGetMidX(f) > CGRectGetMidX(self.superview.bounds));
+    _mirrored = growLeft;
     if (growLeft) nf.origin.x = CGRectGetMaxX(f) - target.width;
     if (self.superview) {
         CGFloat minX = 6.0, maxX = CGRectGetWidth(self.superview.bounds) - 6.0;
@@ -568,12 +582,33 @@ static const CGFloat kSLPanelTopPad = 14.0;
 #pragma mark 手势
 
 - (void)sl_pan:(UIPanGestureRecognizer *)g {
+    // v0.4.40：展开态不响应拖动 —— 190pt 宽的胶囊拖起来只会在边缘露出一半，
+    // 想换位置先收回成球。
+    if (self.slExpanded) return;
+    UIView *sv = self.superview;
+    if (!sv) return;
+    CGSize sz = sv.bounds.size;
+
     if (g.state == UIGestureRecognizerStateChanged) {
-        CGPoint t = [g translationInView:self.superview];
-        self.center = CGPointMake(self.center.x + t.x, self.center.y + t.y);
-        [g setTranslation:CGPointZero inView:self.superview];
-        NSString *pos = NSStringFromCGPoint(self.center);
-        [[NSUserDefaults standardUserDefaults] setObject:pos forKey:@"SLFloatPos"];
+        CGPoint t = [g translationInView:sv];
+        // 原来只做 center += 位移，没有任何边界判断 → 能整颗拖出屏幕，
+        // 存下来的又是绝对坐标，换设备/横屏恢复后就在屏外。
+        // 现在实时夹在界内（左右各留 4pt，上让状态栏，下让底部安全区）。
+        self.center = SLClampFloatPos(CGPointMake(self.center.x + t.x, self.center.y + t.y), sz);
+        [g setTranslation:CGPointZero inView:sv];
+    } else if (g.state == UIGestureRecognizerStateEnded
+               || g.state == UIGestureRecognizerStateCancelled) {
+        // 松手吸附到最近的一条边，避免球卡在屏幕中间挡住内容
+        CGFloat half = SLBallSide / 2.0;
+        CGPoint c = self.center;
+        c.x = (c.x < sz.width / 2.0) ? (half + 4.0) : (sz.width - half - 4.0);
+        c = SLClampFloatPos(c, sz);
+        [UIView animateWithDuration:0.22 delay:0
+             usingSpringWithDamping:0.85 initialSpringVelocity:0
+                            options:UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{ self.center = c; }
+                         completion:nil];
+        SLStoreFloatPos(c, sz);
     }
 }
 
@@ -627,31 +662,36 @@ static const CGFloat kSLPanelTopPad = 14.0;
     _glassHost.layer.cornerCurve = kCACornerCurveContinuous;
     _glassMask.path = [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:h / 2.0].CGPath;
     // 玻璃始终是最大尺寸，只靠 mask 露出当前形状，右对齐
-    _chrome.frame = CGRectMake(w - SLPillMaxW, 0, SLPillMaxW, h);
+    // v0.4.40：镜像开关。MX(x, wd) 把「距左 x」翻成「距右 x」，宽度不变的居中元素不要用它。
+    BOOL mir = exp ? _mirrored : NO;
+#define SLMX(x, wd) (mir ? (w - (x) - (wd)) : (x))
+    _chrome.frame = CGRectMake(mir ? 0 : (w - SLPillMaxW), 0, SLPillMaxW, h);
 
     // v0.4.39：左图标与球态同尺寸（22pt，不再缩水到 18），头像 32 → 42
-    _glyph.frame = exp ? CGRectMake(13.0, (h - 22.0) / 2.0, 22.0, 22.0)
+    _glyph.frame = exp ? CGRectMake(SLMX(13.0, 22.0), (h - 22.0) / 2.0, 22.0, 22.0)
                        : CGRectMake((w - 22.0) / 2.0, (h - 22.0) / 2.0, 22.0, 22.0);
     _glyph.hidden = (_thumb.hidden == NO) || (_emoji.hidden == NO);
     CGFloat iconS = 42.0;
-    _thumb.frame = exp ? CGRectMake(3.0, (h - iconS) / 2.0, iconS, iconS) : b;
+    _thumb.frame = exp ? CGRectMake(SLMX(3.0, iconS), (h - iconS) / 2.0, iconS, iconS) : b;
     _thumb.layer.cornerRadius = MIN(CGRectGetWidth(_thumb.bounds), CGRectGetHeight(_thumb.bounds)) / 2.0;
     _emoji.font = [UIFont systemFontOfSize:(exp ? 17.0 : 22.0)];
-    _emoji.frame = exp ? CGRectMake(3.0, (h - iconS) / 2.0, iconS, iconS) : b;
+    _emoji.frame = exp ? CGRectMake(SLMX(3.0, iconS), (h - iconS) / 2.0, iconS, iconS) : b;
 
     // v0.4.37：状态色铺满整条胶囊。原来展开态只盖左侧 48pt 圆，
     // 球是蓝的、胶囊还是白玻璃，中间像被切断。
     _tint.frame = b;
     _tint.layer.cornerRadius = h / 2.0;
 
-    // v0.4.39：两端镜像 —— 左热区 48、右热区 48，箭头中心距右 24（= 左图标中心距左 24）
-    _sep.frame = CGRectMake(48.0, (h - 18.0) / 2.0, 0.5, 18.0);
-    _name.frame = CGRectMake(56.0, 0, MAX(0, w - 56.0 - 48.0), h);
-    _menuBtn.frame = exp ? CGRectMake(w - 48.0, 0, 48.0, h) : CGRectZero;
+    // v0.4.40：两端各一块 48pt 热区，中间 100pt 给名字（居中）。
+    // 镜像时两端互换、中间不动 —— 图标端跟着球走，箭头端永远在远端。
+    _sep.frame = CGRectMake(SLMX(48.0, 0.5), (h - 18.0) / 2.0, 0.5, 18.0);
+    _name.frame = CGRectMake(48.0, 0, MAX(0, w - 96.0), h);
+    _menuBtn.frame = exp ? CGRectMake(SLMX(w - 48.0, 48.0), 0, 48.0, h) : CGRectZero;
     _chev.frame = CGRectMake(18.5, (h - 11.0) / 2.0, 11.0, 11.0);
-    _homeBtn.frame = exp ? CGRectMake(0, 0, 48.0, h) : CGRectZero;
+    _homeBtn.frame = exp ? CGRectMake(SLMX(0.0, 48.0), 0, 48.0, h) : CGRectZero;
     _homeHit.frame = _homeBtn.bounds;
-    _readyDot.frame = CGRectMake(w - 14.0, 3.0, 9.0, 9.0);
+    _readyDot.frame = CGRectMake(mir ? 5.0 : (w - 14.0), 3.0, 9.0, 9.0);
+#undef SLMX
 
     _sep.hidden = !exp;
     _name.hidden = !exp;
@@ -705,10 +745,15 @@ static const CGFloat kSLPanelTopPad = 14.0;
 }
 
 - (void)sl_buildWithAnchor:(UIView *)anchor {
+    // v0.4.40：原声不在列表里占一行 —— 它就是「没有装填」的默认状态。
+    // 想撤销已装好的那一发，再点一次它本身（右侧圆叉）。
     NSMutableArray *rows = [NSMutableArray array];
-    [rows addObject:@{@"title": @"原声", @"orig": @YES}];
     for (NSDictionary *p in [SLVoicePack allPacks]) {
-        [rows addObject:@{@"title": p[@"name"] ?: @"未命名", @"pack": p, @"orig": @NO}];
+        [rows addObject:@{@"title": p[@"name"] ?: @"未命名", @"pack": p}];
+    }
+    if (!rows.count) {
+        // 一条包都没有时给一行说明，别弹出一张只有内边距的空卡片
+        [rows addObject:@{@"title": @"还没有语音包 · 长按球进设置导入", @"empty": @YES}];
     }
     _rows = rows;
 
@@ -771,26 +816,23 @@ static const CGFloat kSLPanelTopPad = 14.0;
         SLPackMenuRow *r = [[SLPackMenuRow alloc] initWithFrame:CGRectMake(0, i * rowH, cardW, rowH)];
         r.tag = (NSInteger)i;
         r.title.text = info[@"title"];
-        BOOL orig = [info[@"orig"] boolValue];
         NSDictionary *pack = info[@"pack"];
 
-        BOOL on = orig ? [SLVoicePack isOriginalMode] : (![SLVoicePack isOriginalMode] && pack && [SLVoicePack isPackActive:pack]);
+        // v0.4.40：「选中」= 已装好、等下一录音的那一条（不是「上次用过的那条」）。
+        // 发出去之后 pending 被清，这里就不再点亮。
+        BOOL on = pack && [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
         r.check.hidden = !on;
 
-        // v0.4.39：左侧变 30pt 圆形试听键。原声那一行没有音频文件，
-        // 按钮不接触摸、只留一个静态麦克风，文字起点仍和其它行对齐。
+        // 左侧 30pt 圆形试听键：点它只试听、不选中；点名称那侧才是装填 / 撤销
+        BOOL placeholder = (pack == nil);
         r.play.tag = (NSInteger)i;
         [r.play addTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
-        r.play.enabled = !orig;
-        r.icon.image = [UIImage systemImageNamed:(orig ? @"mic.fill" : @"play.fill") withConfiguration:symCfg];
-        if (orig) {
-            r.icon.backgroundColor = [UIColor clearColor];
-            r.icon.tintColor = [UIColor secondaryLabelColor];
-        } else {
-            r.icon.backgroundColor = on ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
-                                        : [[UIColor labelColor] colorWithAlphaComponent:0.10];
-            r.icon.tintColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
-        }
+        r.play.enabled = !placeholder;
+        r.icon.image = [UIImage systemImageNamed:(placeholder ? @"info.circle" : @"play.fill") withConfiguration:symCfg];
+        r.icon.backgroundColor = on ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
+                                    : [[UIColor labelColor] colorWithAlphaComponent:0.10];
+        r.icon.tintColor = on ? [UIColor systemBlueColor] : (placeholder ? [UIColor tertiaryLabelColor] : [UIColor labelColor]);
+        if (placeholder) r.title.textColor = [UIColor secondaryLabelColor];
         r.title.textColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
         r.title.font = [UIFont systemFontOfSize:14.0 weight:(on ? UIFontWeightSemibold : UIFontWeightRegular)];
         [r addTarget:self action:@selector(sl_rowTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -872,12 +914,17 @@ static const CGFloat kSLPanelTopPad = 14.0;
 - (void)sl_markRow:(NSInteger)idx playing:(BOOL)on {
     if (idx < 0 || idx >= (NSInteger)_rowViews.count) return;
     SLPackMenuRow *r = _rowViews[(NSUInteger)idx];
+    // 停止试听后要回落到「这一行本来该有的样子」：选中行仍然是蓝底，别被刷成灰的
+    NSDictionary *info = (idx < (NSInteger)_rows.count) ? _rows[(NSUInteger)idx] : nil;
+    NSDictionary *pack = info[@"pack"];
+    BOOL sel = pack && [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
+    BOOL hot = on || sel;
     UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13.0
                                                                                      weight:UIImageSymbolWeightSemibold];
     r.icon.image = [UIImage systemImageNamed:(on ? @"pause.fill" : @"play.fill") withConfiguration:cfg];
-    r.icon.backgroundColor = on ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
-                                : [[UIColor labelColor] colorWithAlphaComponent:0.10];
-    r.icon.tintColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
+    r.icon.backgroundColor = hot ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
+                                 : [[UIColor labelColor] colorWithAlphaComponent:0.10];
+    r.icon.tintColor = hot ? [UIColor systemBlueColor] : [UIColor labelColor];
 }
 
 - (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
@@ -892,18 +939,23 @@ static const CGFloat kSLPanelTopPad = 14.0;
 
 - (void)sl_rowTapped:(SLPackMenuRow *)row {
     if (row.tag < 0 || row.tag >= (NSInteger)_rows.count) return;
-    NSDictionary *info = _rows[(NSUInteger)row.tag];
-    if ([info[@"orig"] boolValue]) {
-        [SLVoicePack setOriginalMode:YES];
-        [SLVoicePack setEnabled:YES];
-        [AWECAUtils showToast:@"原声：这次用你自己录的" duration:1.8];
+    NSDictionary *pack = _rows[(NSUInteger)row.tag][@"pack"];
+    if (!pack) return;
+
+    BOOL on = [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
+    if (on) {
+        // 再点一次已装好的那条 = 撤销这一发，回到原声（不用发出去消耗掉）
+        [SLVoicePack setOneShotPending:NO];
+        [AWECAUtils showToast:@"已切回原声" duration:1.5];
+        SLLog(@"one-shot cancelled by re-tap");
     } else {
-        NSDictionary *pack = info[@"pack"];
-        [SLVoicePack setOriginalMode:NO];
         [SLVoicePack selectPack:pack];
+        [SLVoicePack setOneShotPending:YES];
         [SLVoicePack setEnabled:YES];
         SLPackPrewarm();
-        [AWECAUtils showToast:[NSString stringWithFormat:@"已选「%@」", pack[@"name"] ?: @""] duration:1.6];
+        [AWECAUtils showToast:[NSString stringWithFormat:@"已装好「%@」· 下一条语音发它", pack[@"name"] ?: @""]
+                     duration:1.8];
+        SLLog(@"one-shot armed %@", pack[@"name"] ?: @"-");
     }
     SLRefreshFloatButton();
     [self sl_dismiss];
@@ -927,6 +979,7 @@ static const CGFloat kSLPanelTopPad = 14.0;
 @property (nonatomic, strong) UIVisualEffectView *blur;
 @property (nonatomic, strong) UINavigationController *nav;
 @property (nonatomic, strong) UIViewController *rootVC;
+- (void)sl_applyNavTransparency;
 @end
 
 @implementation SLFloatPanelController
@@ -981,30 +1034,39 @@ static const CGFloat kSLPanelTopPad = 14.0;
     [self.blur.contentView addSubview:self.nav.view];
     [self.nav didMoveToParentViewController:self];
 
-    // v0.4.39：三页导航栏统一透明。
-    // iOS 15 起导航栏有两套外观：内容贴顶时用 scrollEdgeAppearance（透明），一旦下方开始滚动，
-    // 系统换成 standardAppearance（不透明浅底 + 0.5pt 投影线）—— 表现就是"一滑顶部多出一条白"。
-    // 这里三套全设成透明 + 无阴影，底完全交给卡片那一层玻璃；设置页 / 语音包页 / 地图页共用，
-    // 一次改完三页统一。
+    [self sl_applyNavTransparency];
+}
+
+// v0.4.40：导航栏透明化收成一个方法，viewDidLoad / viewWillAppear / viewWillLayoutSubviews 各刷一次。
+// iOS 15 起导航栏有两套外观：内容贴顶用 scrollEdgeAppearance（透明），一旦下方开始滚动就换成
+// standardAppearance（不透明浅底 + 0.5pt 投影线）—— 表现是「一滑顶部冒出一条白」。
+// 只在 viewDidLoad 设一次是不够的：系统会在 layout 周期里把它重置回去，所以每次布局都补一遍。
+- (void)sl_applyNavTransparency {
+    UINavigationBar *nb = self.nav.navigationBar;
+    if (!nb) return;
     if (@available(iOS 13.0, *)) {
         UINavigationBarAppearance *ap = [[UINavigationBarAppearance alloc] init];
         [ap configureWithTransparentBackground];
         ap.backgroundColor = [UIColor clearColor];
         ap.backgroundEffect = nil;
         ap.shadowColor = [UIColor clearColor];
-        UINavigationBar *nb = self.nav.navigationBar;
         nb.standardAppearance = ap;
         nb.compactAppearance = ap;
         nb.scrollEdgeAppearance = ap;
         if (@available(iOS 15.0, *)) nb.compactScrollEdgeAppearance = ap;
-        nb.translucent = YES;
-        nb.backgroundColor = [UIColor clearColor];
-        nb.shadowImage = [UIImage new];
     }
+    // 老接口一起上：部分页面（自带背景图 / 自定义返回按钮）会走这条路，
+    // 新老两条都设成空，哪条生效都不会再有白底。
+    nb.translucent = YES;
+    nb.backgroundColor = [UIColor clearColor];
+    [nb setBackgroundImage:[UIImage new] forBarMetrics:UIBarMetricsDefault];
+    nb.shadowImage = [UIImage new];
 }
 
 - (void)viewWillLayoutSubviews {
     [super viewWillLayoutSubviews];
+    // 系统在布局周期会重置导航栏外观，这里是必须补刷的一次
+    [self sl_applyNavTransparency];
     CGSize ss = self.view.bounds.size;
     if (ss.width < 1.0 || ss.height < 1.0) return;
     self.dim.frame = self.view.bounds;
@@ -1023,6 +1085,8 @@ static const CGFloat kSLPanelTopPad = 14.0;
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    // 从地图页 / 语音包页返回时也重刷一遍，防止子页把外观改回去
+    [self sl_applyNavTransparency];
     self.cardWrap.alpha = 0.0;
     self.cardWrap.transform = CGAffineTransformMakeScale(0.94, 0.94);
 }
@@ -1042,11 +1106,12 @@ static const CGFloat kSLPanelTopPad = 14.0;
 @end
 
 // 胶囊上显示的当前选择（原声 / 语音包名）
+// v0.4.40：原声 = 没有装填。不再有「原声开关」，只看有没有待发的那一发。
 static NSString *SLFloatPackName(void) {
-    if ([SLVoicePack isOriginalMode]) return @"原声";
+    if (![SLVoicePack isOneShotPending]) return @"原声";
     NSDictionary *pack = [SLVoicePack activePack];
     NSString *n = pack[@"name"];
-    return n.length ? n : @"未选语音包";
+    return n.length ? n : @"原声";
 }
 
 // 按当前设置把图标套到按钮上
@@ -1143,12 +1208,53 @@ void SLRefreshFloatButton(void) {
         btn = (SLFloatButton *)[w viewWithTag:SLBtnTag];
     }
     SLApplyFloatIcon(btn);
+    // v0.4.40：装填了就亮成蓝的、撤销了回空闲 —— 名字（sl_loadIcon）和颜色一起走，
+    // 否则会出现「名字写原声、球还是蓝的」这种自相矛盾。
+    if (btn) [btn sl_applyState:([SLVoicePack isOneShotPending] ? SLFloatStateReady : SLFloatStateIdle)];
 }
 
+// 把中心点夹在「不会被屏幕边缘切掉」的范围内。
+// 原来那版是「越界就重置」—— 拖到边上会突然跳回中间，而且重置值本身也可能越界。
 static CGPoint SLClampFloatPos(CGPoint c, CGSize size) {
-    if (c.x < 24.0 || c.x > size.width - 24.0) c.x = size.width - 36.0;
-    if (c.y < 120.0 || c.y > size.height - 160.0) c.y = size.height * 0.55;
+    if (size.width <= 0 || size.height <= 0) return c;
+    CGFloat half = SLBallSide / 2.0;
+    CGFloat minX = half + 4.0;
+    CGFloat maxX = size.width - half - 4.0;
+    CGFloat minY = half + 56.0;                 // 让开状态栏 / 刘海
+    CGFloat maxY = size.height - half - 34.0;   // 让开底部安全区
+    if (maxX < minX) { c.x = size.width / 2.0; }
+    else { if (c.x < minX) c.x = minX; if (c.x > maxX) c.x = maxX; }
+    if (maxY < minY) { c.y = size.height / 2.0; }
+    else { if (c.y < minY) c.y = minY; if (c.y > maxY) c.y = maxY; }
     return c;
+}
+
+// 位置存「中心点占屏幕的比例」而不是绝对坐标：换设备、横竖屏、分屏之后
+// 同样的比例仍然落在同一个相对位置，不会跑到屏外。
+static void SLStoreFloatPos(CGPoint c, CGSize size) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (size.width > 0 && size.height > 0) {
+        [d setObject:[NSString stringWithFormat:@"%.4f,%.4f", c.x / size.width, c.y / size.height]
+              forKey:@"SLFloatPosRel"];
+    }
+    [d setObject:NSStringFromCGPoint(c) forKey:@"SLFloatPos"];   // 兼容旧版读法
+}
+
+static CGPoint SLLoadFloatPos(CGSize size) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *rel = [d stringForKey:@"SLFloatPosRel"];
+    if (rel.length) {
+        NSArray *p = [rel componentsSeparatedByString:@","];
+        if (p.count == 2) {
+            double rx = [p[0] doubleValue], ry = [p[1] doubleValue];
+            if (rx > 0.03 && rx < 0.97 && ry > 0.03 && ry < 0.97) {
+                return CGPointMake(rx * size.width, ry * size.height);
+            }
+        }
+    }
+    NSString *old = [d objectForKey:@"SLFloatPos"];
+    if (old.length) return CGPointFromString(old);
+    return CGPointMake(size.width - 36.0, size.height * 0.55);
 }
 
 void SLEnsureFloatButton(void) {
@@ -1174,9 +1280,7 @@ void SLEnsureFloatButton(void) {
         SLLog(@"SL-MOMO: float button moved to top window (%@)", NSStringFromClass([w class]));
     }
     if (!btn) {
-        NSString *pos = [[NSUserDefaults standardUserDefaults] objectForKey:@"SLFloatPos"];
-        CGPoint c = pos.length ? CGPointFromString(pos) : CGPointMake(w.bounds.size.width - 36, w.bounds.size.height * 0.55);
-        c = SLClampFloatPos(c, w.bounds.size);
+        CGPoint c = SLClampFloatPos(SLLoadFloatPos(w.bounds.size), w.bounds.size);
         btn = [[SLFloatButton alloc] initWithFrame:CGRectMake(0, 0, 48, 48)];
         btn.center = c;
         btn.tag = SLBtnTag;

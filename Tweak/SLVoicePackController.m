@@ -15,12 +15,6 @@
 
 typedef UIDocumentPickerViewController * _Nullable (^SLPickerMaker)(void);
 
-// 语音包口令跟着设置走（v0.4.9.9 默认改成 #yyb），文案里不再写死
-static NSString *SLPackCmdValue(void) {
-    NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:@"SLPackCommand"];
-    return v.length ? v : @"#yyb";
-}
-
 // 标题 / footer / 单元格文字统一左基线（跟设置页同一套算法）
 // v0.4.9.7：不再调 rectForRowAtIndexPath —— 它内部要算分区总高，而分区总高又要问
 // heightForFooterInSection，那个方法反过来要这个值，形成无限递归（0.4.9.6 语音包页闪退的根因）。
@@ -556,7 +550,7 @@ static UIImage *SLPauseGlyph(void) {
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
     if (!self.isRoot) return self.items.count;
-    if (section == 0) return 2;   // v0.4.36：原声 + 启用语音包
+    if (section == 0) return 1;   // v0.4.40：原声行删了，只剩「启用语音包」
     if (section == [self sl_folderSection]) return self.folderList.count;
     return self.ungrouped.count;
 }
@@ -582,11 +576,11 @@ static UIImage *SLPauseGlyph(void) {
 - (NSString *)sl_footerTextForSection:(NSInteger)section {
     if (!self.isRoot) {
         return section == 0
-            ? [NSString stringWithFormat:@"点一行即选中：之后按住说话会直接发它，不用发「%@」\n右上＋导入到此文件夹 · 左滑移动 / 裁剪 / 重命名 / 删除", SLPackCmdValue()]
+            ? @"点一行就装好一发：下一条语音发它，发完自动回到原声\n再点一次同一条即可撤销 · 右上＋导入到此文件夹 · 左滑移动 / 裁剪 / 重命名 / 删除"
             : nil;
     }
     if (section == 0) {
-        return [NSString stringWithFormat:@"选中一条之后，按住说话录下的一句就会直接换成它（不用发「%@」）\n选「原声」就不替换，用你自己录的 · 点文件夹进入，左滑可重命名 / 删除", SLPackCmdValue()];
+        return @"点一条就装好一发：下一条录音会直接换成它，发完自动回到原声\n再点一次同一条即可撤销 · 点文件夹进入，左滑可重命名 / 删除";
     }
     return nil;
 }
@@ -614,31 +608,8 @@ static UIImage *SLPauseGlyph(void) {
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     if (self.isRoot && ip.section == 0) {
-        if (ip.row == 0) {
-            // v0.4.36：「原声」不是关掉功能，而是「这次用我自己录的」。
-            // 做成一行可选项，比让人理解一个开关要直观。
-            static NSString *oid = @"orig";
-            UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:oid];
-            if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:oid];
-            cell.backgroundColor = SLPackGlassColor();
-            cell.textLabel.text = @"原声";
-            cell.detailTextLabel.text = @"不替换，按住说话发自己录的";
-            cell.detailTextLabel.font = [UIFont systemFontOfSize:12];
-            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-            cell.textLabel.textColor = [UIColor labelColor];
-            cell.imageView.image = [UIImage systemImageNamed:@"mic.fill"];
-            cell.imageView.tintColor = [UIColor secondaryLabelColor];
-            cell.accessoryType = UITableViewCellAccessoryNone;
-            cell.accessoryView = nil;
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            BOOL on = [SLVoicePack isOriginalMode];
-            cell.accessoryType = on ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-            if (on) {
-                cell.textLabel.textColor = [UIColor systemBlueColor];
-                cell.imageView.tintColor = [UIColor systemBlueColor];
-            }
-            return cell;
-        }
+        // v0.4.40：「原声」这一行删掉了 —— 原声就是「没装填」的默认状态，
+        // 不需要在这里选；撤销去点同一条语音包。
         static NSString *sid = @"switch";
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:sid];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:sid];
@@ -696,7 +667,8 @@ static UIImage *SLPauseGlyph(void) {
         return cell;
     }
     cell.playButton.hidden = NO;
-    BOOL active = [SLVoicePack isPackActive:pack];
+    // v0.4.40：点亮 = 已装好、等下一次录音的那一条（发完就灭）
+    BOOL active = [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
     [cell sl_setName:(pack[@"name"] ?: @"未命名") active:active];
     cell.durLabel.text = [SLVoicePack displayDuration:pack];
 
@@ -730,15 +702,7 @@ static UIImage *SLPauseGlyph(void) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
-    if (self.isRoot && ip.section == 0) {
-        if (ip.row == 0) {   // v0.4.36：选原声 = 不替换
-            [SLVoicePack setOriginalMode:YES];
-            [self.tableView reloadData];
-            SLRefreshFloatButton();
-            [AWECAUtils showToast:@"原声：之后录的都按你自己的发" duration:2.0];
-        }
-        return;
-    }
+    if (self.isRoot && ip.section == 0) return;   // 只剩一个开关，点整行不做事情
 
     if (self.isRoot && ip.section == [self sl_folderSection]) {
         NSString *name = self.folderList[ip.row];
@@ -749,16 +713,23 @@ static UIImage *SLPauseGlyph(void) {
 
     NSDictionary *pack = [self sl_packAt:ip];
     if (!pack) return;
+    // v0.4.40：和胶囊下拉列表同一套逻辑 —— 点一条装一发，再点同一条撤销。
+    BOOL on = [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
+    if (on) {
+        [SLVoicePack setOneShotPending:NO];
+        [self.tableView reloadData];
+        SLRefreshFloatButton();
+        [AWECAUtils showToast:@"已切回原声" duration:1.5];
+        return;
+    }
     [SLVoicePack selectPack:pack];
+    [SLVoicePack setOneShotPending:YES];
     [SLVoicePack setEnabled:YES];
-    [SLVoicePack setOriginalMode:NO];   // v0.4.36：选包就是退出原声
     [self.tableView reloadData];
-    SLRefreshFloatButton();   // v0.4.34：胶囊上显示的包名跟着换
-    SLPackPrewarm();          // v0.4.34：后台先把 PCM 解好，录音时不用现等
-    NSString *msg = [SLVoicePack isAutoReplaceEnabled]
-        ? [NSString stringWithFormat:@"已选中「%@」· 按住说话直接发它", pack[@"name"] ?: @""]
-        : [NSString stringWithFormat:@"已选中「%@」· 发「%@」发出", pack[@"name"] ?: @"", SLPackCmdValue()];
-    [AWECAUtils showToast:msg duration:2.0];
+    SLRefreshFloatButton();
+    SLPackPrewarm();
+    [AWECAUtils showToast:[NSString stringWithFormat:@"已装好「%@」· 下一条语音发它", pack[@"name"] ?: @""]
+                 duration:1.8];
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {

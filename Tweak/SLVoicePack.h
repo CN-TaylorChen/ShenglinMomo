@@ -27,17 +27,14 @@
 
 + (BOOL)isEnabled;
 + (void)setEnabled:(BOOL)on;
-/// v0.4.34：选中后按住说话就直接发这条语音包（不用再发口令）。默认开。
-+ (BOOL)isAutoReplaceEnabled;
-+ (void)setAutoReplaceEnabled:(BOOL)on;
+/// v0.4.40：一次性装填。点一条语音包 = 只为「下一条录音」装一发，
+/// 发送成功后自动清空、落回原声（原声就是「没装填」的自然状态）。
+/// 内存态：重启陌陌即回原声。
++ (BOOL)isOneShotPending;
++ (void)setOneShotPending:(BOOL)on;
 + (NSDictionary *)activePack;
 + (BOOL)isPackActive:(NSDictionary *)pack;
 + (void)selectPack:(NSDictionary *)pack;
-
-/// v0.4.36：「原声」——选了它就不替换，用自己录的声音。
-/// 和「语音包直发」是两件事：直发决定要不要自动替换，原声决定这一刻是不是不替换。
-+ (BOOL)isOriginalMode;
-+ (void)setOriginalMode:(BOOL)on;
 
 /// 导入整个文件夹（递归），返回新增条数
 + (NSInteger)importFolderAtURL:(NSURL *)url error:(NSString **)err;
