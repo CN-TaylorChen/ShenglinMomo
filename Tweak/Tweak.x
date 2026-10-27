@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.22"
+#define SLVersion @"0.4.23"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -2401,17 +2401,76 @@ static void SLInstallActionProbe(void) {
     SLRegisterMethod([UIApplication class], sel, (IMP)SLAppSendActionHook);
 }
 
-// v0.4.22：小宇宙 sendContent: 探针。CENSUS 证实 MDChatUniverseHandler 有 sendContent:，
-// 它可能就是私聊真正的发送入口（inputBar.sendText 只处理表情那条）。先只记录不拦截，
-// 确认命中口令后再决定是否接管。
-static void SLUniverseContentProbe(id self, SEL _cmd, id arg) {
-    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
-    NSString *t = SLTextFromArgument(arg);
-    if (t.length && SLTextHasAnyCommand(t)) {
-        SLLog(@"UNIV sendContent: 命中口令 argClass=%@ text=%@（仅记录，不拦截）",
-              NSStringFromClass([arg class]), SLShorten(t, 40));
+// v0.4.23：小宇宙 sendContent: 正式接管（0.4.22 探针实测确认它就是私聊发送入口）。
+// 坑：发送时刻拿到的条目对象，其 text 字段往往只剩「正文」，口令已被上层剥掉，
+// 所以不能只读 text —— SLCommandTextIn 会把对象上的字符串字段全扫一遍，捞出带口令的那份。
+static NSString *SLCommandTextIn(id obj) {
+    if (!obj) return nil;
+    if ([obj isKindOfClass:[NSString class]]) {
+        return SLTextHasAnyCommand((NSString *)obj) ? (NSString *)obj : nil;
     }
-    if (orig) orig(self, _cmd, arg);
+    NSMutableArray *names = [NSMutableArray arrayWithObjects:
+        @"text", @"textv2", @"content", @"originText", @"rawText", @"inputText",
+        @"msgContent", @"messageText", @"body", @"instantMessageText", @"msg", nil];
+    unsigned int pc = 0;
+    objc_property_t *props = class_copyPropertyList([obj class], &pc);
+    for (unsigned int i = 0; i < pc; i++) {
+        const char *nm = property_getName(props[i]);
+        if (nm) [names addObject:[NSString stringWithUTF8String:nm]];
+    }
+    if (props) free(props);
+    for (NSString *name in names) {
+        SEL s = NSSelectorFromString(name);
+        id v = nil;
+        @try { if ([obj respondsToSelector:s]) v = ((id (*)(id, SEL))objc_msgSend)(obj, s); } @catch (NSException *e) { v = nil; }
+        if (![v isKindOfClass:[NSString class]] || ![v length]) {
+            @try { v = [obj valueForKey:name]; } @catch (NSException *e) { v = nil; }
+        }
+        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] && SLTextHasAnyCommand((NSString *)v)) {
+            return (NSString *)v;
+        }
+    }
+    return nil;
+}
+
+static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
+    if (orig == NULL) return;
+
+    NSString *shown = SLTextFromArgument(arg);
+    NSString *full = SLCommandTextIn(arg);
+
+    if (!SLIsEnabled() || !full.length) {
+        static int quiet = 0;
+        if (!full.length && shown.length && quiet < 20) {
+            quiet++;
+            SLLog(@"UNIV sendContent: 无口令，原样发送 text=%@", SLShorten(shown, 30));
+        }
+        orig(self, _cmd, arg);
+        return;
+    }
+
+    // #yyb：直接发语音包，不联网合成
+    if (SLHasPrefixCommand(full, SLPackCommand())) {
+        if (!SLClaimText(full)) { SLLog(@"UNIV sendContent yyb duplicate ignored"); return; }
+        SLLog(@"yyb hit via %@ -sendContent:", NSStringFromClass([self class]));
+        if (SLArmPackNow()) SLClearInputBars();
+        return;
+    }
+    if (!SLTextHasCommand(full)) { orig(self, _cmd, arg); return; }
+    if (!SLClaimText(full)) { SLLog(@"UNIV sendContent duplicate ignored"); return; }
+
+    NSString *content = SLTextAfterCommand(full);
+    if (!content.length) {
+        [AWECAUtils showToast:[NSString stringWithFormat:@"用法：%@ 要转成语音的话", SLCommand()] duration:2.5];
+        orig(self, _cmd, arg);
+        return;
+    }
+
+    SLLog(@"#tts hit via %@ -sendContent:, text=%@", NSStringFromClass([self class]), SLShorten(full, 40));
+    // 拦下文字、装填 AI 语音；只有合成失败才退回原样发送
+    SLArmTTS(self, content, ^{ orig(self, _cmd, arg); });
+    SLClearInputBars();
 }
 
 static void SLInstallHooks(void) {
@@ -2439,7 +2498,7 @@ static void SLInstallHooks(void) {
     SLInstallAudioRecordHook(SLClassByName("MDChatSingleHandler"));
     SLInstallAudioRecordHook(SLClassByName("MDChatBaseHander"));
     SLInstallAudioRecordHook(SLClassByName("MDChatUniverseHandler"));
-    // v0.4.22：小宇宙 handler 诊断（只打一次）+ sendContent: 探针
+    // v0.4.23：小宇宙 handler 诊断（只打一次）+ sendContent: 正式接管
     {
         Class uh = SLClassByName("MDChatUniverseHandler");
         static BOOL loggedUH = NO;
@@ -2455,7 +2514,8 @@ static void SLInstallHooks(void) {
                 SLLog(@"UNIV-HANDLER 取不到 MDChatUniverseHandler（NSClassFromString 与运行时表都没有）");
             }
         }
-        if (uh) SLInstallOneObjectHook(uh, NSSelectorFromString(@"sendContent:"), (IMP)SLUniverseContentProbe);
+        SLLog(@"UNIV 口令 cmd=%@ pack=%@", SLCommand(), SLPackCommand());
+        if (uh) SLInstallOneObjectHook(uh, NSSelectorFromString(@"sendContent:"), (IMP)SLUniverseContentHook);
     }
     // 录音机临时路径（拿得到就直接命中真实录音文件）
     SLInstallTempPathHook(NSClassFromString(@"MDAudioRecorder"));

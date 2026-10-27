@@ -6,3 +6,6 @@ packages/
 *.dylib
 *.zip
 .DS_Store
+
+# 本地交付产物目录
+deliveries/
