@@ -12,6 +12,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Precheck (lint, fails fast before downloading Theos)
+        run: python3 precheck.py --skip-version
+
+      - name: Cache AMR-NB xcframework
+        uses: actions/cache@v4
+        with:
+          path: vendor/amr_xcf
+          key: amrnb-xcframework-v0.1.6
+
       - name: Set up Theos
         uses: Randomblock1/theos-action@v1
         with:
@@ -22,8 +31,10 @@ jobs:
         run: |
           set -e
           mkdir -p vendor/amr/lib vendor/amr_xcf
-          curl -sSL -o vendor/amr_xcf/amrnb.zip \
-            https://github.com/feuvan/opencore-amr-iOS/releases/download/v0.1.6/opencore-amrnb.xcframework.zip
+          if [ ! -f vendor/amr_xcf/amrnb.zip ]; then
+            curl -sSL -o vendor/amr_xcf/amrnb.zip \
+              https://github.com/feuvan/opencore-amr-iOS/releases/download/v0.1.6/opencore-amrnb.xcframework.zip
+          fi
           unzip -q -o vendor/amr_xcf/amrnb.zip -d vendor/amr_xcf
           find vendor/amr_xcf -maxdepth 3 \( -type d -o -type f \) | head -n 40
           # 只取 iOS(真机) 那一份：排除 simulator / macos / catalyst
