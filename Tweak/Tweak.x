@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.24"
+#define SLVersion @"0.4.25"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -2444,11 +2444,83 @@ static NSString *SLCommandTextIn(id obj) {
     return nil;
 }
 
+// v0.4.25：小宇宙语音气泡秒数对齐。
+// 小宇宙不发 sendAudioMessage:audioTime:audioFileSize:，发送时只给一个 MDSendContentItem，
+// 秒数写在它的 audioSecs 上 —— 实测单位是 0.1 秒（和陌陌 body 里的 audiotime 一致）：
+//   AI 2.24s + 录音尾巴 0.37s -> audioSecs=26（2.6 秒）；AI 0.94s + 0.32s -> 13（1.3 秒）
+// 也就是说陌陌按「本次录音总共写进文件的时长」填，AI 语音比它短，气泡就偏长、和实际播放对不上。
+// 这里改成 AI 真正喂进编码器的时长，跟普通聊天那条路径（AUDIO-SEND 改 audiotime）保持一致。
+static BOOL SLUniverseFixAudioDuration(id item) {
+    if (!item || !gSLTTSAudioPath || !gSLBusFed) return NO;
+    // 只处理音频 content：没有 audioUUID 的（文本/图片/表情）直接跳过
+    NSString *uuid = SLStringGetter(item, @"audioUUID");
+    if (!uuid.length) return NO;
+
+    SEL setSel = NSSelectorFromString(@"setAudioSecs:");
+    if (![item respondsToSelector:setSel]) return NO;
+    Method sm = class_getInstanceMethod([item class], setSel);
+    if (!sm) return NO;
+
+    double useDur = SLFedDuration();
+    if (useDur < 0.05) useDur = gSLTTSAudioDur;
+    if (useDur <= 0.05) return NO;
+    long long tenths = (long long)llround(useDur * 10.0);   // 0.1 秒单位
+    if (tenths < 1) tenths = 1;
+
+    // 读旧值只做日志（类型不对就跳过，绝不错位调用 —— 0.4.23 就是踩在这上面崩的）
+    unsigned long long oldSecs = 0;
+    BOOL hasOld = NO;
+    SEL getSel = NSSelectorFromString(@"audioSecs");
+    if ([item respondsToSelector:getSel]) {
+        Method gm = class_getInstanceMethod([item class], getSel);
+        if (gm) {
+            char rt[8] = {0};
+            method_getReturnType(gm, rt, sizeof(rt));
+            if (rt[0] == 'Q' || rt[0] == 'q' || rt[0] == 'I' || rt[0] == 'i') {
+                @try {
+                    oldSecs = ((unsigned long long (*)(id, SEL))objc_msgSend)(item, getSel);
+                    hasOld = YES;
+                } @catch (NSException *e) { }
+            }
+        }
+    }
+
+    // setter 的入参类型先确认：整数就直接传，对象就包成 NSNumber，其余一律不动
+    char at[8] = {0};
+    method_getArgumentType(sm, 2, at, sizeof(at));
+    @try {
+        if (at[0] == 'Q' || at[0] == 'q' || at[0] == 'I' || at[0] == 'i') {
+            ((void (*)(id, SEL, unsigned long long))objc_msgSend)(item, setSel, (unsigned long long)tenths);
+        } else if (at[0] == '@') {
+            ((void (*)(id, SEL, id))objc_msgSend)(item, setSel, @(tenths));
+        } else {
+            SLLog(@"UNIV-AUDIO audioSecs setter 类型 %s，跳过", at);
+            return NO;
+        }
+    } @catch (NSException *e) {
+        SLLog(@"UNIV-AUDIO 设置 audioSecs 异常 %@", e);
+        return NO;
+    }
+
+    if (hasOld) {
+        SLLog(@"UNIV-AUDIO audioSecs %llu -> %lld（AI 实际 %.2f 秒）uuid=%@",
+              oldSecs, tenths, useDur, uuid);
+    } else {
+        SLLog(@"UNIV-AUDIO audioSecs -> %lld（AI 实际 %.2f 秒）uuid=%@",
+              tenths, useDur, uuid);
+    }
+    return YES;
+}
+
 static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
     void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
     if (orig == NULL) return;
 
     if (!SLIsEnabled()) { orig(self, _cmd, arg); return; }
+
+    // v0.4.25：语音消息（content 无文本、带 audioUUID）先把气泡秒数改成 AI 语音的真实时长。
+    // 必须在「无文本直接透传」之前，否则永远走不到这里。
+    SLUniverseFixAudioDuration(arg);
 
     NSString *shown = SLTextFromArgument(arg);
     // 音频 / 图片 / 表情这类 content 没有文本：立刻透传，绝不进字段扫描。
