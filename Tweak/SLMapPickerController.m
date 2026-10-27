@@ -154,7 +154,7 @@ static UIColor *SLHairline(void) {
 - (CGPoint)sl_pinTipPoint;
 - (void)sl_alignPinToCoord:(CLLocationCoordinate2D)coord;
 - (void)sl_focusCoord:(CLLocationCoordinate2D)coord meters:(double)meters;
-- (void)sl_quickTap:(UIButton *)btn;
+- (void)sl_quickSlotTap:(UIButton *)btn;
 - (void)sl_refreshCoordinate;
 - (void)sl_refreshStar;
 - (CLLocationCoordinate2D)sl_refCoord;
