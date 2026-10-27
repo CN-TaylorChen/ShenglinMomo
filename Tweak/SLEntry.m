@@ -199,6 +199,8 @@ static UIImage *SLTransparentImage(void) {
 - (void)sl_loadIcon;
 - (void)sl_applyState:(SLFloatState)state;
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated;
+/// v0.4.45：回到前台重挂呼吸光晕（后台期间动画会被系统整条移除）
+- (void)sl_restartHalo;
 @end
 
 // v0.4.36：胶囊下方展开的语音包列表（点胶囊右端才出现）。
@@ -361,7 +363,7 @@ static UIImage *SLTransparentImage(void) {
     UIView *_sep;
     UILabel *_name;
     UIButton *_menuBtn;
-    // v0.4.44：中间文字区热区（展开态点它收球）
+    // v0.4.45：中间文字区热区 —— 只接触摸，点它不做任何事
     UIButton *_midBtn;
     UIImageView *_chev;
     UIButton *_homeBtn;
@@ -458,11 +460,13 @@ static UIImage *SLTransparentImage(void) {
         _name.userInteractionEnabled = NO;
         [self addSubview:_name];
 
-        // 右端箭头是独立按钮：只有它弹语音包列表，胶囊其他位置点了就收回成球
+        // v0.4.45：中间文字区只是一块「接住触摸」的空壳，点它不做任何事。
+        // 它存在的唯一意义：别让触摸落到 self（本身是 UIButton）上，
+        // 否则中间又会被 self 的 touchUpInside 收走。收球只认图标那一端。
+        // 按住拖动照样能拖 —— 手势识别器挂在 self 上，子视图接走触摸不影响它。
         _midBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         _midBtn.frame = CGRectZero;
         _midBtn.hidden = YES;
-        [_midBtn addTarget:self action:@selector(sl_tap) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_midBtn];
 
         _menuBtn = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -510,6 +514,18 @@ static UIImage *SLTransparentImage(void) {
         lp.minimumPressDuration = 0.45;
         lp.allowableMovement = 12;   // 拖动换位置时不会误触
         [self addGestureRecognizer:lp];
+
+        // v0.4.45：进后台时 CoreAnimation 会把光晕那两条无限循环动画整条摘掉，
+        // 图层 opacity 回到 0 —— 切回来就是「呼吸灯没了」，点一下图标（重设状态）才回来。
+        // 回到前台必须自己重挂一次。
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(sl_restartHalo)
+                                                     name:UIApplicationDidBecomeActiveNotification
+                                                   object:nil];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(sl_restartHalo)
+                                                     name:UIApplicationWillEnterForegroundNotification
+                                                   object:nil];
 
         [self sl_loadIcon];
         [self sl_applyState:SLFloatStateIdle];
@@ -620,6 +636,21 @@ static UIImage *SLTransparentImage(void) {
     out.repeatCount = HUGE_VALF;
     out.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
     [_haloOut addAnimation:out forKey:@"breath"];
+}
+
+// v0.4.45：回到前台后重挂呼吸光晕。
+// 进后台时系统会把图层上的动画整条移除（opacity 回落到 0），所以切回来灯就灭了；
+// 这一路只有「状态变化」或「点一下球」才会重设，用户看着就是「要点一下才有」。
+- (void)sl_restartHalo {
+    if (self.window == nil) return;
+    // 路径可能已经跟着展开 / 收起变过，先按当前 bounds 重算一遍再挂动画
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+    [self sl_startBreath:self.slState];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
 - (void)sl_playPulse:(UIColor *)color {
@@ -767,13 +798,9 @@ static UIImage *SLTransparentImage(void) {
 - (void)sl_tap {
     // 长按刚结束时个别机型还会补一次 touchUpInside，这里挡掉，免得胶囊一展开就被收回
     if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.5) return;
-    // v0.4.43：展开态点中间文字区 = 收回成球。
-    // 0.4.41 为了把中间区让给拖动，这里直接 return，结果展开后除了左端 48pt 再也收不回去 ——
-    // 轻点和拖动不冲突（pan 一旦识别，系统会取消点击），所以两个都能要。
-    if (self.slExpanded) {
-        [self sl_expand:NO animated:YES];
-        return;
-    }
+    // v0.4.45：展开态点中间不做任何事 —— 用户要的是「点名字毫无反应，只有按住能拖」。
+    // 收回成球只认图标那一端（_homeBtn → sl_homeTap）。
+    if (self.slExpanded) return;
     // 关掉「启用语音包」后点球不展开，也不弹任何提示：想让球消失是用户的选择，
     // 不需要每次点都被告知一遍怎么打开设置。
     if (![SLVoicePack isEnabled]) return;
@@ -851,12 +878,18 @@ static UIImage *SLTransparentImage(void) {
 
     // v0.4.40：两端各一块 48pt 热区，中间 100pt 给名字（居中）。
     // 镜像时两端互换、中间不动 —— 图标端跟着球走，箭头端永远在远端。
-    _sep.frame = CGRectMake(SLMX(48.0, 0.5), (h - 18.0) / 2.0, 0.5, 18.0);
-    _name.frame = CGRectMake(48.0, 0, MAX(0, w - 96.0), h);
-    // v0.4.44：中间这块必须有个真的按钮接走触摸。
-    // 之前只靠 self（UIButton）的 touchUpInside，但展开态中间没有任何子控件，
-    // hitTest 落在自绘图层视图上，按钮 tracking 不会开始 —— 点名字就永远没反应，
-    // 只有左端 48pt 的 _homeBtn 能收回。现在中间区自己是一块热区。
+    // v0.4.45：分隔线从 48 右移到 57。
+    // 自定义图片在展开态铺满左端那一整个 48pt 圆（跟球态同尺寸，切换不缩水），
+    // 线正好压在 48 上就等于贴着图片边缘，看着像图片被切了一刀。
+    // 名字区跟着线一起让开（下面几行），文字在「线 → 箭头」之间居中。
+    _sep.frame = CGRectMake(SLMX(57.0, 0.5), (h - 18.0) / 2.0, 0.5, 18.0);
+    {
+        CGFloat nx = mir ? 48.0 : 57.0;
+        CGFloat nw = MAX(0.0, w - nx - (mir ? 57.0 : 48.0));
+        _name.frame = CGRectMake(nx, 0, nw, h);
+    }
+    // v0.4.45：中间这块必须有个真的控件接走触摸，否则触摸落到 self 上会被收走。
+    // 这里只接触摸、不挂 target —— 点名字什么都不该发生。
     _midBtn.frame = exp ? CGRectMake(48.0, 0, MAX(0, w - 96.0), h) : CGRectZero;
     _menuBtn.frame = exp ? CGRectMake(SLMX(w - 48.0, 48.0), 0, 48.0, h) : CGRectZero;
     _chev.frame = CGRectMake(18.5, (h - 11.0) / 2.0, 11.0, 11.0);

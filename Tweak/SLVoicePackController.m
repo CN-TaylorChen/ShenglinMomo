@@ -34,10 +34,6 @@ static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignHeader(text, x, width);
 }
 
-static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
-    return SLAlignFooter(text, x, width);
-}
-
 @interface SLVoicePackController () <UIDocumentPickerDelegate, AVAudioPlayerDelegate>
 @property (nonatomic, copy) NSString *folder;                      // nil = 一级页
 @property (nonatomic, strong) NSArray<NSString *> *folderList;     // 一级页：不含「未分组」
@@ -582,33 +578,17 @@ static UIImage *SLPauseGlyph(void) {
     return [self sl_headerTextForSection:section].length ? 22 : 8;
 }
 
-- (NSString *)sl_footerTextForSection:(NSInteger)section {
-    // v0.4.43：说明压成一行。这个页面只有一件事要做（挑一条装一发），
-    // 原来的两行说明书把列表挤下去半屏。
-    if (!self.isRoot) return section == 0 ? @"点一行装一发 · 再点一次撤销" : nil;
-    if (section == 0) return @"点一条装一发 · 发完自动回原声";
+- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)section {
+    // v0.4.45：说明全删（这个页面只做一件事：挑一条装一发）。
+    // 以后加功能也不补说明 —— 能靠界面本身说清的，就别写小字。
+    (void)tv; (void)section;
     return nil;
 }
 
-- (UIView *)tableView:(UITableView *)tv viewForFooterInSection:(NSInteger)section {
-    NSString *t = [self sl_footerTextForSection:section];
-    if (!t.length) return nil;
-    return SLPackFooter(t, [self sl_leadingForTableView:tv], tv.bounds.size.width);
-}
-
 - (CGFloat)tableView:(UITableView *)tv heightForFooterInSection:(NSInteger)section {
-    NSString *t = [self sl_footerTextForSection:section];
-    if (!t.length) return 0;
-    // 固定留出「左基线 36 + 右边距 16 + 余量」，不在这里调测量函数：
-    // 测量一旦走 rectForRow 就和本方法互相递归。宁可多留一点高度，也不能压字。
-    CGFloat w = tv.bounds.size.width - 68;
-    if (w <= 0) return UITableViewAutomaticDimension;
-    CGRect r = [t boundingRectWithSize:CGSizeMake(w, CGFLOAT_MAX)
-                               options:NSStringDrawingUsesLineFragmentOrigin
-                            attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
-                               context:nil];
-    // v0.4.9.9：footer 内边距统一为「上 5 + 下 7」（跟设置页同一个盒子），这里补足 14
-    return ceil(r.size.height) + 14;
+    // footer 现在只当「分组间距」用：返回 0 会让相邻分组贴在一起，最后一组不需要
+    NSInteger n = [self numberOfSectionsInTableView:tv];
+    return (section + 1 < n) ? 16.0 : 0.0;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
