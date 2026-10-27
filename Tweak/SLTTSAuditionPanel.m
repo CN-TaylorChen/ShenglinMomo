@@ -263,7 +263,6 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     use.layer.cornerRadius = 14.0;
     use.layer.cornerCurve = kCACornerCurveContinuous;
     [use setImage:[UIImage systemImageNamed:@"mic.fill"] forState:UIControlStateNormal];
-    use.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 6);
     use.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     [use addTarget:self action:@selector(sl_useTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:use];
@@ -304,10 +303,10 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
         [badge.widthAnchor constraintEqualToConstant:52.0],
         [badge.heightAnchor constraintEqualToConstant:52.0],
 
-        [icon.centerXAnchor constraintEqualToAnchor:badge.centerXAnchor],
-        [icon.centerYAnchor constraintEqualToAnchor:badge.centerYAnchor],
-        [icon.widthAnchor constraintEqualToConstant:26.0],
-        [icon.heightAnchor constraintEqualToConstant:26.0],
+        [wave.centerXAnchor constraintEqualToAnchor:badge.centerXAnchor],
+        [wave.centerYAnchor constraintEqualToAnchor:badge.centerYAnchor],
+        [wave.widthAnchor constraintEqualToConstant:totalW],
+        [wave.heightAnchor constraintEqualToConstant:26.0],
 
         [title.topAnchor constraintEqualToAnchor:badge.bottomAnchor constant:12.0],
         [title.leadingAnchor constraintEqualToAnchor:g.leadingAnchor],
