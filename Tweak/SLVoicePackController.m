@@ -52,10 +52,11 @@ static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
 //   · 右侧试听键改矢量三角 —— 原来用字体里的 ▶ 字符，12pt 下就是一个歪的实心方块；
 //   · 行本身改成半透明玻璃片，跟设置页、浮窗同材质。
 static UIColor *SLPackGlassColor(void) {
+    // v0.4.46：跟设置页同一个数（0.34 / 0.06），两级页面透出来的浓度要一致。
     return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
         return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-            ? [UIColor colorWithWhite:1.0 alpha:0.08]
-            : [UIColor colorWithWhite:1.0 alpha:0.62];
+            ? [UIColor colorWithWhite:1.0 alpha:0.06]
+            : [UIColor colorWithWhite:1.0 alpha:0.34];
     }];
 }
 

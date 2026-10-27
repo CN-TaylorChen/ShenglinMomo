@@ -201,6 +201,9 @@ static UIImage *SLTransparentImage(void) {
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated;
 /// v0.4.45：回到前台重挂呼吸光晕（后台期间动画会被系统整条移除）
 - (void)sl_restartHalo;
+/// v0.4.46：拖动中越过中线翻面 / 松手贴边
+- (void)sl_updateMirrorDuringDrag;
+- (void)sl_settlePillToEdge;
 @end
 
 // v0.4.36：胶囊下方展开的语音包列表（点胶囊右端才出现）。
@@ -413,13 +416,18 @@ static UIImage *SLTransparentImage(void) {
         // 右端会留下一块白圆残影（截图里那个白圆片就是它）。
         _glassHost = [[UIView alloc] initWithFrame:CGRectZero];
         _glassHost.userInteractionEnabled = NO;
-        _glassHost.layer.borderWidth = 0.5;
-        _glassHost.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.5].CGColor;
+        // v0.4.46：材质变透之后，玻璃的「存在感」全靠这圈高光 —— 0.5/0.5 太淡，
+        // 透到背景里就分不出边界在哪。加粗到 0.8、提到 0.62，像一层薄玻璃的边缘反光。
+        _glassHost.layer.borderWidth = 0.8;
+        _glassHost.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.62].CGColor;
         _glassMask = [CAShapeLayer layer];
         _glassHost.layer.mask = _glassMask;
         [self addSubview:_glassHost];
 
-        _chrome = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+        // v0.4.46：SystemMaterial → SystemUltraThinMaterial。前者在 iOS 15 上已经相当「实」，
+        // 铺在聊天背景上基本看不到背后内容；换成超薄材质后是真正的玻璃感（透 + 轻模糊），
+        // 玻璃的边界靠 _glassHost 那圈 0.8pt 高光勾出来。
+        _chrome = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
         _chrome.frame = CGRectMake(0, 0, SLPillMaxW, SLBallSide);
         [_glassHost addSubview:_chrome];
 
@@ -742,8 +750,9 @@ static UIImage *SLTransparentImage(void) {
     if (!sv) return;
     CGSize sz = sv.bounds.size;
 
-    // v0.4.41：展开态也能拖 —— 按住中间文字那一条拖整条（两端 48pt 是按钮，不参与拖动）。
-    // 拖动时不做吸附：胶囊本身就长，硬吸边只会让它一半出屏；收起成球时再按球位置存。
+    // v0.4.46：展开态拖动 = 「跟手 + 翻面 + 贴边」三件事。
+    // v0.4.41 那版故意不吸附、且镜像只在展开那一刻算一次，结果把胶囊拖到另一边时
+    // 内部布局一动不动 —— 看着就是「不贴边、不镜像」。
     if (self.slExpanded) {
         if (g.state == UIGestureRecognizerStateChanged) {
             CGPoint t = [g translationInView:sv];
@@ -760,14 +769,11 @@ static UIImage *SLTransparentImage(void) {
             if (f.origin.y > maxY) f.origin.y = maxY;
             self.frame = f;
             [g setTranslation:CGPointZero inView:sv];
-            [SLPackMenu sl_repositionForAnchor:self];   // 打开的列表跟着走
+            [self sl_updateMirrorDuringDrag];            // 越过中线就翻面
+            [SLPackMenu sl_repositionForAnchor:self];    // 打开的列表跟着走
         } else if (g.state == UIGestureRecognizerStateEnded
                    || g.state == UIGestureRecognizerStateCancelled) {
-            // 只存「球位」：图标那一端收起来后球就落在那里
-            CGPoint c = CGPointMake(_mirrored ? (CGRectGetMaxX(self.frame) - SLBallSide / 2.0)
-                                              : (CGRectGetMinX(self.frame) + SLBallSide / 2.0),
-                                    self.center.y);
-            SLStoreFloatPos(SLClampFloatPos(c, sz), sz);
+            [self sl_settlePillToEdge];                  // 松手贴到最近那条边
         }
         return;
     }
@@ -793,6 +799,63 @@ static UIImage *SLTransparentImage(void) {
                          completion:nil];
         SLStoreFloatPos(c, sz);
     }
+}
+
+// v0.4.46：拖动中翻面。以屏幕中线为界，带 10pt 滞后 ——
+// 没有滞回的话，胶囊中心在准线上时手指的微小抖动会让内部布局左右乱跳。
+- (void)sl_updateMirrorDuringDrag {
+    UIView *sv = self.superview;
+    if (!sv) return;
+    CGFloat mid = CGRectGetMidX(sv.bounds);
+    CGFloat cx = CGRectGetMidX(self.frame);
+    static const CGFloat kHyst = 10.0;
+
+    BOOL want = _mirrored;
+    if (!_mirrored && cx > mid + kHyst) want = YES;
+    else if (_mirrored && cx < mid - kHyst) want = NO;
+    if (want == _mirrored) return;
+
+    _mirrored = want;
+    // 直接换布局，不做插值：玻璃层跟着重排会留残影，而拖动时手指本身就在动，
+    // 瞬间换边看着是「翻了个面」，比插值更像一体的 196pt 条。
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+}
+
+// v0.4.46：松手贴边。图标那一端就是收起后球的位置，所以贴哪条边由它决定 ——
+// 图标端在左半屏就贴左、在右半屏就贴右；镜像状态同时由贴边方向反推。
+// 垂直方向不吸附（上下位置保持用户放的样子），只把新球位记下来。
+- (void)sl_settlePillToEdge {
+    UIView *sv = self.superview;
+    if (!sv) return;
+    CGSize sz = sv.bounds.size;
+    CGRect f = self.frame;
+    static const CGFloat kEdgePad = 6.0;
+
+    CGFloat iconX = _mirrored ? (CGRectGetMaxX(f) - SLBallSide / 2.0)
+                              : (CGRectGetMinX(f) + SLBallSide / 2.0);
+    BOOL toLeft = (iconX < sz.width / 2.0);
+    _mirrored = !toLeft;
+    // 先把内部翻好再滑动：两步都在一帧里完成，但顺序上「先确定面孔再挪位置」，
+    // 不会出现滑到一半内部还在旧朝向。
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+
+    CGRect nf = f;
+    nf.origin.x = toLeft ? kEdgePad : (sz.width - kEdgePad - f.size.width);
+    if (nf.origin.x < kEdgePad) nf.origin.x = kEdgePad;   // 胶囊比屏还宽时只保证左缘不越界
+
+    [UIView animateWithDuration:0.26 delay:0
+         usingSpringWithDamping:0.86 initialSpringVelocity:0
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ self.frame = nf; }
+                     completion:nil];
+
+    CGPoint c = CGPointMake(_mirrored ? (CGRectGetMaxX(nf) - SLBallSide / 2.0)
+                                      : (CGRectGetMinX(nf) + SLBallSide / 2.0),
+                            CGRectGetMidY(nf));
+    SLStoreFloatPos(SLClampFloatPos(c, sz), sz);
+    [SLPackMenu sl_repositionForAnchor:self];
 }
 
 - (void)sl_tap {
@@ -1038,18 +1101,21 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:22.0].CGPath;
     [self addSubview:_card];
 
-    _blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    // v0.4.46：跟胶囊同一套超薄材质，下来时不会「突然变实」。
+    _blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     _blur.frame = _card.bounds;
     _blur.layer.cornerRadius = 22.0;
     _blur.layer.cornerCurve = kCACornerCurveContinuous;
     _blur.clipsToBounds = YES;
     [_card addSubview:_blur];
 
-    _hair = [[UIView alloc] initWithFrame:CGRectInset(_card.bounds, 0.5, 0.5)];
-    _hair.layer.cornerRadius = 21.5;
+    // v0.4.46：跟胶囊边缘同一个规格（0.8pt / 0.6）—— 材质透下来之后，
+    // 这圈高光是「玻璃」和「背景」之间唯一的界线。
+    _hair = [[UIView alloc] initWithFrame:CGRectInset(_card.bounds, 0.4, 0.4)];
+    _hair.layer.cornerRadius = 21.6;
     _hair.layer.cornerCurve = kCACornerCurveContinuous;
-    _hair.layer.borderWidth = 0.5;
-    _hair.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.45].CGColor;
+    _hair.layer.borderWidth = 0.8;
+    _hair.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.6].CGColor;
     _hair.userInteractionEnabled = NO;
     [_card addSubview:_hair];
 
@@ -1205,7 +1271,7 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     CGFloat cardH = MIN(y, kRowH * 5.0) + 12.0;
     _card.frame = [self sl_cardFrameForAnchor:_anchor width:w height:cardH];
     _blur.frame = _card.bounds;
-    _hair.frame = CGRectInset(_card.bounds, 0.5, 0.5);
+    _hair.frame = CGRectInset(_card.bounds, 0.4, 0.4);
     _list.frame = CGRectMake(0, 6, w, cardH - 12.0);
     _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:22.0].CGPath;
 }
@@ -1386,7 +1452,8 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
 
     // 背板：轻压暗，点空白处收起。不做全黑，背后的聊天内容还要看得见
     self.dim = [[UIControl alloc] initWithFrame:CGRectZero];
-    self.dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.16];
+    // v0.4.46：0.16 → 0.10。卡片本身变透了，压暗层太重会把透出来的背景压成一片灰。
+    self.dim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.10];
     [self.dim addTarget:self action:@selector(sl_dismiss) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.dim];
 
@@ -1396,9 +1463,21 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     self.cardWrap.layer.shadowOpacity = 0.22;
     self.cardWrap.layer.shadowRadius = 24;
     self.cardWrap.layer.shadowOffset = CGSizeMake(0, 10);
+    // v0.4.46：材质换成超薄之后整体更透了，玻璃的「厚度」靠这圈边缘高光交代。
+    // 0.8pt 而不是 1pt：再粗就成了画框，不像玻璃边。深色下用低透白，否则在暗背景上会发灰。
+    self.cardWrap.layer.cornerRadius = 26.0;
+    self.cardWrap.layer.cornerCurve = kCACornerCurveContinuous;
+    self.cardWrap.layer.borderWidth = 0.8;
+    self.cardWrap.layer.borderColor =
+        [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+            return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+                ? [UIColor colorWithWhite:1.0 alpha:0.16]
+                : [UIColor colorWithWhite:1.0 alpha:0.58];
+        }].CGColor;
     [self.view addSubview:self.cardWrap];
 
-    self.blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    // v0.4.46：设置浮窗同样换成超薄材质 —— 三页共用这个容器，一处改完全透。
+    self.blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     self.blur.layer.cornerRadius = 26;
     self.blur.layer.cornerCurve = kCACornerCurveContinuous;
     self.blur.clipsToBounds = YES;
