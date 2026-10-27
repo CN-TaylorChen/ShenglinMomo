@@ -5,6 +5,7 @@
 #import "AWECAUtils.h"
 #import "SLLog.h"
 #import <PhotosUI/PhotosUI.h>
+#import <AVFoundation/AVFoundation.h>
 
 // ===================== 悬浮球图标 =====================
 // v0.4.33：默认图标换成「双声波」品牌图形（代码绘制，黑底 + 六根条：
@@ -176,24 +177,35 @@ static const CGFloat kSLPanelTopPad = 14.0;
 
 // v0.4.36：胶囊下方展开的语音包列表（点胶囊右端才出现）。
 // 挂在窗口上，和胶囊同一套毛玻璃；点一行即切换，点空白收起。
-@interface SLPackMenu : UIView
+@interface SLPackMenu : UIView <AVAudioPlayerDelegate>
 + (void)showFromAnchor:(UIView *)anchor;
 @end
 
 @interface SLPackMenuRow : UIControl
+@property (nonatomic, strong) UIButton *play;
 @property (nonatomic, strong) UIImageView *icon;
 @property (nonatomic, strong) UILabel *title;
-@property (nonatomic, strong) UIImageView *check;
+@property (nonatomic, strong) UIView *check;
 @end
 
 @implementation SLPackMenuRow
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
+        // v0.4.39：左侧那个「装饰图标」改成 30pt 圆形试听键。
+        // 它是子控件，自己接走触摸，点它只试听、不选中；点名称那一侧才是切换。
+        _play = [UIButton buttonWithType:UIButtonTypeCustom];
+        _play.frame = CGRectZero;
+        _play.backgroundColor = [UIColor clearColor];
+        [self addSubview:_play];
+
         _icon = [[UIImageView alloc] initWithFrame:CGRectZero];
-        _icon.contentMode = UIViewContentModeScaleAspectFit;
+        _icon.contentMode = UIViewContentModeCenter;
+        _icon.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.10];
+        _icon.layer.cornerRadius = 15.0;
+        _icon.tintColor = [UIColor secondaryLabelColor];
         _icon.userInteractionEnabled = NO;
-        [self addSubview:_icon];
+        [_play addSubview:_icon];
 
         _title = [[UILabel alloc] initWithFrame:CGRectZero];
         _title.font = [UIFont systemFontOfSize:14.0];
@@ -202,9 +214,10 @@ static const CGFloat kSLPanelTopPad = 14.0;
         _title.userInteractionEnabled = NO;
         [self addSubview:_title];
 
-        _check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark"]];
-        _check.contentMode = UIViewContentModeScaleAspectFit;
-        _check.tintColor = [UIColor systemBlueColor];
+        // 选中标记从 14pt 对勾换成 8pt 蓝点：同宽列表里对勾太占地方，点更轻
+        _check = [[UIView alloc] initWithFrame:CGRectZero];
+        _check.backgroundColor = [UIColor systemBlueColor];
+        _check.layer.cornerRadius = 4.0;
         _check.hidden = YES;
         _check.userInteractionEnabled = NO;
         [self addSubview:_check];
@@ -216,11 +229,14 @@ static const CGFloat kSLPanelTopPad = 14.0;
     [super layoutSubviews];
     CGRect b = self.bounds;
     CGFloat h = CGRectGetHeight(b);
-    // v0.4.37：列表收窄到和胶囊同宽（196），左右内距跟着收紧，把宽度让给文件名
-    _icon.frame = CGRectMake(12, (h - 16.0) / 2.0, 16, 16);
-    _check.frame = CGRectMake(CGRectGetWidth(b) - 10 - 14, (h - 14.0) / 2.0, 14, 14);
-    CGFloat tw = CGRectGetMinX(_check.frame) - 8.0 - 36.0;
-    _title.frame = CGRectMake(36, 0, MAX(0, tw), h);
+    // v0.4.39：左内距 12 + 试听键 30 + 间距 8 → 文字从 50 起，右侧只留 8pt 蓝点
+    _play.frame = CGRectMake(0, 0, 48.0, h);
+    _icon.frame = CGRectMake(12.0, (h - 30.0) / 2.0, 30.0, 30.0);
+    _icon.layer.cornerRadius = 15.0;
+    CGFloat right = CGRectGetWidth(b) - 12.0;
+    _check.frame = CGRectMake(right - 8.0, (h - 8.0) / 2.0, 8.0, 8.0);
+    CGFloat tw = CGRectGetMinX(_check.frame) - 8.0 - 50.0;
+    _title.frame = CGRectMake(50.0, 0, MAX(0, tw), h);
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -242,6 +258,8 @@ static const CGFloat kSLPanelTopPad = 14.0;
     UILabel *_name;
     UIButton *_menuBtn;
     UIImageView *_chev;
+    UIButton *_homeBtn;
+    UIView *_homeHit;
     CAShapeLayer *_haloIn;
     CAShapeLayer *_haloOut;
     CAShapeLayer *_pulse;
@@ -340,6 +358,23 @@ static const CGFloat kSLPanelTopPad = 14.0;
         _chev.tintColor = [UIColor secondaryLabelColor];
         _chev.userInteractionEnabled = NO;
         [_menuBtn addSubview:_chev];
+
+        // v0.4.39：展开后只有左端这块 48pt 圆形热区能收回成球。
+        // 之前整个胶囊都挂了 touchUpInside，点名字中间也会"啪"一下缩回去。
+        _homeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        _homeBtn.frame = CGRectZero;
+        _homeBtn.hidden = YES;
+        [_homeBtn addTarget:self action:@selector(sl_homeTap) forControlEvents:UIControlEventTouchUpInside];
+        [_homeBtn addTarget:self action:@selector(sl_homeDown) forControlEvents:UIControlEventTouchDown];
+        [_homeBtn addTarget:self action:@selector(sl_homeUp)
+           forControlEvents:UIControlEventTouchUpOutside | UIControlEventTouchCancel];
+        [self addSubview:_homeBtn];
+
+        _homeHit = [[UIView alloc] initWithFrame:CGRectZero];
+        _homeHit.backgroundColor = [UIColor clearColor];
+        _homeHit.layer.cornerRadius = 24.0;
+        _homeHit.userInteractionEnabled = NO;
+        [_homeBtn addSubview:_homeHit];
 
         // 就绪小蓝点：状态常亮时一直在，提醒「这次说的是包里那条」
         _readyDot = [[UIView alloc] initWithFrame:CGRectZero];
@@ -545,8 +580,24 @@ static const CGFloat kSLPanelTopPad = 14.0;
 - (void)sl_tap {
     // 长按刚结束时个别机型还会补一次 touchUpInside，这里挡掉，免得胶囊一展开就被收回
     if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.5) return;
-    // 点球 → 胶囊；点胶囊（右端箭头除外，那个是独立按钮）→ 收回成球
-    [self sl_expand:!self.slExpanded animated:YES];
+    // v0.4.39：展开态不再"点哪都收回去"，收球只认左端热区（_homeBtn）。
+    // 球态时 _homeBtn 是隐藏的，所以点球仍然是展开。
+    if (self.slExpanded) return;
+    [self sl_expand:YES animated:YES];
+}
+
+- (void)sl_homeDown {
+    _homeHit.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.08];
+}
+
+- (void)sl_homeUp {
+    _homeHit.backgroundColor = [UIColor clearColor];
+}
+
+- (void)sl_homeTap {
+    _homeHit.backgroundColor = [UIColor clearColor];
+    if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.5) return;
+    [self sl_expand:NO animated:YES];
 }
 
 - (void)sl_menuTap {
@@ -578,29 +629,34 @@ static const CGFloat kSLPanelTopPad = 14.0;
     // 玻璃始终是最大尺寸，只靠 mask 露出当前形状，右对齐
     _chrome.frame = CGRectMake(w - SLPillMaxW, 0, SLPillMaxW, h);
 
-    _glyph.frame = exp ? CGRectMake(15.0, (h - 18.0) / 2.0, 18.0, 18.0)
+    // v0.4.39：左图标与球态同尺寸（22pt，不再缩水到 18），头像 32 → 42
+    _glyph.frame = exp ? CGRectMake(13.0, (h - 22.0) / 2.0, 22.0, 22.0)
                        : CGRectMake((w - 22.0) / 2.0, (h - 22.0) / 2.0, 22.0, 22.0);
     _glyph.hidden = (_thumb.hidden == NO) || (_emoji.hidden == NO);
-    CGFloat iconS = 32.0;
-    _thumb.frame = exp ? CGRectMake(8.0, (h - iconS) / 2.0, iconS, iconS) : b;
+    CGFloat iconS = 42.0;
+    _thumb.frame = exp ? CGRectMake(3.0, (h - iconS) / 2.0, iconS, iconS) : b;
     _thumb.layer.cornerRadius = MIN(CGRectGetWidth(_thumb.bounds), CGRectGetHeight(_thumb.bounds)) / 2.0;
     _emoji.font = [UIFont systemFontOfSize:(exp ? 17.0 : 22.0)];
-    _emoji.frame = exp ? CGRectMake(8.0, (h - iconS) / 2.0, iconS, iconS) : b;
+    _emoji.frame = exp ? CGRectMake(3.0, (h - iconS) / 2.0, iconS, iconS) : b;
 
     // v0.4.37：状态色铺满整条胶囊。原来展开态只盖左侧 48pt 圆，
     // 球是蓝的、胶囊还是白玻璃，中间像被切断。
     _tint.frame = b;
     _tint.layer.cornerRadius = h / 2.0;
 
-    _sep.frame = CGRectMake(47.0, (h - 18.0) / 2.0, 0.5, 18.0);
-    _name.frame = CGRectMake(56.0, 0, MAX(0, w - 56.0 - 46.0), h);
-    _menuBtn.frame = exp ? CGRectMake(w - 46.0, 0, 46.0, h) : CGRectZero;
-    _chev.frame = CGRectMake(30.0, (h - 11.0) / 2.0, 11.0, 11.0);
+    // v0.4.39：两端镜像 —— 左热区 48、右热区 48，箭头中心距右 24（= 左图标中心距左 24）
+    _sep.frame = CGRectMake(48.0, (h - 18.0) / 2.0, 0.5, 18.0);
+    _name.frame = CGRectMake(56.0, 0, MAX(0, w - 56.0 - 48.0), h);
+    _menuBtn.frame = exp ? CGRectMake(w - 48.0, 0, 48.0, h) : CGRectZero;
+    _chev.frame = CGRectMake(18.5, (h - 11.0) / 2.0, 11.0, 11.0);
+    _homeBtn.frame = exp ? CGRectMake(0, 0, 48.0, h) : CGRectZero;
+    _homeHit.frame = _homeBtn.bounds;
     _readyDot.frame = CGRectMake(w - 14.0, 3.0, 9.0, 9.0);
 
     _sep.hidden = !exp;
     _name.hidden = !exp;
     _menuBtn.hidden = !exp;
+    _homeBtn.hidden = !exp;
 
     // 光晕路径：胶囊就是「圆角 = 高一半」的矩形，球是它的特例
     _haloIn.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -2.5, -2.5)
@@ -620,6 +676,9 @@ static const CGFloat kSLPanelTopPad = 14.0;
     UIView *_card;
     UIVisualEffectView *_blur;
     NSArray<NSDictionary *> *_rows;
+    NSMutableArray<SLPackMenuRow *> *_rowViews;
+    AVAudioPlayer *_player;
+    NSInteger _playingRow;
 }
 
 + (void)showFromAnchor:(UIView *)anchor {
@@ -635,6 +694,7 @@ static const CGFloat kSLPanelTopPad = 14.0;
     self = [super initWithFrame:frame];
     if (self) {
         self.backgroundColor = [UIColor clearColor];
+        _playingRow = -1;
         _catcher = [[UIControl alloc] initWithFrame:self.bounds];
         _catcher.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         _catcher.backgroundColor = [UIColor clearColor];
@@ -652,9 +712,9 @@ static const CGFloat kSLPanelTopPad = 14.0;
     }
     _rows = rows;
 
-    // v0.4.37：列表宽度 = 胶囊宽度（方案 A，胶囊固定 196），右端严格对齐，
-    // 两条边共线；行高 44、圆角 22 更贴近胶囊的 24。
-    CGFloat rowH = 44.0;
+    // v0.4.39：行高 44 → 48，给左侧 30pt 圆形试听键留出上下各 9pt；
+    // 卡片与胶囊的间距 6 → 14（呼吸灯外圈是 7pt，留 6 会把光晕整圈盖住）。
+    CGFloat rowH = 48.0;
     NSUInteger visible = MIN(_rows.count, (NSUInteger)5);
 
     CGRect ar = [anchor convertRect:anchor.bounds toView:self];
@@ -666,10 +726,10 @@ static const CGFloat kSLPanelTopPad = 14.0;
     CGFloat winH = CGRectGetHeight(self.bounds);
     CGFloat x = CGRectGetMaxX(ar) - cardW;
     x = MAX(12.0, MIN(x, winW - 12.0 - cardW));
-    CGFloat y = CGRectGetMaxY(ar) + 6.0;
+    CGFloat y = CGRectGetMaxY(ar) + 14.0;
     CGFloat safeB = 0;
     if (@available(iOS 11.0, *)) safeB = self.safeAreaInsets.bottom;
-    if (y + cardH > winH - safeB - 12.0) y = CGRectGetMinY(ar) - 6.0 - cardH;
+    if (y + cardH > winH - safeB - 12.0) y = CGRectGetMinY(ar) - 14.0 - cardH;
 
     _card = [[UIView alloc] initWithFrame:CGRectMake(x, y, cardW, cardH)];
     _card.layer.cornerRadius = 22.0;
@@ -681,29 +741,14 @@ static const CGFloat kSLPanelTopPad = 14.0;
     _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:22.0].CGPath;
     [self addSubview:_card];
 
-    // 顶部小三角：对准胶囊右端那个箭头，说明「这是它下面弹出来的」
-    UIView *tip = [[UIView alloc] initWithFrame:CGRectMake(cardW - 23.0 - 5.5, -4.5, 11.0, 11.0)];
-    if (@available(iOS 13.0, *)) {
-        tip.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) {
-            return (t.userInterfaceStyle == UIUserInterfaceStyleDark)
-                ? [UIColor colorWithWhite:0.20 alpha:0.92]
-                : [UIColor colorWithWhite:0.97 alpha:0.92];
-        }];
-    } else {
-        tip.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.92];
-    }
-    tip.layer.borderWidth = 0.5;
-    tip.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
-    tip.transform = CGAffineTransformMakeRotation(M_PI_4);
-    tip.userInteractionEnabled = NO;
-    [_card addSubview:tip];
-
+    // v0.4.39：原来在卡片顶上画了个旋转 45° 的小方块当"指示小三角"，
+    // 实际是一个角穿出卡片、颜色也和玻璃对不上的菱形片 —— 直接去掉。
     _blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
     _blur.frame = _card.bounds;
     _blur.layer.cornerRadius = 22.0;
     _blur.layer.cornerCurve = kCACornerCurveContinuous;
     _blur.clipsToBounds = YES;
-    [_card insertSubview:_blur belowSubview:tip];
+    [_card addSubview:_blur];
 
     UIView *hair = [[UIView alloc] initWithFrame:CGRectInset(_card.bounds, 0.5, 0.5)];
     hair.layer.cornerRadius = 21.5;
@@ -711,13 +756,16 @@ static const CGFloat kSLPanelTopPad = 14.0;
     hair.layer.borderWidth = 0.5;
     hair.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.45].CGColor;
     hair.userInteractionEnabled = NO;
-    [_card insertSubview:hair belowSubview:tip];
+    [_card addSubview:hair];
 
     UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 6, cardW, cardH - 12)];
     sv.showsVerticalScrollIndicator = NO;
     sv.alwaysBounceVertical = NO;
-    [_card insertSubview:sv belowSubview:tip];
+    [_card addSubview:sv];
 
+    _rowViews = [NSMutableArray arrayWithCapacity:_rows.count];
+    UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration configurationWithPointSize:13.0
+                                                                                       weight:UIImageSymbolWeightSemibold];
     for (NSUInteger i = 0; i < _rows.count; i++) {
         NSDictionary *info = _rows[i];
         SLPackMenuRow *r = [[SLPackMenuRow alloc] initWithFrame:CGRectMake(0, i * rowH, cardW, rowH)];
@@ -728,15 +776,29 @@ static const CGFloat kSLPanelTopPad = 14.0;
 
         BOOL on = orig ? [SLVoicePack isOriginalMode] : (![SLVoicePack isOriginalMode] && pack && [SLVoicePack isPackActive:pack]);
         r.check.hidden = !on;
-        r.icon.image = [UIImage systemImageNamed:(orig ? @"mic.fill" : @"waveform")];
-        r.icon.tintColor = on ? [UIColor systemBlueColor] : [UIColor secondaryLabelColor];
+
+        // v0.4.39：左侧变 30pt 圆形试听键。原声那一行没有音频文件，
+        // 按钮不接触摸、只留一个静态麦克风，文字起点仍和其它行对齐。
+        r.play.tag = (NSInteger)i;
+        [r.play addTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
+        r.play.enabled = !orig;
+        r.icon.image = [UIImage systemImageNamed:(orig ? @"mic.fill" : @"play.fill") withConfiguration:symCfg];
+        if (orig) {
+            r.icon.backgroundColor = [UIColor clearColor];
+            r.icon.tintColor = [UIColor secondaryLabelColor];
+        } else {
+            r.icon.backgroundColor = on ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
+                                        : [[UIColor labelColor] colorWithAlphaComponent:0.10];
+            r.icon.tintColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
+        }
         r.title.textColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
         r.title.font = [UIFont systemFontOfSize:14.0 weight:(on ? UIFontWeightSemibold : UIFontWeightRegular)];
         [r addTarget:self action:@selector(sl_rowTapped:) forControlEvents:UIControlEventTouchUpInside];
         [sv addSubview:r];
+        [_rowViews addObject:r];
 
         if (i + 1 < _rows.count) {
-            UIView *line = [[UIView alloc] initWithFrame:CGRectMake(36, (i + 1) * rowH - 0.25, cardW - 36 - 12, 0.5)];
+            UIView *line = [[UIView alloc] initWithFrame:CGRectMake(50, (i + 1) * rowH - 0.25, cardW - 50 - 12, 0.5)];
             line.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.10];
             line.userInteractionEnabled = NO;
             [sv addSubview:line];
@@ -751,6 +813,81 @@ static const CGFloat kSLPanelTopPad = 14.0;
         self->_card.alpha = 1.0;
         self->_card.transform = CGAffineTransformIdentity;
     } completion:nil];
+}
+
+#pragma mark 试听
+
+// v0.4.39：点行左侧的圆形键试听这个语音包的第一条音频。
+// 只是"听一下是什么味"，不改变当前选择 —— 选中仍然要点名称那一侧。
+- (void)sl_playTapped:(UIButton *)btn {
+    NSInteger idx = btn.tag;
+    if (idx < 0 || idx >= (NSInteger)_rows.count) return;
+    NSDictionary *info = _rows[(NSUInteger)idx];
+
+    // 同一行再点一次 = 停
+    if (_playingRow == idx && _player && _player.playing) {
+        [self sl_stopAudition];
+        return;
+    }
+    [self sl_stopAudition];
+
+    NSString *path = [SLVoicePack pathOfPack:info[@"pack"]];
+    if (!path.length) {
+        [AWECAUtils showToast:@"这个包里还没有音频" duration:1.6];
+        return;
+    }
+
+    NSError *err = nil;
+    AVAudioPlayer *p = [[AVAudioPlayer alloc] initWithContentsOfURL:[NSURL fileURLWithPath:path] error:&err];
+    if (!p || err) {
+        SLLog(@"PACKMENU 试听打不开：%@ (%@)", path.lastPathComponent, err.localizedDescription);
+        [AWECAUtils showToast:@"这条音频放不出来" duration:1.8];
+        return;
+    }
+    p.delegate = self;
+    AVAudioSession *ses = [AVAudioSession sharedInstance];
+    [ses setCategory:AVAudioSessionCategoryPlayback error:nil];
+    [ses setActive:YES error:nil];
+    if (![p play]) {
+        [AWECAUtils showToast:@"这条音频放不出来" duration:1.8];
+        return;
+    }
+    _player = p;
+    _playingRow = idx;
+    [self sl_markRow:idx playing:YES];
+}
+
+- (void)sl_stopAudition {
+    if (_player) {
+        _player.delegate = nil;
+        [_player stop];
+        _player = nil;
+    }
+    if (_playingRow >= 0) {
+        [self sl_markRow:_playingRow playing:NO];
+        _playingRow = -1;
+    }
+}
+
+- (void)sl_markRow:(NSInteger)idx playing:(BOOL)on {
+    if (idx < 0 || idx >= (NSInteger)_rowViews.count) return;
+    SLPackMenuRow *r = _rowViews[(NSUInteger)idx];
+    UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:13.0
+                                                                                     weight:UIImageSymbolWeightSemibold];
+    r.icon.image = [UIImage systemImageNamed:(on ? @"pause.fill" : @"play.fill") withConfiguration:cfg];
+    r.icon.backgroundColor = on ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
+                                : [[UIColor labelColor] colorWithAlphaComponent:0.10];
+    r.icon.tintColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
+}
+
+- (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
+    (void)player; (void)flag;
+    [self sl_stopAudition];
+}
+
+- (void)audioPlayerDecodeErrorDidOccur:(AVAudioPlayer *)player error:(NSError *)error {
+    (void)player; (void)error;
+    [self sl_stopAudition];
 }
 
 - (void)sl_rowTapped:(SLPackMenuRow *)row {
@@ -773,6 +910,7 @@ static const CGFloat kSLPanelTopPad = 14.0;
 }
 
 - (void)sl_dismiss {
+    [self sl_stopAudition];
     [UIView animateWithDuration:0.14 animations:^{
         self->_card.alpha = 0.0;
         self->_card.transform = CGAffineTransformMakeScale(0.97, 0.97);
@@ -842,6 +980,27 @@ static const CGFloat kSLPanelTopPad = 14.0;
     [self addChildViewController:self.nav];
     [self.blur.contentView addSubview:self.nav.view];
     [self.nav didMoveToParentViewController:self];
+
+    // v0.4.39：三页导航栏统一透明。
+    // iOS 15 起导航栏有两套外观：内容贴顶时用 scrollEdgeAppearance（透明），一旦下方开始滚动，
+    // 系统换成 standardAppearance（不透明浅底 + 0.5pt 投影线）—— 表现就是"一滑顶部多出一条白"。
+    // 这里三套全设成透明 + 无阴影，底完全交给卡片那一层玻璃；设置页 / 语音包页 / 地图页共用，
+    // 一次改完三页统一。
+    if (@available(iOS 13.0, *)) {
+        UINavigationBarAppearance *ap = [[UINavigationBarAppearance alloc] init];
+        [ap configureWithTransparentBackground];
+        ap.backgroundColor = [UIColor clearColor];
+        ap.backgroundEffect = nil;
+        ap.shadowColor = [UIColor clearColor];
+        UINavigationBar *nb = self.nav.navigationBar;
+        nb.standardAppearance = ap;
+        nb.compactAppearance = ap;
+        nb.scrollEdgeAppearance = ap;
+        if (@available(iOS 15.0, *)) nb.compactScrollEdgeAppearance = ap;
+        nb.translucent = YES;
+        nb.backgroundColor = [UIColor clearColor];
+        nb.shadowImage = [UIImage new];
+    }
 }
 
 - (void)viewWillLayoutSubviews {
