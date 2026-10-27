@@ -1,11 +1,11 @@
 // 声临·陌陌版 设置面板
 // 复用声临的 TTS 引擎设置（火山/Fish）、音色库、情绪标签、API 凭证页
 //
-// v0.4.31 排版规则（解决长文案被截断）：
+// v0.4.32 排版规则（解决长文案被截断）：
 //   R1 单元格右侧只放状态词（≤8 字），解释性长句一律下沉到分组 footer
 //   R2 footer 全部用自定义视图（UILabel numberOfLines = 0），不再用系统 titleForFooterInSection
 //   R3 折叠/跳转统一用系统 chevron，箭头不写进标题文字
-// v0.4.31 顺带删除「语音格式 AMR / 原始音频」开关（已是死代码）
+// v0.4.32 顺带删除「语音格式 AMR / 原始音频」开关（已是死代码）
 
 #import "SLSettingsPanel.h"
 #import "AWECATTSManager.h"
@@ -26,14 +26,14 @@
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.31"
+#define SLVersion @"0.4.32"
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 
-// v0.4.31.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
+// v0.4.32.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
 // 三者永远差几像素。现在只认一个基准：单元格文字的真实左边缘（表格坐标系）。
 // 首帧 cell 还没生成时用卡片左缘 + 内边距兜底，值恒定，不再逐帧校正。
-// v0.4.31.7：只读已存在的 cell，不再调 rectForRowAtIndexPath。
+// v0.4.32.7：只读已存在的 cell，不再调 rectForRowAtIndexPath。
 // 那个 API 内部要算分区总高 → 回调 heightForFooterInSection → 又要这个值，会无限递归。
 static CGFloat SLMeasureLeading(UITableView *tv) {
     for (UITableViewCell *c in tv.visibleCells) {
@@ -52,8 +52,8 @@ static UIView *SLMakeFooter(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignFooter(text, x, width);
 }
 
-// v0.4.31.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
-// v0.4.31.9：不再把「表格坐标系的 x」当盒子内偏移用，改由 SLAlignBox 按盒子真实位置反推。
+// v0.4.32.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
+// v0.4.32.9：不再把「表格坐标系的 x」当盒子内偏移用，改由 SLAlignBox 按盒子真实位置反推。
 static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignHeader(text, x, width);
 }
@@ -71,7 +71,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 @implementation SLSettingsPanel
 
-// v0.4.31：改成 insetGrouped —— UITableViewController 默认走 Plain，行直通屏幕两边、方角，
+// v0.4.32：改成 insetGrouped —— UITableViewController 默认走 Plain，行直通屏幕两边、方角，
 // 看着像草稿。insetGrouped 自带 16pt 边距 + 每组首尾行圆角，等于系统原生「设置卡片」。
 - (instancetype)init {
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
@@ -87,7 +87,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
     self.tableView.estimatedSectionFooterHeight = 28;
     self.tableView.estimatedSectionHeaderHeight = 26;
-    // v0.4.31.2：删掉顶部说明（tableHeaderView），首个分组直接跟标题栏
+    // v0.4.32.2：删掉顶部说明（tableHeaderView），首个分组直接跟标题栏
 }
 
 - (NSString *)sl_command {
@@ -95,8 +95,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return v.length ? v : @"#tts";
 }
 
-// v0.4.31.6：语音包口令也开放自定义，跟合成口令彻底分开，互不抢
-// v0.4.31.9：默认值改成 #yyb
+// v0.4.32.6：语音包口令也开放自定义，跟合成口令彻底分开，互不抢
+// v0.4.32.9：默认值改成 #yyb
 - (NSString *)sl_packCommand {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackCmdKey];
     return v.length ? v : @"#yyb";
@@ -107,7 +107,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return self.slLeading;
 }
 
-// v0.4.31.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
+// v0.4.32.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
 
 - (void)sl_close {
     [self dismissViewControllerAnimated:YES completion:nil];
@@ -159,7 +159,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 // 每组都带 footer：既解释状态，也撑出分组间距（footer 高度为 0 时分组会粘在一起）
 - (NSString *)sl_footerForSection:(NSInteger)section {
     if (section == 0) {
-        // v0.4.31.6：口令可自定义，文案跟着实际设置走，不再写死 yyb / #tts
+        // v0.4.32.6：口令可自定义，文案跟着实际设置走，不再写死 yyb / #tts
         return [NSString stringWithFormat:@"语音包：发「%@」直接发出所选语音，不走合成\n合成语音：发「%@」正常联网合成\n切换引擎后需要在下方重新选择音色",
                 [self sl_packCommand], [self sl_command]];
     }
@@ -475,7 +475,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
                       fallback:@"#tts"];
 }
 
-// v0.4.31.6：语音包口令也开放自定义（存 SLPackCommand），跟合成口令各走各的
+// v0.4.32.6：语音包口令也开放自定义（存 SLPackCommand），跟合成口令各走各的
 - (void)sl_editPackCommand {
     [self sl_editCommandForKey:kSLPackCmdKey
                          title:@"语音包口令"

@@ -106,6 +106,11 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) NSMutableArray<NSValue *> *slSlotCoords;
 @property (nonatomic, copy) NSArray<NSArray<SLFavoriteItem *> *> *slSlotItems;
 
+// 快捷位置多选面板（自绘，替代 UIAlertController 的 action sheet）
+@property (nonatomic, strong) UIView *slSheetOverlay;
+@property (nonatomic, copy) NSArray<SLFavoriteItem *> *slSheetItems;
+@property (nonatomic, copy) NSString *slSheetSlot;
+
 - (void)sl_buildMap;
 - (void)sl_buildPin;
 - (void)sl_buildSearch;
@@ -121,6 +126,9 @@ static UIColor *SLHairline(void) {
 - (void)sl_focusCoord:(CLLocationCoordinate2D)coord meters:(double)meters;
 - (void)sl_quickSlotTap:(UIButton *)btn;
 - (void)sl_showSlotSheet:(NSString *)slot items:(NSArray<SLFavoriteItem *> *)items;
+- (void)sl_sheetRowTap:(UIButton *)btn;
+- (void)sl_hideSlotSheet;
+- (void)sl_hideSlotSheetAnimated:(BOOL)animated;
 - (void)sl_refreshCoordinate;
 - (void)sl_refreshStar;
 - (CLLocationCoordinate2D)sl_refCoord;
@@ -232,6 +240,9 @@ static UIColor *SLHairline(void) {
     CGFloat panelY = h - panelH - kSLPanelFloat;
 
     self.panel.frame = CGRectMake(kSLPanelInset, panelY, w - kSLPanelInset * 2, panelH);
+    // 面板是透明底 + 毛玻璃子视图，阴影只能靠 shadowPath 描出轮廓
+    self.panel.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.panel.bounds
+                                                             cornerRadius:26].CGPath;
     CGFloat pw = self.panel.bounds.size.width;
     CGFloat pad = kSLPanelPad;
 
@@ -400,17 +411,28 @@ static UIColor *SLHairline(void) {
 
 - (void)sl_buildPanel {
     UIView *panel = [[UIView alloc] initWithFrame:CGRectZero];
-    panel.backgroundColor = [UIColor whiteColor];
+    panel.backgroundColor = [UIColor clearColor];   // 底色交给下面的毛玻璃
     panel.layer.cornerRadius = 26;
     panel.layer.cornerCurve = kCACornerCurveContinuous;
     panel.layer.borderWidth = 0.5;
     panel.layer.borderColor = SLHairline().CGColor;
     panel.layer.shadowColor = [UIColor blackColor].CGColor;
-    panel.layer.shadowOpacity = 0.10;
-    panel.layer.shadowRadius = 20;
-    panel.layer.shadowOffset = CGSizeMake(0, 8);
+    panel.layer.shadowOpacity = 0.12;
+    panel.layer.shadowRadius = 22;
+    panel.layer.shadowOffset = CGSizeMake(0, 10);
     self.panel = panel;
     [self.view addSubview:panel];
+
+    // 毛玻璃底（v0.4.32）：放最底层，后面所有子视图都盖在它上面。
+    // 面板本身是 clear 色，阴影靠 viewDidLayoutSubviews 里设的 shadowPath 撑起来。
+    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    glass.frame = panel.bounds;
+    glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    glass.layer.cornerRadius = 26;
+    glass.layer.cornerCurve = kCACornerCurveContinuous;
+    glass.clipsToBounds = YES;
+    glass.userInteractionEnabled = NO;
+    [panel addSubview:glass];
 
     self.grabber = [[UIView alloc] initWithFrame:CGRectZero];
     self.grabber.backgroundColor = [UIColor colorWithWhite:0.83 alpha:1];
@@ -611,15 +633,24 @@ static UIColor *SLHairline(void) {
         b.backgroundColor = on ? SLGoldBg() : SLChipBg();
         b.layer.cornerRadius = kSLQuickH / 2.0;
         b.layer.cornerCurve = kCACornerCurveContinuous;
-        b.titleLabel.font = f;
-        [b setTitle:self.slSlotNames[i] forState:UIControlStateNormal];
-        [b setTitleColor:(on ? SLGold() : [UIColor colorWithWhite:0.45 alpha:1])
-                forState:UIControlStateNormal];
         [b addTarget:self action:@selector(sl_quickSlotTap:) forControlEvents:UIControlEventTouchUpInside];
         [self.quickRow addSubview:b];
+
+        // 名字用独立 label（不用 button title）：这样名字和角标能当一个整体居中，
+        // 角标也能完整待在 chip 里面 —— v0.4.31 的角标挂在 y=-6，被 quickRow 上边界裁掉了一半。
+        UILabel *nm = [[UILabel alloc] initWithFrame:CGRectZero];
+        nm.tag = 201;
+        nm.font = f;
+        nm.textAlignment = NSTextAlignmentCenter;
+        nm.text = self.slSlotNames[i];
+        nm.textColor = on ? SLGold() : [UIColor colorWithWhite:0.45 alpha:1];
+        nm.userInteractionEnabled = NO;
+        [b addSubview:nm];
+
         NSArray *hit = items[i];
         if (hit.count > 1) {
-            UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 16, 16)];
+            UILabel *badge = [[UILabel alloc] initWithFrame:CGRectZero];
+            badge.tag = 99;
             badge.backgroundColor = [UIColor colorWithRed:0.84 green:0.23 blue:0.23 alpha:1];
             badge.textColor = [UIColor whiteColor];
             badge.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
@@ -627,7 +658,9 @@ static UIColor *SLHairline(void) {
             badge.text = [NSString stringWithFormat:@"%lu", (unsigned long)hit.count];
             badge.layer.cornerRadius = 8;
             badge.layer.masksToBounds = YES;
-            badge.tag = 99;
+            badge.layer.borderWidth = 1.5;
+            badge.layer.borderColor = (on ? SLGoldBg() : SLChipBg()).CGColor;
+            badge.userInteractionEnabled = NO;
             [b addSubview:badge];
         }
     }
@@ -647,8 +680,26 @@ static UIColor *SLHairline(void) {
     for (NSInteger i = 0; i < n; i++) {
         UIView *b = btns[i];
         [b setFrame:CGRectMake(x, 0, bw, kSLQuickH)];
-        UILabel *badge = [b viewWithTag:99];
-        if (badge) badge.frame = CGRectMake(bw - 12, -6, 16, 16);
+
+        // 名字 + 角标当成一个整体在 chip 里水平居中，角标垂直居中、完整可见
+        UILabel *nm = (UILabel *)[b viewWithTag:201];
+        UILabel *badge = (UILabel *)[b viewWithTag:99];
+        CGFloat nameW = 0;
+        if (nm.text.length) {
+            nameW = ceil([nm.text sizeWithAttributes:@{NSFontAttributeName: nm.font}].width);
+        }
+        CGFloat badgeH = 16.0;
+        CGFloat badgeW = 0;
+        if (badge.text.length) {
+            CGFloat tw = ceil([badge.text sizeWithAttributes:@{NSFontAttributeName: badge.font}].width);
+            badgeW = MAX(badgeH, tw + 9.0);
+        }
+        CGFloat inner = nameW + (badgeW > 0 ? (4.0 + badgeW) : 0.0);
+        CGFloat sx = MAX(6.0, (bw - inner) / 2.0);
+        nm.frame = CGRectMake(sx, 0, nameW, kSLQuickH);
+        if (badgeW > 0) {
+            badge.frame = CGRectMake(sx + nameW + 4.0, (kSLQuickH - badgeH) / 2.0, badgeW, badgeH);
+        }
         x += bw + gap;
     }
     self.quickRow.contentSize = CGSizeMake(rowW, kSLQuickH);
@@ -1026,26 +1077,220 @@ static UIColor *SLHairline(void) {
 }
 
 - (void)sl_showSlotSheet:(NSString *)slot items:(NSArray<SLFavoriteItem *> *)items {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"选择「%@」", slot]
-                                                                message:nil
-                                                         preferredStyle:UIAlertControllerStyleActionSheet];
+    if (items.count == 0) return;
+    [self sl_hideSlotSheetAnimated:NO];
+    self.slSheetSlot = slot;
+    self.slSheetItems = items;
+
+    UIView *host = self.navigationController.view ?: self.view;   // 盖住导航栏，整屏压暗
+    CGFloat W = host.bounds.size.width;
+    CGFloat H = host.bounds.size.height;
+    CGFloat side = 10.0;
+    CGFloat cardW = W - side * 2.0;
+    CGFloat rowH = 64.0;
+    CGFloat headH = 64.0;
+    CGFloat listH = MIN((CGFloat)items.count * rowH, H * 0.46);
+    CGFloat cardH = headH + listH;
+    CGFloat cancelH = 52.0;
+    CGFloat gap = 8.0;
+    CGFloat bottomGap = 14.0;
+    if (@available(iOS 11.0, *)) bottomGap += self.view.safeAreaInsets.bottom;
+    CGFloat totalH = cardH + gap + cancelH + bottomGap;
+    CGFloat topY = H - totalH;
+
+    UIView *overlay = [[UIView alloc] initWithFrame:host.bounds];
+    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.24];
+    overlay.alpha = 0.0;
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [host addSubview:overlay];
+    self.slSheetOverlay = overlay;
+
+    UIButton *backdrop = [UIButton buttonWithType:UIButtonTypeCustom];
+    backdrop.frame = overlay.bounds;
+    backdrop.backgroundColor = [UIColor clearColor];
+    [backdrop addTarget:self action:@selector(sl_hideSlotSheet) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:backdrop];
+
+    UIColor *tint = SLAccent();
+
+    // 主卡片
+    UIView *card = [[UIView alloc] initWithFrame:CGRectMake(side, topY, cardW, cardH)];
+    card.tag = 301;
+    card.layer.cornerRadius = 22;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.18;
+    card.layer.shadowRadius = 24;
+    card.layer.shadowOffset = CGSizeMake(0, 10);
+    card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:card.bounds cornerRadius:22].CGPath;
+    [overlay addSubview:card];
+
+    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    glass.frame = card.bounds;
+    glass.layer.cornerRadius = 22;
+    glass.layer.cornerCurve = kCACornerCurveContinuous;
+    glass.clipsToBounds = YES;
+    glass.userInteractionEnabled = NO;
+    [card addSubview:glass];
+
+    UIView *grab = [[UIView alloc] initWithFrame:CGRectMake(cardW / 2.0 - 16, 8, 32, 5)];
+    grab.backgroundColor = [UIColor colorWithWhite:0.6 alpha:0.45];
+    grab.layer.cornerRadius = 2.5;
+    [card addSubview:grab];
+
+    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(0, 22, cardW, 20)];
+    ttl.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    ttl.textColor = [UIColor labelColor];
+    ttl.textAlignment = NSTextAlignmentCenter;
+    ttl.text = [NSString stringWithFormat:@"选择「%@」", slot];
+    [card addSubview:ttl];
+
+    UILabel *sub = [[UILabel alloc] initWithFrame:CGRectMake(0, 43, cardW, 16)];
+    sub.font = [UIFont systemFontOfSize:11.5];
+    sub.textColor = [UIColor tertiaryLabelColor];
+    sub.textAlignment = NSTextAlignmentCenter;
+    sub.text = [NSString stringWithFormat:@"共 %lu 个位置，点一个跳过去", (unsigned long)items.count];
+    [card addSubview:sub];
+
+    UIScrollView *list = [[UIScrollView alloc] initWithFrame:CGRectMake(0, headH, cardW, listH)];
+    list.showsVerticalScrollIndicator = NO;
+    list.alwaysBounceVertical = ((CGFloat)items.count * rowH > listH);
+    list.backgroundColor = [UIColor clearColor];
+    [card addSubview:list];
+
     CLLocationCoordinate2D ref = [self sl_currentCoord];
     CLLocation *a = [[CLLocation alloc] initWithLatitude:ref.latitude longitude:ref.longitude];
-    for (SLFavoriteItem *it in items) {
-        CLLocation *b = [[CLLocation alloc] initWithLatitude:it.coordinate.latitude longitude:it.coordinate.longitude];
+    CGFloat contentH = 0;
+    for (NSUInteger i = 0; i < items.count; i++) {
+        SLFavoriteItem *it = items[i];
+        CGFloat y = (CGFloat)i * rowH;
+
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+        row.frame = CGRectMake(0, y, cardW, rowH);
+        row.tag = (NSInteger)i;
+        row.backgroundColor = [UIColor clearColor];
+        [row addTarget:self action:@selector(sl_sheetRowTap:) forControlEvents:UIControlEventTouchUpInside];
+        [list addSubview:row];
+
+        UIView *ic = [[UIView alloc] initWithFrame:CGRectMake(14, (rowH - 34) / 2.0, 34, 34)];
+        ic.backgroundColor = [tint colorWithAlphaComponent:0.11];
+        ic.layer.cornerRadius = 11;
+        ic.layer.cornerCurve = kCACornerCurveContinuous;
+        ic.userInteractionEnabled = NO;
+        [row addSubview:ic];
+
+        UIImageView *g = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"mappin"]];
+        g.tintColor = tint;
+        g.contentMode = UIViewContentModeScaleAspectFit;
+        g.frame = CGRectMake(8, 8, 18, 18);
+        [ic addSubview:g];
+
+        UILabel *nm = [[UILabel alloc] initWithFrame:CGRectMake(60, 12, cardW - 60 - 80, 20)];
+        nm.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+        nm.textColor = [UIColor labelColor];
+        nm.text = it.name.length ? it.name : @"未命名";
+        nm.lineBreakMode = NSLineBreakByTruncatingTail;
+        nm.userInteractionEnabled = NO;
+        [row addSubview:nm];
+
+        UILabel *ad = [[UILabel alloc] initWithFrame:CGRectMake(60, 33, cardW - 60 - 80, 16)];
+        ad.font = [UIFont systemFontOfSize:11.5];
+        ad.textColor = [UIColor tertiaryLabelColor];
+        ad.text = it.address.length ? it.address : @"未记录地址";
+        ad.lineBreakMode = NSLineBreakByTruncatingTail;
+        ad.userInteractionEnabled = NO;
+        [row addSubview:ad];
+
+        CLLocation *b = [[CLLocation alloc] initWithLatitude:it.coordinate.latitude
+                                                  longitude:it.coordinate.longitude];
         double m = [b distanceFromLocation:a];
-        NSString *dist = m < 1000 ? [NSString stringWithFormat:@" %.0f 米", m] : [NSString stringWithFormat:@" %.1f 公里", m / 1000.0];
-        NSString *title = [NSString stringWithFormat:@"%@ ·%@", it.name, dist];
-        [ac addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a2) {
-            [self sl_focusCoord:it.coordinate meters:1200];
-            self.placeShort = it.name;
-            [self sl_refreshCoordinate];
-            [self sl_reverseGeocode];
-            SLLog(@"VLOC 快捷位置「%@」选「%@」%.6f,%.6f", slot, it.name, it.coordinate.latitude, it.coordinate.longitude);
-        }]];
+        UILabel *dl = [[UILabel alloc] initWithFrame:CGRectMake(cardW - 14 - 68, 0, 68, rowH)];
+        dl.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
+        dl.textColor = [UIColor secondaryLabelColor];
+        dl.textAlignment = NSTextAlignmentRight;
+        dl.text = m < 1000 ? [NSString stringWithFormat:@"%.0f 米", m]
+                           : [NSString stringWithFormat:@"%.1f 公里", m / 1000.0];
+        dl.userInteractionEnabled = NO;
+        [row addSubview:dl];
+
+        if (i + 1 < items.count) {
+            UIView *ln = [[UIView alloc] initWithFrame:CGRectMake(60, rowH - 0.5, cardW - 60 - 14, 0.5)];
+            ln.backgroundColor = SLHairline();
+            ln.userInteractionEnabled = NO;
+            [row addSubview:ln];
+        }
+        contentH = y + rowH;
     }
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:ac animated:YES completion:nil];
+    list.contentSize = CGSizeMake(cardW, contentH);
+
+    // 取消：独立一个毛玻璃胶囊，和 iOS 的 action sheet 分层逻辑一致
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeCustom];
+    cancel.frame = CGRectMake(side, topY + cardH + gap, cardW, cancelH);
+    cancel.tag = 302;
+    [cancel setTitle:@"取消" forState:UIControlStateNormal];
+    [cancel setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+    cancel.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    cancel.layer.cornerRadius = 16;
+    cancel.layer.cornerCurve = kCACornerCurveContinuous;
+    [cancel addTarget:self action:@selector(sl_hideSlotSheet) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:cancel];
+
+    UIVisualEffectView *cglass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    cglass.frame = cancel.bounds;
+    cglass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    cglass.layer.cornerRadius = 16;
+    cglass.layer.cornerCurve = kCACornerCurveContinuous;
+    cglass.clipsToBounds = YES;
+    cglass.userInteractionEnabled = NO;
+    [cancel insertSubview:cglass atIndex:0];
+
+    CGAffineTransform off = CGAffineTransformMakeTranslation(0, totalH + 24);
+    card.transform = off;
+    cancel.transform = off;
+    [UIView animateWithDuration:0.34 delay:0 usingSpringWithDamping:0.9 initialSpringVelocity:0.25
+                        options:UIViewAnimationOptionCurveEaseOut animations:^{
+        overlay.alpha = 1.0;
+        card.transform = CGAffineTransformIdentity;
+        cancel.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)sl_sheetRowTap:(UIButton *)btn {
+    NSInteger i = btn.tag;
+    if (i < 0 || i >= (NSInteger)self.slSheetItems.count) return;
+    SLFavoriteItem *it = self.slSheetItems[(NSUInteger)i];
+    NSString *slot = self.slSheetSlot;
+    [self sl_hideSlotSheet];
+    [self sl_focusCoord:it.coordinate meters:1200];
+    self.placeShort = it.name;
+    [self sl_refreshCoordinate];
+    [self sl_reverseGeocode];
+    SLLog(@"VLOC 快捷位置「%@」选「%@」%.6f,%.6f", slot, it.name, it.coordinate.latitude, it.coordinate.longitude);
+}
+
+- (void)sl_hideSlotSheet {
+    [self sl_hideSlotSheetAnimated:YES];
+}
+
+- (void)sl_hideSlotSheetAnimated:(BOOL)animated {
+    UIView *overlay = self.slSheetOverlay;
+    if (!overlay) return;
+    self.slSheetOverlay = nil;
+    self.slSheetItems = nil;
+    if (!animated) {
+        [overlay removeFromSuperview];
+        return;
+    }
+    UIView *card = [overlay viewWithTag:301];
+    UIView *cancel = [overlay viewWithTag:302];
+    CGFloat down = overlay.bounds.size.height;
+    [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseIn animations:^{
+        overlay.alpha = 0.0;
+        card.transform = CGAffineTransformMakeTranslation(0, down);
+        cancel.transform = CGAffineTransformMakeTranslation(0, down);
+    } completion:^(BOOL finished) {
+        [overlay removeFromSuperview];
+    }];
 }
 
 - (void)sl_toast:(NSString *)text {
