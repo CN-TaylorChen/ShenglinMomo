@@ -75,12 +75,14 @@ static UIImage *SLPlayGlyph(void) {
     dispatch_once(&once, ^{
         UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(10, 12)];
         img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            (void)ctx;
             UIBezierPath *p = [UIBezierPath bezierPath];
             [p moveToPoint:CGPointMake(1.2, 0.8)];
             [p addLineToPoint:CGPointMake(9.2, 6.0)];
             [p addLineToPoint:CGPointMake(1.2, 11.2)];
             [p closePath];
-            [ctx fillPath:p];
+            [[UIColor blackColor] setFill];
+            [p fill];
         }];
     });
     return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
