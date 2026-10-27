@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.21"
+#define SLVersion @"0.4.22"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -175,6 +175,43 @@ static BOOL SLRegisterMethod(Class cls, SEL sel, IMP replacement) {
     method_setImplementation(m, replacement);
     SLLog(@"hook ok %@ %@ type=%s owner=%@", cls, NSStringFromSelector(sel), t, owner);
     return YES;
+}
+
+// v0.4.22：NSClassFromString 取不到的兜底。
+// 实测（0.4.21 日志）：MDChatUniverseInputBar 能取到并装上钩子，但同一个模块里的
+// MDChatUniverseHandler 用 NSClassFromString 却是 nil（懒加载/Swift 暴露类的常见坑），
+// 于是 sendTextMessage:/sendAudioMessage: 全部静默跳过。这里直接遍历运行时类表兜底，
+// 和 CENSUS 用的是同一条路径（它确实能列出这个类）。
+static Class SLClassByName(const char *name) {
+    if (!name || !name[0]) return Nil;
+    Class c = NSClassFromString([NSString stringWithUTF8String:name]);
+    if (c) return c;
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return Nil;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!buf) return Nil;
+    n = objc_getClassList(buf, n);
+    Class found = Nil;
+    for (int i = 0; i < n; i++) {
+        const char *nm = class_getName(buf[i]);
+        if (nm && strcmp(nm, name) == 0) { found = buf[i]; break; }
+    }
+    free(buf);
+    if (found) SLLog(@"class %s 由运行时表兜底找到（NSClassFromString 为 nil）", name);
+    return found;
+}
+
+// 通用：给任意「一个对象参数」的方法挂 SLSendTextMessage
+static BOOL SLInstallOneObjectHook(Class cls, SEL sel, IMP imp) {
+    if (!cls) return NO;
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return NO;   // 静默：重试安装时不刷日志
+    const char *t = method_getTypeEncoding(m);
+    NSMethodSignature *sig = t ? [NSMethodSignature signatureWithObjCTypes:t] : nil;
+    if (!sig || sig.numberOfArguments < 3) return NO;
+    const char *a2 = [sig getArgumentTypeAtIndex:2];
+    if (!a2 || a2[0] != '@') return NO;
+    return SLRegisterMethod(cls, sel, imp);
 }
 
 // 同一条文本短时间内只处理一次（防多个钩子重复命中）
@@ -2364,6 +2401,19 @@ static void SLInstallActionProbe(void) {
     SLRegisterMethod([UIApplication class], sel, (IMP)SLAppSendActionHook);
 }
 
+// v0.4.22：小宇宙 sendContent: 探针。CENSUS 证实 MDChatUniverseHandler 有 sendContent:，
+// 它可能就是私聊真正的发送入口（inputBar.sendText 只处理表情那条）。先只记录不拦截，
+// 确认命中口令后再决定是否接管。
+static void SLUniverseContentProbe(id self, SEL _cmd, id arg) {
+    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
+    NSString *t = SLTextFromArgument(arg);
+    if (t.length && SLTextHasAnyCommand(t)) {
+        SLLog(@"UNIV sendContent: 命中口令 argClass=%@ text=%@（仅记录，不拦截）",
+              NSStringFromClass([arg class]), SLShorten(t, 40));
+    }
+    if (orig) orig(self, _cmd, arg);
+}
+
 static void SLInstallHooks(void) {
     // v0.4.20：去掉「只装 3 轮」的硬上限。
     // 0.4.20 为了少刷日志把窗口从 6 轮/10 秒砍到 3 轮/3 秒，代价是：
@@ -2375,20 +2425,38 @@ static void SLInstallHooks(void) {
     lastT = nowT;
 
     // 输入栏（优先级最高：不依赖任何消息对象结构）
-    SLInstallSendTextHook(NSClassFromString(@"MDChatInputBar"));
-    SLInstallSendTextHook(NSClassFromString(@"MDNewInputTextBar"));
-    SLInstallSendTextHook(NSClassFromString(@"MDChatUniverseInputBar"));
-    SLInstallSendTextHook(NSClassFromString(@"MDBaseInputBar"));
+    SLInstallSendTextHook(SLClassByName("MDChatInputBar"));
+    SLInstallSendTextHook(SLClassByName("MDNewInputTextBar"));
+    SLInstallSendTextHook(SLClassByName("MDChatUniverseInputBar"));
+    SLInstallSendTextHook(SLClassByName("MDBaseInputBar"));
     // handler 层
-    SLInstallSendTextMessageHook(NSClassFromString(@"MDChatBaseHander"));
-    SLInstallSendTextMessageHook(NSClassFromString(@"MDChatUniverseHandler"));
-    SLInstallSendTextMessageHook(NSClassFromString(@"MDChatSingleHandler"));
-    SLInstallSendAudioHook(NSClassFromString(@"MDChatBaseHander"));
-    SLInstallSendAudioHook(NSClassFromString(@"MDChatUniverseHandler"));
-    SLInstallSendAudioHook(NSClassFromString(@"MDChatSingleHandler"));
-    SLInstallAudioRecordHook(NSClassFromString(@"MDChatSingleHandler"));
-    SLInstallAudioRecordHook(NSClassFromString(@"MDChatBaseHander"));
-    SLInstallAudioRecordHook(NSClassFromString(@"MDChatUniverseHandler"));
+    SLInstallSendTextMessageHook(SLClassByName("MDChatBaseHander"));
+    SLInstallSendTextMessageHook(SLClassByName("MDChatUniverseHandler"));
+    SLInstallSendTextMessageHook(SLClassByName("MDChatSingleHandler"));
+    SLInstallSendAudioHook(SLClassByName("MDChatBaseHander"));
+    SLInstallSendAudioHook(SLClassByName("MDChatUniverseHandler"));
+    SLInstallSendAudioHook(SLClassByName("MDChatSingleHandler"));
+    SLInstallAudioRecordHook(SLClassByName("MDChatSingleHandler"));
+    SLInstallAudioRecordHook(SLClassByName("MDChatBaseHander"));
+    SLInstallAudioRecordHook(SLClassByName("MDChatUniverseHandler"));
+    // v0.4.22：小宇宙 handler 诊断（只打一次）+ sendContent: 探针
+    {
+        Class uh = SLClassByName("MDChatUniverseHandler");
+        static BOOL loggedUH = NO;
+        if (!loggedUH) {
+            loggedUH = YES;
+            if (uh) {
+                SLLog(@"UNIV-HANDLER cls=%s sendTextMessage=%d sendAudio=%d sendContent=%d",
+                      class_getName(uh),
+                      class_getInstanceMethod(uh, @selector(sendTextMessage:)) != NULL,
+                      class_getInstanceMethod(uh, @selector(sendAudioMessage:audioTime:audioFileSize:)) != NULL,
+                      class_getInstanceMethod(uh, NSSelectorFromString(@"sendContent:")) != NULL);
+            } else {
+                SLLog(@"UNIV-HANDLER 取不到 MDChatUniverseHandler（NSClassFromString 与运行时表都没有）");
+            }
+        }
+        if (uh) SLInstallOneObjectHook(uh, NSSelectorFromString(@"sendContent:"), (IMP)SLUniverseContentProbe);
+    }
     // 录音机临时路径（拿得到就直接命中真实录音文件）
     SLInstallTempPathHook(NSClassFromString(@"MDAudioRecorder"));
     // v0.4.20 核心：接管陌陌录音的 PCM 流（AI 语音替换的落地位置）
