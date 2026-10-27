@@ -162,6 +162,9 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
 #define SLBallSide 48.0
 #define SLPillMaxW 196.0
 
+// v0.4.37：浮窗内导航栏整体下压的留白（设置页 / 语音包页 / 地图页统一）
+static const CGFloat kSLPanelTopPad = 14.0;
+
 @interface SLFloatButton : UIButton
 @property (nonatomic, assign) BOOL slExpanded;
 @property (nonatomic, assign) SLFloatState slState;
@@ -192,7 +195,7 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
         [self addSubview:_icon];
 
         _title = [[UILabel alloc] initWithFrame:CGRectZero];
-        _title.font = [UIFont systemFontOfSize:14.5];
+        _title.font = [UIFont systemFontOfSize:14.0];
         _title.textColor = [UIColor labelColor];
         _title.lineBreakMode = NSLineBreakByTruncatingMiddle;
         _title.userInteractionEnabled = NO;
@@ -212,10 +215,11 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     [super layoutSubviews];
     CGRect b = self.bounds;
     CGFloat h = CGRectGetHeight(b);
-    _icon.frame = CGRectMake(14, (h - 18.0) / 2.0, 18, 18);
-    _check.frame = CGRectMake(CGRectGetWidth(b) - 30, (h - 14.0) / 2.0, 14, 14);
-    CGFloat tw = CGRectGetMinX(_check.frame) - 8.0 - 42.0;
-    _title.frame = CGRectMake(42, 0, MAX(0, tw), h);
+    // v0.4.37：列表收窄到和胶囊同宽（196），左右内距跟着收紧，把宽度让给文件名
+    _icon.frame = CGRectMake(12, (h - 16.0) / 2.0, 16, 16);
+    _check.frame = CGRectMake(CGRectGetWidth(b) - 10 - 14, (h - 14.0) / 2.0, 14, 14);
+    CGFloat tw = CGRectGetMinX(_check.frame) - 8.0 - 36.0;
+    _title.frame = CGRectMake(36, 0, MAX(0, tw), h);
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -239,7 +243,7 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     UIImageView *_chev;
     CAShapeLayer *_haloIn;
     CAShapeLayer *_haloOut;
-    CAShapeLayer *_ripple;
+    CAShapeLayer *_pulse;
     UIView *_readyDot;
     CFTimeInterval _longPressAt;
 }
@@ -267,12 +271,13 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
         _haloIn.opacity = 0.0;
         [self.layer addSublayer:_haloIn];
 
-        // 就绪 → 发送完成时外扩一圈，替代原来那根转圈的蓝弧
-        _ripple = [CAShapeLayer layer];
-        _ripple.fillColor = nil;
-        _ripple.lineWidth = 2.5;
-        _ripple.opacity = 0.0;
-        [self.layer addSublayer:_ripple];
+        // v0.4.37：发送完成不再外扩涟漪（那圈会「甩」出去，且位置一歪就很丑），
+        // 改成原地光晕脉冲：只在 halo 那一圈上闪一下透明度，全程无位移。
+        _pulse = [CAShapeLayer layer];
+        _pulse.fillColor = nil;
+        _pulse.lineWidth = 3.0;
+        _pulse.opacity = 0.0;
+        [self.layer addSublayer:_pulse];
 
         // 玻璃层尺寸固定成最大胶囊，只靠 mask 改外形。
         // 之前让 UIVisualEffectView 跟着 48→196 改宽高，系统按圆形重新采样，
@@ -399,8 +404,17 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     if (state == SLFloatStateRecording) accent = [UIColor systemRedColor];
     else if (state == SLFloatStateSynthesizing || state == SLFloatStateReady) accent = [UIColor systemBlueColor];
 
-    _tint.backgroundColor = accent ? [accent colorWithAlphaComponent:0.15] : [UIColor clearColor];
-    _tint.alpha = accent ? 1.0 : 0.0;
+    // v0.4.37：状态色加深到 26% 并铺满整条胶囊（见 layout 里的 _tint.frame），
+    // 过渡用 0.26s 淡入淡出，避免蓝 → 白硬切。
+    UIColor *fill = accent ? [accent colorWithAlphaComponent:0.26] : [UIColor clearColor];
+    [UIView animateWithDuration:0.26 delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        self->_tint.backgroundColor = fill;
+        self->_tint.alpha = accent ? 1.0 : 0.0;
+    } completion:nil];
+    _sep.backgroundColor = accent ? [accent colorWithAlphaComponent:0.35]
+                                  : [UIColor colorWithWhite:0.5 alpha:0.28];
     _glyph.tintColor = accent ?: [UIColor labelColor];
     _name.textColor = accent ?: [UIColor labelColor];
     _readyDot.hidden = (state != SLFloatStateReady);
@@ -410,9 +424,9 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     _haloOut.strokeColor = halo.CGColor;
     [self sl_startBreath:state];
 
-    // 发出去的那一刻：就绪→空闲，外扩一圈涟漪，比静态整圈更抓眼
+    // 发出去的那一刻：就绪→空闲，原地闪一下蓝光（不位移、不外扩）
     if (prev == SLFloatStateReady && state == SLFloatStateIdle) {
-        [self sl_playRipple:[UIColor systemBlueColor]];
+        [self sl_playPulse:[UIColor systemBlueColor]];
     }
     [self setNeedsLayout];
 }
@@ -452,30 +466,25 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     [_haloOut addAnimation:out forKey:@"breath"];
 }
 
-- (void)sl_playRipple:(UIColor *)color {
-    _ripple.strokeColor = color.CGColor;
-    CABasicAnimation *sc = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-    sc.fromValue = @(1.0);
-    sc.toValue = @(1.45);
-    CABasicAnimation *op = [CABasicAnimation animationWithKeyPath:@"opacity"];
-    op.fromValue = @(0.75);
-    op.toValue = @(0.0);
-    CAAnimationGroup *g = [CAAnimationGroup animation];
-    g.animations = @[sc, op];
-    g.duration = 0.62;
-    g.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-    [_ripple addAnimation:g forKey:@"ripple"];
+- (void)sl_playPulse:(UIColor *)color {
+    // 只改透明度：0 → 0.85 → 落回 0.28 → 0，0.55s。路径不动，所以不可能出现偏心。
+    _pulse.strokeColor = color.CGColor;
+    CAKeyframeAnimation *op = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
+    op.values = @[@(0.0), @(0.85), @(0.30), @(0.0)];
+    op.keyTimes = @[@(0.0), @(0.16), @(0.52), @(1.0)];
+    op.duration = 0.55;
+    op.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    op.removedOnCompletion = YES;
+    [_pulse addAnimation:op forKey:@"pulse"];
 }
 
 #pragma mark 展开 / 收起
 
 - (CGSize)sl_pillSize {
-    NSString *t = SLFloatPackName();
-    _name.text = t;
-    CGSize ts = [t sizeWithAttributes:@{NSFontAttributeName: _name.font}];
-    CGFloat tw = MIN(ceil(ts.width), 96.0);
-    CGFloat w = 56.0 + MAX(tw, 32.0) + 46.0;
-    return CGSizeMake(MIN(MAX(w, 136.0), SLPillMaxW), SLBallSide);
+    // v0.4.37：胶囊宽度不再跟着包名长度变，统一撑满 196。
+    // 下拉列表要和它严格等宽，宽度固定后两条边才永远共线。
+    _name.text = SLFloatPackName();
+    return CGSizeMake(SLPillMaxW, SLBallSide);
 }
 
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated {
@@ -577,8 +586,10 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     _emoji.font = [UIFont systemFontOfSize:(exp ? 17.0 : 22.0)];
     _emoji.frame = exp ? CGRectMake(8.0, (h - iconS) / 2.0, iconS, iconS) : b;
 
-    _tint.frame = exp ? CGRectMake(0, 0, 48.0, h) : b;
-    _tint.layer.cornerRadius = CGRectGetWidth(_tint.bounds) / 2.0;
+    // v0.4.37：状态色铺满整条胶囊。原来展开态只盖左侧 48pt 圆，
+    // 球是蓝的、胶囊还是白玻璃，中间像被切断。
+    _tint.frame = b;
+    _tint.layer.cornerRadius = h / 2.0;
 
     _sep.frame = CGRectMake(47.0, (h - 18.0) / 2.0, 0.5, 18.0);
     _name.frame = CGRectMake(56.0, 0, MAX(0, w - 56.0 - 46.0), h);
@@ -595,8 +606,8 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
                                               cornerRadius:(h + 5.0) / 2.0].CGPath;
     _haloOut.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -7.0, -7.0)
                                                cornerRadius:(h + 14.0) / 2.0].CGPath;
-    _ripple.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -2.0, -2.0)
-                                              cornerRadius:(h + 4.0) / 2.0].CGPath;
+    _pulse.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -5.0, -5.0)
+                                             cornerRadius:(h + 10.0) / 2.0].CGPath;
 }
 
 @end
@@ -640,12 +651,16 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     }
     _rows = rows;
 
-    CGFloat rowH = 46.0;
+    // v0.4.37：列表宽度 = 胶囊宽度（方案 A，胶囊固定 196），右端严格对齐，
+    // 两条边共线；行高 44、圆角 22 更贴近胶囊的 24。
+    CGFloat rowH = 44.0;
     NSUInteger visible = MIN(_rows.count, (NSUInteger)5);
-    CGFloat cardW = 236.0;
-    CGFloat cardH = visible * rowH + 12.0;
 
     CGRect ar = [anchor convertRect:anchor.bounds toView:self];
+    CGFloat cardW = CGRectGetWidth(ar);
+    if (cardW < 120.0) cardW = 196.0;
+    CGFloat cardH = visible * rowH + 12.0;
+
     CGFloat winW = CGRectGetWidth(self.bounds);
     CGFloat winH = CGRectGetHeight(self.bounds);
     CGFloat x = CGRectGetMaxX(ar) - cardW;
@@ -656,34 +671,51 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     if (y + cardH > winH - safeB - 12.0) y = CGRectGetMinY(ar) - 6.0 - cardH;
 
     _card = [[UIView alloc] initWithFrame:CGRectMake(x, y, cardW, cardH)];
-    _card.layer.cornerRadius = 20.0;
+    _card.layer.cornerRadius = 22.0;
     _card.layer.cornerCurve = kCACornerCurveContinuous;
     _card.layer.shadowColor = [UIColor blackColor].CGColor;
     _card.layer.shadowOpacity = 0.20;
     _card.layer.shadowRadius = 20.0;
     _card.layer.shadowOffset = CGSizeMake(0, 8);
-    _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:20.0].CGPath;
+    _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:22.0].CGPath;
     [self addSubview:_card];
+
+    // 顶部小三角：对准胶囊右端那个箭头，说明「这是它下面弹出来的」
+    UIView *tip = [[UIView alloc] initWithFrame:CGRectMake(cardW - 23.0 - 5.5, -4.5, 11.0, 11.0)];
+    if (@available(iOS 13.0, *)) {
+        tip.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) {
+            return (t.userInterfaceStyle == UIUserInterfaceStyleDark)
+                ? [UIColor colorWithWhite:0.20 alpha:0.92]
+                : [UIColor colorWithWhite:0.97 alpha:0.92];
+        }];
+    } else {
+        tip.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.92];
+    }
+    tip.layer.borderWidth = 0.5;
+    tip.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.55].CGColor;
+    tip.transform = CGAffineTransformMakeRotation(M_PI_4);
+    tip.userInteractionEnabled = NO;
+    [_card addSubview:tip];
 
     _blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
     _blur.frame = _card.bounds;
-    _blur.layer.cornerRadius = 20.0;
+    _blur.layer.cornerRadius = 22.0;
     _blur.layer.cornerCurve = kCACornerCurveContinuous;
     _blur.clipsToBounds = YES;
-    [_card addSubview:_blur];
+    [_card insertSubview:_blur belowSubview:tip];
 
     UIView *hair = [[UIView alloc] initWithFrame:CGRectInset(_card.bounds, 0.5, 0.5)];
-    hair.layer.cornerRadius = 19.5;
+    hair.layer.cornerRadius = 21.5;
     hair.layer.cornerCurve = kCACornerCurveContinuous;
     hair.layer.borderWidth = 0.5;
     hair.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.45].CGColor;
     hair.userInteractionEnabled = NO;
-    [_card addSubview:hair];
+    [_card insertSubview:hair belowSubview:tip];
 
     UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 6, cardW, cardH - 12)];
     sv.showsVerticalScrollIndicator = NO;
     sv.alwaysBounceVertical = NO;
-    [_card addSubview:sv];
+    [_card insertSubview:sv belowSubview:tip];
 
     for (NSUInteger i = 0; i < _rows.count; i++) {
         NSDictionary *info = _rows[i];
@@ -698,12 +730,12 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
         r.icon.image = [UIImage systemImageNamed:(orig ? @"mic.fill" : @"waveform")];
         r.icon.tintColor = on ? [UIColor systemBlueColor] : [UIColor secondaryLabelColor];
         r.title.textColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
-        r.title.font = [UIFont systemFontOfSize:14.5 weight:(on ? UIFontWeightSemibold : UIFontWeightRegular)];
+        r.title.font = [UIFont systemFontOfSize:14.0 weight:(on ? UIFontWeightSemibold : UIFontWeightRegular)];
         [r addTarget:self action:@selector(sl_rowTapped:) forControlEvents:UIControlEventTouchUpInside];
         [sv addSubview:r];
 
         if (i + 1 < _rows.count) {
-            UIView *line = [[UIView alloc] initWithFrame:CGRectMake(42, (i + 1) * rowH - 0.25, cardW - 42 - 14, 0.5)];
+            UIView *line = [[UIView alloc] initWithFrame:CGRectMake(36, (i + 1) * rowH - 0.25, cardW - 36 - 12, 0.5)];
             line.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.10];
             line.userInteractionEnabled = NO;
             [sv addSubview:line];
@@ -822,7 +854,11 @@ static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包�
     CGRect r = CGRectMake(round((ss.width - w) / 2.0), round((ss.height - h) / 2.0) - 18.0, w, h);
     if (!CGRectEqualToRect(self.cardWrap.frame, r)) self.cardWrap.frame = r;
     self.blur.frame = self.cardWrap.bounds;
-    self.nav.view.frame = self.blur.contentView.bounds;
+    // v0.4.37：导航栏原来紧贴卡片圆角顶（搜索栏顶只低 2pt，压着弧线），
+    // 整体下压 14pt；设置页、语音包页、地图页共用这一个容器，顶部留白自动统一。
+    CGRect navF = self.blur.contentView.bounds;
+    self.nav.view.frame = CGRectMake(navF.origin.x, navF.origin.y + kSLPanelTopPad,
+                                     navF.size.width, MAX(0.0, navF.size.height - kSLPanelTopPad));
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -884,23 +920,60 @@ void SLCloseHostingPanel(UIViewController *vc) {
     else [vc dismissViewControllerAnimated:YES completion:nil];
 }
 
-// iOS15 SDK 起 -[UIApplication windows] 被弃用，工程开了 -Werror，这里局部抑制并优先走场景 API
+// 键盘 / 状态栏 / 文本特效这些私有窗口不能挂球：挂上去要么看不见，要么跟着窗口一起消失
+static BOOL SLIsSystemOverlayWindow(UIWindow *w) {
+    NSString *cn = NSStringFromClass([w class]);
+    if (cn.length == 0) return NO;
+    return [cn containsString:@"TextEffects"] || [cn containsString:@"Keyboard"]
+        || [cn containsString:@"StatusBar"] || [cn containsString:@"Selection"];
+}
+
+// iOS15 SDK 起 -[UIApplication windows] 被弃用，工程开了 -Werror，这里局部抑制并优先走场景 API。
+// v0.4.37：不再只认 ForegroundActive + isKeyWindow。陌陌启动早期常是启动页 / 广告窗，
+// 球挂上去那窗一关就跟着没了；另一种是球被更高层的窗压住，viewWithTag 还能找到，
+// 于是永不重建、也永不可见。现在改成「所有场景里挑最顶层且可见的那个窗」，球永远住最上面。
 static UIWindow *SLKeyWindow(void) {
-    if (@available(iOS 15.0, *)) {
+    NSMutableArray<UIWindow *> *list = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (scene.activationState != UISceneActivationStateForegroundActive) continue;
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *ws = (UIWindowScene *)scene;
             for (UIWindow *w in ws.windows) {
-                if (w.isKeyWindow) return w;
+                if (!w || w.hidden || w.alpha < 0.02) continue;
+                if (SLIsSystemOverlayWindow(w)) continue;
+                [list addObject:w];
             }
-            if (ws.windows.count) return ws.windows.firstObject;
         }
     }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    return [UIApplication sharedApplication].keyWindow;
+    if (list.count == 0) {
+        UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+        if (kw && !kw.hidden && !SLIsSystemOverlayWindow(kw)) [list addObject:kw];
+        id del = [UIApplication sharedApplication].delegate;
+        if ([del respondsToSelector:NSSelectorFromString(@"window")]) {
+            id dw = [del valueForKey:@"window"];
+            if ([dw isKindOfClass:[UIWindow class]]) {
+                UIWindow *w = (UIWindow *)dw;
+                if (!w.hidden && ![list containsObject:w]) [list addObject:w];
+            }
+        }
+    }
 #pragma clang diagnostic pop
+    UIWindow *best = nil;
+    for (UIWindow *w in list) {
+        if (!best) { best = w; continue; }
+        if (w.windowLevel > best.windowLevel) { best = w; continue; }
+        if (w.windowLevel < best.windowLevel) continue;
+        // 同层级：先看 keyWindow，再看面积（主窗口总是最大的，别把球挂到某个小浮窗上）
+        if (w.isKeyWindow != best.isKeyWindow) {
+            if (w.isKeyWindow) best = w;
+        } else {
+            CGSize a = w.bounds.size, b = best.bounds.size;
+            if (a.width * a.height > b.width * b.height) best = w;
+        }
+    }
+    return best;
 }
 
 void SLRefreshFloatButton(void) {
@@ -912,23 +985,60 @@ void SLRefreshFloatButton(void) {
     SLApplyFloatIcon(btn);
 }
 
+static CGPoint SLClampFloatPos(CGPoint c, CGSize size) {
+    if (c.x < 24.0 || c.x > size.width - 24.0) c.x = size.width - 36.0;
+    if (c.y < 120.0 || c.y > size.height - 160.0) c.y = size.height * 0.55;
+    return c;
+}
+
 void SLEnsureFloatButton(void) {
     UIWindow *w = SLKeyWindow();
-    if (!w) return;
+    if (!w) {
+        // 一直拿不到窗口就静默失败了，下次再出现「没有球」根本查不到原因 —— 限频记一条
+        static CFAbsoluteTime last = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - last > 30.0) {
+            last = now;
+            SLLog(@"SL-MOMO: no host window yet, float button not mounted");
+        }
+        return;
+    }
     SLFloatButton *btn = (SLFloatButton *)[w viewWithTag:SLBtnTag];
+    if (!btn) btn = sSLFloatBtn;   // 可能还挂在已经被换下去的旧窗口上
+    if (btn && btn.superview != w) {
+        // v0.4.37：窗口被换（启动页 / 广告窗关掉、场景重建）时把球迁到新的顶层窗口，
+        // 否则球跟着旧窗一起消失，而且在新窗口里找不到 tag、只能等下次冷启动。
+        [btn removeFromSuperview];
+        btn.center = SLClampFloatPos(btn.center, w.bounds.size);
+        [w addSubview:btn];
+        SLLog(@"SL-MOMO: float button moved to top window (%@)", NSStringFromClass([w class]));
+    }
     if (!btn) {
         NSString *pos = [[NSUserDefaults standardUserDefaults] objectForKey:@"SLFloatPos"];
         CGPoint c = pos.length ? CGPointFromString(pos) : CGPointMake(w.bounds.size.width - 36, w.bounds.size.height * 0.55);
-        if (c.x < 10 || c.x > w.bounds.size.width - 10) c.x = w.bounds.size.width - 36;
-        if (c.y < 120 || c.y > w.bounds.size.height - 160) c.y = w.bounds.size.height * 0.55;
+        c = SLClampFloatPos(c, w.bounds.size);
         btn = [[SLFloatButton alloc] initWithFrame:CGRectMake(0, 0, 48, 48)];
         btn.center = c;
         btn.tag = SLBtnTag;
         [w addSubview:btn];
-        NSLog(@"SL-MOMO: float button mounted at %@", NSStringFromCGPoint(c));
+        SLLog(@"SL-MOMO: float button mounted at %@", NSStringFromCGPoint(c));
         SLPackPrewarm();   // v0.4.34：启动后就把当前语音包解好，第一次录音也不用等
     }
     sSLFloatBtn = btn;
+}
+
+// 统一入口：异常不再静默吞掉（限频 30s 一条，避免轮询刷屏）
+static void SLEnsureFloatButtonSafe(NSString *tag) {
+    @try {
+        SLEnsureFloatButton();
+    } @catch (NSException *e) {
+        static CFAbsoluteTime last = 0;
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - last > 30.0) {
+            last = now;
+            SLLog(@"SL-MOMO: ensure float button failed (%@): %@", tag ?: @"?", e.reason);
+        }
+    }
 }
 
 
@@ -939,10 +1049,33 @@ void SLStartEntryWatcher(void) {
         dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
         dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, (uint64_t)(2.0 * NSEC_PER_SEC), (uint64_t)(1.0 * NSEC_PER_SEC));
         dispatch_source_set_event_handler(timer, ^{
-            @try { SLEnsureFloatButton(); } @catch (NSException *e) {}
+            SLEnsureFloatButtonSafe(@"timer");
         });
         dispatch_resume(timer);
-        @try { SLEnsureFloatButton(); } @catch (NSException *e) {}
+
+        // v0.4.37：窗口一变就立刻重排，不用干等下一次轮询。
+        // 这几种情况就是「球突然没了」的高发时刻：广告窗关掉、回前台换窗口、场景重建。
+        void (^kick)(NSNotification *) = ^(NSNotification *n) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                SLEnsureFloatButtonSafe(n.name ?: @"notify");
+            });
+        };
+        for (NSString *name in @[UIWindowDidBecomeVisibleNotification,
+                                 UIWindowDidBecomeKeyNotification,
+                                 UIApplicationDidBecomeActiveNotification,
+                                 UIApplicationWillEnterForegroundNotification]) {
+            [[NSNotificationCenter defaultCenter] addObserverForName:name
+                                                              object:nil
+                                                               queue:[NSOperationQueue mainQueue]
+                                                          usingBlock:kick];
+        }
+        if (@available(iOS 13.0, *)) {
+            [[NSNotificationCenter defaultCenter] addObserverForName:UISceneDidActivateNotification
+                                                              object:nil
+                                                               queue:[NSOperationQueue mainQueue]
+                                                          usingBlock:kick];
+        }
+        SLEnsureFloatButtonSafe(@"launch");
     });
 }
 

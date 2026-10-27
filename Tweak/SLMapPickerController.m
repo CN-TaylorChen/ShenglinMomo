@@ -278,7 +278,14 @@ static UIColor *SLHairline(void) {
     CGFloat fieldX = 38;
     self.searchField.frame = CGRectMake(fieldX, 0,
                                         CGRectGetMinX(self.bookmarkBtn.frame) - 8 - fieldX, capH);
-    CGFloat capsuleY = safeTop + 44.0;   // 导航栏下沿
+    // v0.4.37：直接读导航栏实际下沿（换算到本视图坐标），不再用 safeTop + 44 猜 ——
+    // 浮窗里 safeTop 不一定是 0，导航栏又被容器整体下压过，按固定值算会差一截。
+    CGFloat navBottom = safeTop + 44.0;
+    UINavigationBar *navBar = self.navigationController.navigationBar;
+    if (navBar && !navBar.hidden && navBar.superview) {
+        navBottom = CGRectGetMaxY([self.view convertRect:navBar.frame fromView:navBar.superview]);
+    }
+    CGFloat capsuleY = navBottom;
 
     // 4) 搜索结果卡
     self.resultCard.frame = CGRectMake(16, capsuleY + 8, w - 32,
