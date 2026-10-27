@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.18"
+#define SLVersion @"0.4.19"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -419,6 +419,25 @@ static id SLAudioHandlerInObject(id obj) {
     return found;
 }
 
+// v0.4.19：放宽版 —— 不再要求 ivar 静态类型名以 Hander/Handler 结尾。
+// 小宇宙那套页面把发送器可能挂在 id / 协议类型的 ivar 上，只要对象真的响应
+// sendAudioMessage:audioTime:audioFileSize: 就认它（这个选择器足够特异）。
+static id SLAudioHandlerAnyInObject(id obj) {
+    if (!obj) return nil;
+    unsigned int n = 0;
+    Ivar *ivars = class_copyIvarList([obj class], &n);
+    id found = nil;
+    for (unsigned i = 0; i < n && !found; i++) {
+        const char *te = ivar_getTypeEncoding(ivars[i]);
+        if (!te || te[0] != '@') continue;
+        __unsafe_unretained id v = nil;
+        @try { v = object_getIvar(obj, ivars[i]); } @catch (NSException *e) { }
+        if (v && [v respondsToSelector:@selector(sendAudioMessage:audioTime:audioFileSize:)]) found = v;
+    }
+    free(ivars);
+    return found;
+}
+
 // 沿响应链往上找（输入栏 → 聊天 VC → …）
 static id SLFindAudioHandlerNear(UIView *view) {
     UIResponder *r = view;
@@ -427,6 +446,11 @@ static id SLFindAudioHandlerNear(UIView *view) {
         id h = SLAudioHandlerInObject(r);
         if (h) {
             SLLog(@"found audio handler %@ in %@", NSStringFromClass([h class]), NSStringFromClass([r class]));
+            return h;
+        }
+        h = SLAudioHandlerAnyInObject(r);
+        if (h) {
+            SLLog(@"found audio handler(any-ivar) %@ in %@", NSStringFromClass([h class]), NSStringFromClass([r class]));
             return h;
         }
         r = [r nextResponder];
@@ -1121,6 +1145,8 @@ static void SLSendText(id self, SEL _cmd) {
     id handler = SLFindAudioHandlerNear(bar);
     if (!handler) {
         SLLog(@"no audio handler near input bar -> fallback to text");
+        // v0.4.19：不再静默退回文本（小宇宙私聊就是这么「口令没反应」的），给个可见提示。
+        [AWECAUtils showToast:@"没找到语音发送入口，这条按文字发了" duration:2.0];
         if (orig) orig(self, _cmd);
         return;
     }
@@ -2254,9 +2280,87 @@ static void SLInstallUIButtonGuard(void) {
     }
 }
 
+// v0.4.19：小宇宙私聊发口令时日志「零记录」—— 说明它的发送链完全不经过我们钩的
+// sendText / sendTextMessage:。不再猜类名，直接钩事件分发：任何按钮点下去都会过
+// -[UIApplication sendAction:to:from:forEvent:]，日志里就能看到真实的 target 类 + action 名。
+// 只记录，不改变任何行为。
+static void SLAppSendActionHook(id self, SEL _cmd, SEL action, id target, id sender, id event) {
+    @try {
+        static NSMutableSet *seen = nil;
+        static int count = 0;
+        if (!seen) seen = [NSMutableSet set];
+        if (count < 400) {
+            Class tc = target ? object_getClass(target) : Nil;
+            NSString *key = [NSString stringWithFormat:@"%@#%@",
+                             tc ? NSStringFromClass(tc) : @"nil",
+                             action ? NSStringFromSelector(action) : @"?"];
+            if (![seen containsObject:key]) {
+                [seen addObject:key];
+                count++;
+                SLLog(@"ACTION %@ <- %@", key,
+                      sender ? NSStringFromClass([sender class]) : @"nil");
+            }
+        }
+    } @catch (NSException *e) {}
+    void (*orig)(id, SEL, SEL, id, id, id) = (void (*)(id, SEL, SEL, id, id, id))SLGetOrigIMP(self, _cmd);
+    if (orig) orig(self, _cmd, action, target, sender, event);
+}
+
+// 一次性普查：把类名带 Universe 的类连同它的 send*/Text/Input 方法全打出来。
+// 目的只有一个 —— 知道小宇宙的输入栏/发送器到底叫什么，别再靠猜。
+static void SLDumpUniverseClassesOnce(void) {
+    static BOOL done = NO;
+    if (done) return;
+    done = YES;
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!buf) return;
+    n = objc_getClassList(buf, n);
+    NSMutableArray *hits = [NSMutableArray array];
+    for (int i = 0; i < n; i++) {
+        const char *nm = class_getName(buf[i]);
+        if (!nm) continue;
+        NSString *cn = [NSString stringWithUTF8String:nm];
+        if (![cn containsString:@"Universe"]) continue;
+        NSMutableArray *sels = [NSMutableArray array];
+        unsigned int c = 0;
+        Method *ms = class_copyMethodList(buf[i], &c);
+        for (unsigned int k = 0; k < c && k < 80; k++) {
+            NSString *sn = NSStringFromSelector(method_getName(ms[k]));
+            if ([sn hasPrefix:@"send"] || [sn containsString:@"Text"] || [sn containsString:@"Input"]) {
+                [sels addObject:sn];
+            }
+        }
+        if (ms) free(ms);
+        [hits addObject:sels.count ? [NSString stringWithFormat:@"%@{%@}", cn, [sels componentsJoinedByString:@","]]
+                                   : cn];
+    }
+    free(buf);
+    SLLog(@"CENSUS Universe 类 %lu 个：%@", (unsigned long)hits.count,
+          [hits componentsJoinedByString:@" | "]);
+}
+
+static void SLInstallActionProbe(void) {
+    SEL sel = NSSelectorFromString(@"sendAction:to:from:forEvent:");
+    Method m = class_getInstanceMethod([UIApplication class], sel);
+    if (!m) {
+        SLLog(@"ACTION 探针没找到 UIApplication sendAction:to:from:forEvent:");
+        return;
+    }
+    if (method_getNumberOfArguments(m) != 6) return;
+    SLRegisterMethod([UIApplication class], sel, (IMP)SLAppSendActionHook);
+}
+
 static void SLInstallHooks(void) {
-    static int attempts = 0;
-    if (attempts++ > 3) return;   // 幂等：已装的会静默跳过，多试几次等类加载
+    // v0.4.19：去掉「只装 3 轮」的硬上限。
+    // 0.4.19 为了少刷日志把窗口从 6 轮/10 秒砍到 3 轮/3 秒，代价是：
+    // 小宇宙这类懒加载模块的类在启动 3 秒后才 realize，就永远装不上钩子（0.4.9.9 能用、0.4.19 不能的真因）。
+    // 现在改成按时间节流 + 永不过期：定时轮次、App 回前台都会补装，已装的静默跳过。
+    static NSTimeInterval lastT = 0;
+    NSTimeInterval nowT = [[NSDate date] timeIntervalSince1970];
+    if (lastT > 0 && nowT - lastT < 0.8) return;
+    lastT = nowT;
 
     // 输入栏（优先级最高：不依赖任何消息对象结构）
     SLInstallSendTextHook(NSClassFromString(@"MDChatInputBar"));
@@ -2283,6 +2387,8 @@ static void SLInstallHooks(void) {
     @try { SLInstallVirtualLocationHooks(); } @catch (NSException *e) {}
     // v0.4.12：UIButton configuration 断言兜底
     @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
+    // v0.4.19：事件探针（抓小宇宙私聊的真实发送入口，只记录不改行为）
+    @try { SLInstallActionProbe(); } @catch (NSException *e) {}
     // v0.4.11：音波探针默认关。0.4.10 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
     if (SLWaveProbeEnabled()) {
         @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
@@ -2305,13 +2411,21 @@ NSString *SLHookStatusSummary(void) {
         @try { [AWECAUtils ensureDirectoriesExist]; } @catch (NSException *e) {}
         @try { SLStartEntryWatcher(); } @catch (NSException *e) {}
         SLInstallHooks();
-        // 状态摘要从「每次都打」改成「最后一轮打完打一次」：
-        // 原来一次启动会刷 6 遍 2000 字的钩子清单，日志几乎没法看。
-        for (int i = 1; i <= 2; i++) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        // v0.4.19：轮次从 2 次拉回 6 次（覆盖启动后 12 秒）。状态摘要仍只在最后一轮打一次。
+        for (int i = 1; i <= 6; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 @try { SLInstallHooks(); } @catch (NSException *e) {}
-                if (i == 2) SLLog(@"%@", SLHookStatusSummary());
+                if (i == 6) SLLog(@"%@", SLHookStatusSummary());
             });
         }
+        // v0.4.19：App 每次回前台都补装一次。小宇宙这些模块是「第一次点进去才加载类」，
+        // 只在启动那几秒装钩子必然漏；回前台 = 模块已加载，这一轮就能补上。
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *n) {
+            @try { SLInstallHooks(); } @catch (NSException *e) {}
+            @try { SLDumpUniverseClassesOnce(); } @catch (NSException *e) {}
+        }];
     });
 }

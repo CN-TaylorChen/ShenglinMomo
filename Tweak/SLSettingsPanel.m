@@ -31,7 +31,7 @@ extern void SLRunWaveProbeScan(void);
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.18"
+#define SLVersion @"0.4.19"
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 

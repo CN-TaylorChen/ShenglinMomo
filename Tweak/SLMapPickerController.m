@@ -66,6 +66,8 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) UITableView *resultTable;
 
 @property (nonatomic, copy) NSArray<MKMapItem *> *results;
+// v0.4.19：无结果时不再收键盘，改成卡片里显示一行提示
+@property (nonatomic, assign) BOOL emptyHint;
 @property (nonatomic, strong) MKLocalSearch *search;
 @property (nonatomic, strong) CLGeocoder *geocoder;
 @property (nonatomic, assign) NSUInteger geocodeToken;
@@ -520,9 +522,18 @@ static UIColor *SLHairline(void) {
 
 - (void)sl_searchTextChanged {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_runSearch) object:nil];
-    NSString *q = [self.searchField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *raw = self.searchField.text ?: @"";
+    // v0.4.19：把每次输入的内容和「是否处于组合态」都记下来。
+    // 中文输不进去到底是「字没进来」还是「进来了但被收键盘打掉」，这条日志一眼就能分清。
+    BOOL composing = (self.searchField.markedTextRange != nil);
+    SLLog(@"VLOC 搜索输入 text=%@ len=%lu marked=%d",
+          raw, (unsigned long)raw.length, composing ? 1 : 0);
+    if (composing) return;   // 拼音还没上屏，不发查询、不动键盘
+
+    NSString *q = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (q.length == 0) {
         self.results = @[];
+        self.emptyHint = NO;
         [self.resultTable reloadData];
         [self sl_showResults:NO];
         return;
@@ -547,12 +558,15 @@ static UIColor *SLHairline(void) {
         if (!self) return;
         if (err || resp.mapItems.count == 0) {
             self.results = @[];
+            // v0.4.19：没有结果也要留在卡片里显示一行，绝对不能收键盘
+            self.emptyHint = YES;
             [self.resultTable reloadData];
-            [self sl_showResults:NO];
+            [self sl_showResults:YES];
             SLLog(@"VLOC 搜索「%@」无结果 %@", q, err.localizedDescription ?: @"");
             return;
         }
         self.results = resp.mapItems;
+        self.emptyHint = NO;
         [self.resultTable reloadData];
         [self sl_showResults:YES];
         SLLog(@"VLOC 搜索「%@」命中 %lu 条", q, (unsigned long)self.results.count);
@@ -561,15 +575,30 @@ static UIColor *SLHairline(void) {
 
 - (void)sl_showResults:(BOOL)show {
     self.resultCard.hidden = !show;
-    if (!show) [self.searchField resignFirstResponder];
+    // v0.4.19：这里原来会在「无结果」时 resignFirstResponder，导致中文组合到一半键盘就被收走、
+    // 候选字永远上不了屏。收键盘只由用户动作触发（点结果、按搜索键、返回），不由搜索结果触发。
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
-    return self.results.count;
+    return self.emptyHint ? 1 : self.results.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     static NSString *rid = @"slmapresult";
+    if (self.emptyHint) {
+        UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"slmapempty"];
+        if (!cell) {
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"slmapempty"];
+            cell.backgroundColor = [UIColor clearColor];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.textLabel.font = [UIFont systemFontOfSize:14];
+            cell.textLabel.textColor = [UIColor secondaryLabelColor];
+            cell.textLabel.text = @"没有找到相关地点，换个词试试";
+            cell.imageView.image = [[UIImage systemImageNamed:@"magnifyingglass"] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+            cell.imageView.tintColor = [UIColor tertiaryLabelColor];
+        }
+        return cell;
+    }
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:rid];
     if (!cell) {
         cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:rid];
@@ -610,6 +639,7 @@ static UIColor *SLHairline(void) {
 
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
+    if (self.emptyHint || (NSUInteger)ip.row >= self.results.count) return;
     MKMapItem *it = self.results[(NSUInteger)ip.row];
     [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(it.placemark.coordinate, 1500, 1500) animated:YES];
     self.placeName = [self sl_nameOfPlacemark:it.placemark];
