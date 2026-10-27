@@ -171,6 +171,23 @@ static CGPoint SLLoadFloatPos(CGSize size);
 // v0.4.37：浮窗内导航栏整体下压的留白（设置页 / 语音包页 / 地图页统一）
 static const CGFloat kSLPanelTopPad = 14.0;
 
+// v0.4.43：1×1 全透明图。
+// 老写法 setBackgroundImage:[UIImage new] 传的是 0×0 的空图，UIKit 会**当没设**，
+// 于是回落到系统默认的导航栏背景图 —— 那张图是「顶部纯白 → 向下渐隐 + 底部 0.5pt 线」，
+// 视觉上就是压不掉的一条顶部白。必须给真图，尺寸 0 的图不算数。
+static UIImage *SLTransparentImage(void) {
+    static UIImage *img = nil;
+    if (img) return img;
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.opaque = NO;
+    fmt.scale = 1.0;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(1, 1) format:fmt];
+    img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        (void)ctx;   // 什么都不画 = 全透明
+    }];
+    return img;
+}
+
 @interface SLFloatButton : UIButton
 @property (nonatomic, assign) BOOL slExpanded;
 @property (nonatomic, assign) SLFloatState slState;
@@ -187,7 +204,13 @@ static const CGFloat kSLPanelTopPad = 14.0;
 + (void)sl_repositionForAnchor:(UIView *)anchor;
 /// 收球 / 换页时把还开着的列表一起收掉
 + (void)sl_dismissCurrent;
+/// v0.4.43：列表开着没有（点箭头第二次要能关掉，不是重开一张）
++ (BOOL)sl_isShowing;
 - (void)sl_buildWithAnchor:(UIView *)anchor;
+- (void)sl_buildNodes;
+- (void)sl_renderRows;
+/// v0.4.43：点文件夹分组标题 = 展开 / 收起（类型写成 UIControl，行视图类在这个 @interface 之后才定义）
+- (void)sl_groupTapped:(UIControl *)row;
 - (void)sl_dismiss;
 - (CGRect)sl_cardFrameForAnchor:(UIView *)anchor width:(CGFloat)cardW height:(CGFloat)cardH;
 @end
@@ -255,6 +278,69 @@ static const CGFloat kSLPanelTopPad = 14.0;
 - (void)setHighlighted:(BOOL)highlighted {
     [super setHighlighted:highlighted];
     self.backgroundColor = highlighted ? [[UIColor labelColor] colorWithAlphaComponent:0.07] : [UIColor clearColor];
+}
+
+@end
+
+// v0.4.43：下拉列表里的文件夹分组头。
+// 原来下拉列表把所有包平铺成一长条，包一多就找不着；这个可点的标题行把包按文件夹收拢，
+// 点一下展开 / 收起，收起时只留标题，一屏能看全有哪些组。
+@interface SLPackGroupRow : UIControl
+@property (nonatomic, strong) UIImageView *chev;
+@property (nonatomic, strong) UILabel *name;
+@property (nonatomic, strong) UILabel *count;
+@property (nonatomic, assign) BOOL expanded;
+@end
+
+@implementation SLPackGroupRow
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        UIImageSymbolConfiguration *cfg =
+            [UIImageSymbolConfiguration configurationWithPointSize:9.0 weight:UIImageSymbolWeightBold];
+        _chev = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:cfg]];
+        _chev.contentMode = UIViewContentModeScaleAspectFit;
+        _chev.tintColor = [UIColor tertiaryLabelColor];
+        _chev.userInteractionEnabled = NO;
+        [self addSubview:_chev];
+
+        _name = [[UILabel alloc] initWithFrame:CGRectZero];
+        _name.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+        _name.textColor = [UIColor secondaryLabelColor];
+        _name.lineBreakMode = NSLineBreakByTruncatingTail;
+        _name.userInteractionEnabled = NO;
+        [self addSubview:_name];
+
+        _count = [[UILabel alloc] initWithFrame:CGRectZero];
+        _count.font = [UIFont monospacedDigitSystemFontOfSize:10.5 weight:UIFontWeightRegular];
+        _count.textColor = [UIColor tertiaryLabelColor];
+        _count.userInteractionEnabled = NO;
+        [self addSubview:_count];
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = CGRectGetHeight(self.bounds), w = CGRectGetWidth(self.bounds);
+    _chev.frame = CGRectMake(10.0, (h - 9.0) / 2.0, 9.0, 9.0);
+    CGFloat tx = 25.0;
+    CGFloat avail = MAX(0.0, w - tx - 12.0);
+    CGSize ns = [_name sizeThatFits:CGSizeMake(CGFLOAT_MAX, h)];
+    CGFloat nw = MIN(ns.width, avail);
+    _name.frame = CGRectMake(tx, 0, nw, h);
+    _count.frame = CGRectMake(tx + nw + 6.0, 0, MAX(0.0, avail - nw - 6.0), h);
+}
+
+- (void)setExpanded:(BOOL)expanded {
+    _expanded = expanded;
+    _chev.transform = expanded ? CGAffineTransformMakeRotation((CGFloat)M_PI_2) : CGAffineTransformIdentity;
+}
+
+- (void)setHighlighted:(BOOL)highlighted {
+    [super setHighlighted:highlighted];
+    self.alpha = highlighted ? 0.55 : 1.0;
 }
 
 @end
@@ -668,15 +754,16 @@ static const CGFloat kSLPanelTopPad = 14.0;
 - (void)sl_tap {
     // 长按刚结束时个别机型还会补一次 touchUpInside，这里挡掉，免得胶囊一展开就被收回
     if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.5) return;
-    // v0.4.39：展开态不再"点哪都收回去"，收球只认左端热区（_homeBtn）。
-    // 球态时 _homeBtn 是隐藏的，所以点球仍然是展开。
-    if (self.slExpanded) return;
-    // v0.4.41：关掉「启用语音包」之后点球不再展开 —— 这个开关终于有了实际作用，
-    // 而不是一个「开了也不知道变了什么」的装饰。
-    if (![SLVoicePack isEnabled]) {
-        [AWECAUtils showToast:@"语音包已关闭 · 长按球可打开设置" duration:1.8];
+    // v0.4.43：展开态点中间文字区 = 收回成球。
+    // 0.4.41 为了把中间区让给拖动，这里直接 return，结果展开后除了左端 48pt 再也收不回去 ——
+    // 轻点和拖动不冲突（pan 一旦识别，系统会取消点击），所以两个都能要。
+    if (self.slExpanded) {
+        [self sl_expand:NO animated:YES];
         return;
     }
+    // 关掉「启用语音包」后点球不展开，也不弹任何提示：想让球消失是用户的选择，
+    // 不需要每次点都被告知一遍怎么打开设置。
+    if (![SLVoicePack isEnabled]) return;
     [self sl_expand:YES animated:YES];
 }
 
@@ -695,6 +782,12 @@ static const CGFloat kSLPanelTopPad = 14.0;
 }
 
 - (void)sl_menuTap {
+    // v0.4.43：箭头是开关。原来每次点击都「先关旧的再开一张」，看着像点了没反应 ——
+    // 关不掉列表，只能点空白处。
+    if ([SLPackMenu sl_isShowing]) {
+        [SLPackMenu sl_dismissCurrent];
+        return;
+    }
     [SLPackMenu showFromAnchor:self];
 }
 
@@ -773,12 +866,30 @@ static const CGFloat kSLPanelTopPad = 14.0;
 // v0.4.41：全场最多一个列表。拖动胶囊时要能让它跟着走，所以要有个引用。
 static __weak SLPackMenu *sSLPackMenu = nil;
 
+// v0.4.43：哪些文件夹在下拉列表里是展开的。
+// 默认全收起（这样一屏能看全有哪几个组），但把「当前已装填那条所在组」自动展开，
+// 免得用户打开列表却看不见自己在用的是哪个。
+static NSMutableSet<NSString *> *sSLExpandedFolders = nil;
+static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
+    if (!sSLExpandedFolders) {
+        sSLExpandedFolders = [NSMutableSet set];
+        if ([SLVoicePack isOneShotPending]) {
+            NSString *f = [SLVoicePack activePack][@"folder"];
+            if (f.length) [sSLExpandedFolders addObject:f];
+        }
+    }
+    return sSLExpandedFolders;
+}
+
 @implementation SLPackMenu {
     UIControl *_catcher;
     UIView *_card;
     UIVisualEffectView *_blur;
-    NSArray<NSDictionary *> *_rows;
-    NSMutableArray<SLPackMenuRow *> *_rowViews;
+    UIView *_hair;
+    UIScrollView *_list;
+    NSArray<NSDictionary *> *_nodes;      // 渲染节点：分组头 / 语音包 / 空占位
+    NSMutableArray<UIView *> *_rowViews;
+    CGFloat _cardW;
     AVAudioPlayer *_player;
     NSInteger _playingRow;
     __weak UIView *_anchor;
@@ -838,6 +949,10 @@ static __weak SLPackMenu *sSLPackMenu = nil;
     if (m) [m sl_dismiss];
 }
 
++ (BOOL)sl_isShowing {
+    return sSLPackMenu != nil;
+}
+
 // 列表是全屏遮罩（点空白收起），但胶囊必须还能被按住拖动 ——
 // 所以落在胶囊上的触摸原样交回给它自己，其余照旧由遮罩处理。
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
@@ -849,33 +964,17 @@ static __weak SLPackMenu *sSLPackMenu = nil;
     return [super hitTest:point withEvent:event];
 }
 
+// v0.4.43：外壳只建一次（卡片 / 玻璃 / 描边 / 滚动容器）。
+// 行视图交给 sl_renderRows —— 折叠切换时只重建行、不动玻璃层，
+// 免得 UIVisualEffectView 反复改尺寸又留残影。
 - (void)sl_buildWithAnchor:(UIView *)anchor {
-    // v0.4.40：原声不在列表里占一行 —— 它就是「没有装填」的默认状态。
-    // 想撤销已装好的那一发，再点一次它本身（右侧圆叉）。
-    NSMutableArray *rows = [NSMutableArray array];
-    for (NSDictionary *p in [SLVoicePack allPacks]) {
-        [rows addObject:@{@"title": p[@"name"] ?: @"未命名", @"pack": p}];
-    }
-    if (!rows.count) {
-        // 一条包都没有时给一行说明，别弹出一张只有内边距的空卡片
-        [rows addObject:@{@"title": @"还没有语音包 · 长按球进设置导入", @"empty": @YES}];
-    }
-    _rows = rows;
-
-    // v0.4.39：行高 44 → 48，给左侧 30pt 圆形试听键留出上下各 9pt；
-    // 卡片与胶囊的间距 6 → 14（呼吸灯外圈是 7pt，留 6 会把光晕整圈盖住）。
-    CGFloat rowH = 48.0;
-    NSUInteger visible = MIN(_rows.count, (NSUInteger)5);
-
     _anchor = anchor;
     CGRect ar = [anchor convertRect:anchor.bounds toView:self];
     CGFloat cardW = CGRectGetWidth(ar);
-    if (cardW < 120.0) cardW = 196.0;
-    CGFloat cardH = visible * rowH + 12.0;
+    if (cardW < 120.0) cardW = 196.0;   // 胶囊还没展开时拿不到宽度
+    _cardW = cardW;
 
-    _card = [[UIView alloc] initWithFrame:[self sl_cardFrameForAnchor:anchor
-                                                               width:cardW
-                                                              height:cardH]];
+    _card = [[UIView alloc] initWithFrame:[self sl_cardFrameForAnchor:anchor width:cardW height:120.0]];
     _card.layer.cornerRadius = 22.0;
     _card.layer.cornerCurve = kCACornerCurveContinuous;
     _card.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -885,8 +984,6 @@ static __weak SLPackMenu *sSLPackMenu = nil;
     _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:22.0].CGPath;
     [self addSubview:_card];
 
-    // v0.4.39：原来在卡片顶上画了个旋转 45° 的小方块当"指示小三角"，
-    // 实际是一个角穿出卡片、颜色也和玻璃对不上的菱形片 —— 直接去掉。
     _blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
     _blur.frame = _card.bounds;
     _blur.layer.cornerRadius = 22.0;
@@ -894,61 +991,22 @@ static __weak SLPackMenu *sSLPackMenu = nil;
     _blur.clipsToBounds = YES;
     [_card addSubview:_blur];
 
-    UIView *hair = [[UIView alloc] initWithFrame:CGRectInset(_card.bounds, 0.5, 0.5)];
-    hair.layer.cornerRadius = 21.5;
-    hair.layer.cornerCurve = kCACornerCurveContinuous;
-    hair.layer.borderWidth = 0.5;
-    hair.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.45].CGColor;
-    hair.userInteractionEnabled = NO;
-    [_card addSubview:hair];
+    _hair = [[UIView alloc] initWithFrame:CGRectInset(_card.bounds, 0.5, 0.5)];
+    _hair.layer.cornerRadius = 21.5;
+    _hair.layer.cornerCurve = kCACornerCurveContinuous;
+    _hair.layer.borderWidth = 0.5;
+    _hair.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.45].CGColor;
+    _hair.userInteractionEnabled = NO;
+    [_card addSubview:_hair];
 
-    UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 6, cardW, cardH - 12)];
-    sv.showsVerticalScrollIndicator = NO;
-    sv.alwaysBounceVertical = NO;
-    [_card addSubview:sv];
+    _list = [[UIScrollView alloc] initWithFrame:CGRectZero];
+    _list.showsVerticalScrollIndicator = NO;
+    _list.alwaysBounceVertical = NO;
+    _list.backgroundColor = [UIColor clearColor];
+    [_card addSubview:_list];
 
-    _rowViews = [NSMutableArray arrayWithCapacity:_rows.count];
-    UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration configurationWithPointSize:13.0
-                                                                                       weight:UIImageSymbolWeightSemibold];
-    for (NSUInteger i = 0; i < _rows.count; i++) {
-        NSDictionary *info = _rows[i];
-        SLPackMenuRow *r = [[SLPackMenuRow alloc] initWithFrame:CGRectMake(0, i * rowH, cardW, rowH)];
-        r.tag = (NSInteger)i;
-        r.title.text = info[@"title"];
-        NSDictionary *pack = info[@"pack"];
-
-        // v0.4.40：「选中」= 已装好、等下一录音的那一条（不是「上次用过的那条」）。
-        // 发出去之后 pending 被清，这里就不再点亮。
-        BOOL on = pack && [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
-
-        // 左侧 30pt 圆形试听键：点它只试听、不选中；点名称那侧才是装填 / 撤销
-        BOOL placeholder = (pack == nil);
-        // v0.4.41：右侧总是有圈（占位行除外），空圈 / 蓝勾一眼看出能不能选
-        r.check.hidden = placeholder;
-        r.check.image = [UIImage systemImageNamed:(on ? @"checkmark.circle.fill" : @"circle")];
-        r.check.tintColor = on ? [UIColor systemBlueColor] : [UIColor tertiaryLabelColor];
-        r.play.tag = (NSInteger)i;
-        [r.play addTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
-        r.play.enabled = !placeholder;
-        r.icon.image = [UIImage systemImageNamed:(placeholder ? @"info.circle" : @"play.fill") withConfiguration:symCfg];
-        r.icon.backgroundColor = on ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
-                                    : [[UIColor labelColor] colorWithAlphaComponent:0.10];
-        r.icon.tintColor = on ? [UIColor systemBlueColor] : (placeholder ? [UIColor tertiaryLabelColor] : [UIColor labelColor]);
-        if (placeholder) r.title.textColor = [UIColor secondaryLabelColor];
-        r.title.textColor = on ? [UIColor systemBlueColor] : [UIColor labelColor];
-        r.title.font = [UIFont systemFontOfSize:14.0 weight:(on ? UIFontWeightSemibold : UIFontWeightRegular)];
-        [r addTarget:self action:@selector(sl_rowTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [sv addSubview:r];
-        [_rowViews addObject:r];
-
-        if (i + 1 < _rows.count) {
-            UIView *line = [[UIView alloc] initWithFrame:CGRectMake(50, (i + 1) * rowH - 0.25, cardW - 50 - 12, 0.5)];
-            line.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.10];
-            line.userInteractionEnabled = NO;
-            [sv addSubview:line];
-        }
-    }
-    sv.contentSize = CGSizeMake(cardW, _rows.count * rowH);
+    [self sl_buildNodes];
+    [self sl_renderRows];
 
     _card.alpha = 0.0;
     _card.transform = CGAffineTransformMakeScale(0.96, 0.96);
@@ -959,14 +1017,165 @@ static __weak SLPackMenu *sSLPackMenu = nil;
     } completion:nil];
 }
 
+// v0.4.43：把包按文件夹摊成节点序列。
+// 只有一个组时不出标题（多一行纯属浪费）；多个组时每组一行可点的标题，默认收起。
+- (void)sl_buildNodes {
+    NSMutableArray<NSDictionary *> *nodes = [NSMutableArray array];
+    NSArray<NSDictionary *> *all = [SLVoicePack allPacks];
+    if (!all.count) {
+        // 一条包都没有时给一行说明，别弹出一张只有内边距的空卡片
+        _nodes = @[@{@"kind": @"empty", @"title": @"还没有语音包 · 长按球进设置导入"}];
+        return;
+    }
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSArray *> *byFolder = [NSMutableDictionary dictionary];
+    for (NSString *f in [SLVoicePack folders]) {
+        if ([f isEqualToString:@"未分组"]) continue;      // 未分组永远排最后
+        NSArray *packs = [SLVoicePack packsInFolder:f];
+        if (!packs.count) continue;
+        [names addObject:f];
+        byFolder[f] = packs;
+    }
+    NSArray *ungrouped = [SLVoicePack packsInFolder:@"未分组"];
+    NSInteger groups = (NSInteger)names.count + (ungrouped.count ? 1 : 0);
+
+    // 就一个组的时候，标题行纯属多余，直接平铺
+    if (groups <= 1) {
+        NSArray *flat = ungrouped.count ? ungrouped
+                       : (names.count ? byFolder[names.firstObject] : all);
+        for (NSDictionary *p in flat) {
+            [nodes addObject:@{@"kind": @"pack", @"title": p[@"name"] ?: @"未命名", @"pack": p}];
+        }
+        _nodes = nodes;
+        return;
+    }
+
+    NSMutableSet<NSString *> *expanded = SLExpandedFolderSet();
+    for (NSString *f in names) {
+        NSArray *packs = byFolder[f];
+        BOOL exp = [expanded containsObject:f];
+        [nodes addObject:@{@"kind": @"group", @"title": f, @"key": f,
+                           @"count": @(packs.count), @"expanded": @(exp)}];
+        if (!exp) continue;
+        for (NSDictionary *p in packs) {
+            [nodes addObject:@{@"kind": @"pack", @"title": p[@"name"] ?: @"未命名", @"pack": p}];
+        }
+    }
+    if (ungrouped.count) {
+        NSString *key = @"未分组";
+        BOOL exp = [expanded containsObject:key];
+        [nodes addObject:@{@"kind": @"group", @"title": key, @"key": key,
+                           @"count": @(ungrouped.count), @"expanded": @(exp)}];
+        if (exp) {
+            for (NSDictionary *p in ungrouped) {
+                [nodes addObject:@{@"kind": @"pack", @"title": p[@"name"] ?: @"未命名", @"pack": p}];
+            }
+        }
+    }
+    _nodes = nodes;
+}
+
+// v0.4.43：按 _nodes 重建行，并重算卡片高度（折叠时行数会变）。
+- (void)sl_renderRows {
+    for (UIView *v in _list.subviews) [v removeFromSuperview];
+    _rowViews = [NSMutableArray array];
+
+    // v0.4.39：行高 44 → 48，给左侧 30pt 圆形试听键留出上下各 9pt
+    static const CGFloat kRowH = 48.0;
+    static const CGFloat kGroupH = 34.0;
+    CGFloat w = _cardW;
+    CGFloat y = 0.0;
+
+    UIImageSymbolConfiguration *symCfg = [UIImageSymbolConfiguration configurationWithPointSize:13.0
+                                                                                       weight:UIImageSymbolWeightSemibold];
+    for (NSUInteger i = 0; i < _nodes.count; i++) {
+        NSDictionary *info = _nodes[i];
+        BOOL isGroup = [info[@"kind"] isEqualToString:@"group"];
+        CGFloat h = isGroup ? kGroupH : kRowH;
+
+        if (isGroup) {
+            SLPackGroupRow *g = [[SLPackGroupRow alloc] initWithFrame:CGRectMake(0, y, w, h)];
+            g.tag = (NSInteger)i;
+            g.name.text = info[@"title"];
+            g.count.text = [NSString stringWithFormat:@"%ld", (long)[info[@"count"] integerValue]];
+            g.expanded = [info[@"expanded"] boolValue];
+            [g addTarget:self action:@selector(sl_groupTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [_list addSubview:g];
+            [_rowViews addObject:g];
+            y += h;
+            continue;
+        }
+
+        NSDictionary *pack = info[@"pack"];
+        SLPackMenuRow *r = [[SLPackMenuRow alloc] initWithFrame:CGRectMake(0, y, w, h)];
+        r.tag = (NSInteger)i;
+        r.title.text = info[@"title"];
+
+        // v0.4.40：「选中」= 已装好、等下一录音的那一条（不是「上次用过的那条」）。
+        // 发出去之后 pending 被清，这里就不再点亮。
+        BOOL on = pack && [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
+        // 左侧 30pt 圆形试听键：点它只试听、不选中；点名称那侧才是装填 / 撤销
+        BOOL placeholder = (pack == nil);
+        r.check.hidden = placeholder;
+        r.check.image = [UIImage systemImageNamed:(on ? @"checkmark.circle.fill" : @"circle")];
+        r.check.tintColor = on ? [UIColor systemBlueColor] : [UIColor tertiaryLabelColor];
+        r.play.tag = (NSInteger)i;
+        [r.play addTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
+        r.play.enabled = !placeholder;
+        r.icon.image = [UIImage systemImageNamed:(placeholder ? @"info.circle" : @"play.fill") withConfiguration:symCfg];
+        r.icon.backgroundColor = on ? [[UIColor systemBlueColor] colorWithAlphaComponent:0.16]
+                                    : [[UIColor labelColor] colorWithAlphaComponent:0.10];
+        r.icon.tintColor = on ? [UIColor systemBlueColor] : (placeholder ? [UIColor tertiaryLabelColor] : [UIColor labelColor]);
+        r.title.textColor = on ? [UIColor systemBlueColor] : (placeholder ? [UIColor secondaryLabelColor] : [UIColor labelColor]);
+        r.title.font = [UIFont systemFontOfSize:14.0 weight:(on ? UIFontWeightSemibold : UIFontWeightRegular)];
+        [r addTarget:self action:@selector(sl_rowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [_list addSubview:r];
+        [_rowViews addObject:r];
+
+        NSDictionary *next = (i + 1 < _nodes.count) ? _nodes[i + 1] : nil;
+        BOOL nextIsGroup = (next != nil) && [next[@"kind"] isEqualToString:@"group"];
+        if (next && !nextIsGroup && !placeholder) {
+            UIView *line = [[UIView alloc] initWithFrame:CGRectMake(50, y + h - 0.25, w - 50 - 12, 0.5)];
+            line.backgroundColor = [[UIColor labelColor] colorWithAlphaComponent:0.10];
+            line.userInteractionEnabled = NO;
+            [_list addSubview:line];
+        }
+        y += h;
+    }
+
+    if (y < 1.0) y = kRowH;
+    _list.contentSize = CGSizeMake(w, y);
+
+    // 最多露 5 行的高度，再多就在卡片内部滚
+    CGFloat cardH = MIN(y, kRowH * 5.0) + 12.0;
+    _card.frame = [self sl_cardFrameForAnchor:_anchor width:w height:cardH];
+    _blur.frame = _card.bounds;
+    _hair.frame = CGRectInset(_card.bounds, 0.5, 0.5);
+    _list.frame = CGRectMake(0, 6, w, cardH - 12.0);
+    _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:22.0].CGPath;
+}
+
+- (void)sl_groupTapped:(UIControl *)row {
+    if (row.tag < 0 || row.tag >= (NSInteger)_nodes.count) return;
+    NSString *key = _nodes[(NSUInteger)row.tag][@"key"];
+    if (!key.length) return;
+    NSMutableSet<NSString *> *set = SLExpandedFolderSet();
+    if ([set containsObject:key]) [set removeObject:key];
+    else [set addObject:key];
+    [self sl_buildNodes];
+    [self sl_renderRows];
+}
+
 #pragma mark 试听
 
 // v0.4.39：点行左侧的圆形键试听这个语音包的第一条音频。
 // 只是"听一下是什么味"，不改变当前选择 —— 选中仍然要点名称那一侧。
 - (void)sl_playTapped:(UIButton *)btn {
     NSInteger idx = btn.tag;
-    if (idx < 0 || idx >= (NSInteger)_rows.count) return;
-    NSDictionary *info = _rows[(NSUInteger)idx];
+    if (idx < 0 || idx >= (NSInteger)_nodes.count) return;
+    NSDictionary *info = _nodes[(NSUInteger)idx];
+    if (!info[@"pack"]) return;   // 分组头 / 空占位没有音频可试听
 
     // 同一行再点一次 = 停
     if (_playingRow == idx && _player && _player.playing) {
@@ -1015,9 +1224,11 @@ static __weak SLPackMenu *sSLPackMenu = nil;
 
 - (void)sl_markRow:(NSInteger)idx playing:(BOOL)on {
     if (idx < 0 || idx >= (NSInteger)_rowViews.count) return;
-    SLPackMenuRow *r = _rowViews[(NSUInteger)idx];
+    UIView *v = _rowViews[(NSUInteger)idx];
+    if (![v isKindOfClass:[SLPackMenuRow class]]) return;   // 分组标题没有试听态
+    SLPackMenuRow *r = (SLPackMenuRow *)v;
     // 停止试听后要回落到「这一行本来该有的样子」：选中行仍然是蓝底，别被刷成灰的
-    NSDictionary *info = (idx < (NSInteger)_rows.count) ? _rows[(NSUInteger)idx] : nil;
+    NSDictionary *info = (idx < (NSInteger)_nodes.count) ? _nodes[(NSUInteger)idx] : nil;
     NSDictionary *pack = info[@"pack"];
     BOOL sel = pack && [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
     BOOL hot = on || sel;
@@ -1040,8 +1251,8 @@ static __weak SLPackMenu *sSLPackMenu = nil;
 }
 
 - (void)sl_rowTapped:(SLPackMenuRow *)row {
-    if (row.tag < 0 || row.tag >= (NSInteger)_rows.count) return;
-    NSDictionary *pack = _rows[(NSUInteger)row.tag][@"pack"];
+    if (row.tag < 0 || row.tag >= (NSInteger)_nodes.count) return;
+    NSDictionary *pack = _nodes[(NSUInteger)row.tag][@"pack"];
     if (!pack) return;
 
     BOOL on = [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
@@ -1088,6 +1299,7 @@ static __weak SLPackMenu *sSLPackMenu = nil;
 @property (nonatomic, strong) UINavigationController *nav;
 @property (nonatomic, strong) UIViewController *rootVC;
 - (void)sl_applyNavTransparency;
+- (void)sl_clearOpaqueBackdrops:(UIView *)view depth:(NSInteger)depth;
 - (void)sl_fixScrollInsetsIn:(UIView *)view top:(CGFloat)top;
 @end
 
@@ -1134,6 +1346,24 @@ static __weak SLPackMenu *sSLPackMenu = nil;
     self.blur.layer.cornerRadius = 26;
     self.blur.layer.cornerCurve = kCACornerCurveContinuous;
     self.blur.clipsToBounds = YES;
+    // v0.4.43：圆角裁剪必须同时设在 contentView 上。
+    // UIVisualEffectView 只在「玻璃层」裁，contentView 里的子视图（导航栏、搜索栏、白背板）
+    // 照样能画到圆角外面 —— 这就是白条两端变成直角、戳在弧线外的原因。
+    self.blur.contentView.clipsToBounds = YES;
+    self.blur.contentView.layer.cornerRadius = 26;
+    self.blur.contentView.layer.cornerCurve = kCACornerCurveContinuous;
+    // 兜底色调：卡片顶部那 14pt 是唯一没被内容盖住的纯玻璃，比下方被列表染色的区域更亮，
+    // 单看就是「一条白」。铺一层统一的淡底，整张卡一个颜色，即便前两条还有残留也不显。
+    if (@available(iOS 13.0, *)) {
+        self.blur.contentView.backgroundColor =
+            [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+                return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+                    ? [UIColor colorWithWhite:0.0 alpha:0.28]
+                    : [UIColor colorWithWhite:1.0 alpha:0.32];
+            }];
+    } else {
+        self.blur.contentView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.32];
+    }
     [self.cardWrap addSubview:self.blur];
 
     SLSettingsPanel *root = [[SLSettingsPanel alloc] init];
@@ -1153,12 +1383,17 @@ static __weak SLPackMenu *sSLPackMenu = nil;
 - (void)sl_applyNavTransparency {
     UINavigationBar *nb = self.nav.navigationBar;
     if (!nb) return;
+    UIImage *clear1x1 = SLTransparentImage();
     if (@available(iOS 13.0, *)) {
         UINavigationBarAppearance *ap = [[UINavigationBarAppearance alloc] init];
         [ap configureWithTransparentBackground];
         ap.backgroundColor = [UIColor clearColor];
         ap.backgroundEffect = nil;
         ap.shadowColor = [UIColor clearColor];
+        // v0.4.43：必须显式给一张「真」透明背景图。configureWithTransparentBackground 只清
+        // backgroundColor，backgroundImage 为 nil 时系统会自己补一张默认图 ——
+        // 那张图顶部纯白、向下渐隐，正是「顶部一条白边」的形状。
+        ap.backgroundImage = clear1x1;
         nb.standardAppearance = ap;
         nb.compactAppearance = ap;
         nb.scrollEdgeAppearance = ap;
@@ -1168,14 +1403,39 @@ static __weak SLPackMenu *sSLPackMenu = nil;
     // 新老两条都设成空，哪条生效都不会再有白底。
     nb.translucent = YES;
     nb.backgroundColor = [UIColor clearColor];
-    [nb setBackgroundImage:[UIImage new] forBarMetrics:UIBarMetricsDefault];
-    nb.shadowImage = [UIImage new];
+    nb.opaque = NO;
+    [nb setBackgroundImage:clear1x1 forBarMetrics:UIBarMetricsDefault];
+    [nb setBackgroundImage:clear1x1 forBarMetrics:UIBarMetricsCompact];
+    nb.shadowImage = clear1x1;
+    // v0.4.43：UINavigationController 会在布局周期里把自己的 view 底色刷回 systemBackground，
+    // 只在 viewDidLoad 设一次 clear 是不够的 —— 顶部露出的那一条白很可能就是它。
+    self.nav.view.backgroundColor = [UIColor clearColor];
+    self.nav.view.opaque = NO;
+}
+
+// v0.4.43：把导航栏链路上仍不透明的系统背板（_UIBarBackground / TransitionView 之类）清掉。
+// 只认类名，不碰表格和滚动视图，避免把页面自己的底色误伤。
+- (void)sl_clearOpaqueBackdrops:(UIView *)view depth:(NSInteger)depth {
+    if (depth > 4 || !view) return;
+    for (UIView *sub in view.subviews) {
+        if ([sub isKindOfClass:[UIScrollView class]]) continue;   // 表格 / 地图自己管自己
+        NSString *cls = NSStringFromClass([sub class]);
+        if ([cls containsString:@"Transition"] || [cls containsString:@"Wrapper"]
+            || [cls containsString:@"BarBackground"]) {
+            if (sub.backgroundColor && ![sub.backgroundColor isEqual:[UIColor clearColor]]) {
+                sub.backgroundColor = [UIColor clearColor];
+            }
+            sub.opaque = NO;
+        }
+        [self sl_clearOpaqueBackdrops:sub depth:depth + 1];
+    }
 }
 
 - (void)viewWillLayoutSubviews {
     [super viewWillLayoutSubviews];
     // 系统在布局周期会重置导航栏外观，这里是必须补刷的一次
     [self sl_applyNavTransparency];
+    [self sl_clearOpaqueBackdrops:self.nav.view depth:0];
     CGSize ss = self.view.bounds.size;
     if (ss.width < 1.0 || ss.height < 1.0) return;
     self.dim.frame = self.view.bounds;
@@ -1234,7 +1494,13 @@ static __weak SLPackMenu *sSLPackMenu = nil;
                 sv.verticalScrollIndicatorInsets = si;
             }
         }
-        // 底色必须是透的，滚动时露出的是浮窗那层毛玻璃
+        // 底色必须是透的，滚动时露出的是浮窗那层毛玻璃。
+        // v0.4.43：表格设了 backgroundView 时 backgroundColor 会被它盖住，
+        // 那个 backgroundView 默认就是一块浅白 —— 一并去掉。
+        if ([sv isKindOfClass:[UITableView class]]) {
+            UITableView *tv = (UITableView *)sv;
+            if (tv.backgroundView) tv.backgroundView = nil;
+        }
         if (sv.backgroundColor && ![sv.backgroundColor isEqual:[UIColor clearColor]]) {
             sv.backgroundColor = [UIColor clearColor];
         }

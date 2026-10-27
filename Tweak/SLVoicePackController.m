@@ -30,6 +30,10 @@ static CGFloat SLPackMeasureLeading(UITableView *tv) {
     return 36;   // 卡片左缘 20 + 内边距 16
 }
 
+static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
+    return SLAlignHeader(text, x, width);
+}
+
 static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignFooter(text, x, width);
 }
@@ -39,12 +43,6 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 @property (nonatomic, strong) NSArray<NSString *> *folderList;     // 一级页：不含「未分组」
 @property (nonatomic, strong) NSArray<NSDictionary *> *ungrouped;  // 一级页：未分组音频
 @property (nonatomic, strong) NSArray<NSDictionary *> *items;      // 二级页：本文件夹音频
-/// v0.4.41：一级页改成「一个分组一块」。@{@"name": 文件夹名, @"packs": @[...]}
-@property (nonatomic, strong) NSArray<NSDictionary *> *groups;
-/// 哪些分组是展开的（默认全折叠，只有一个分组时自动展开）
-@property (nonatomic, strong) NSMutableSet<NSString *> *expandedGroups;
-/// v0.4.41：一级页「导入到此文件夹」的临时目标（二级页用自己的 folder）
-@property (nonatomic, copy) NSString *importTargetFolder;
 @property (nonatomic, strong) AVAudioPlayer *player;
 @property (nonatomic, copy) NSString *playingRel;
 @property (nonatomic, assign) CGFloat slLeading;
@@ -229,88 +227,6 @@ static UIImage *SLPauseGlyph(void) {
 
 @end
 
-// ===================== 分组标题行（可折叠） =====================
-// v0.4.41：多个文件夹不再挤在「文件夹」分组里、一行一个还要再点进去。
-// 现在一个文件夹就是一张卡：标题行点一下展开 / 收起，包直接长在它下面；
-// 右侧「…」管这个分组（导入到此文件夹 / 重命名 / 删除）。
-@interface SLPackGroupCell : UITableViewCell
-@property (nonatomic, strong) UIImageView *folderIcon;
-@property (nonatomic, strong) UILabel *nameLabel;
-@property (nonatomic, strong) UILabel *countLabel;
-@property (nonatomic, strong) UIImageView *chev;
-@property (nonatomic, strong) UIButton *more;
-- (void)sl_setName:(NSString *)name count:(NSUInteger)count expanded:(BOOL)expanded managed:(BOOL)managed;
-@end
-
-@implementation SLPackGroupCell
-
-- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
-    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
-    if (self) {
-        _folderIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"folder.fill"]];
-        _folderIcon.contentMode = UIViewContentModeScaleAspectFit;
-        _folderIcon.tintColor = [UIColor systemBlueColor];
-        [self.contentView addSubview:_folderIcon];
-
-        _nameLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _nameLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
-        _nameLabel.textColor = [UIColor labelColor];
-        _nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-        [self.contentView addSubview:_nameLabel];
-
-        _countLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _countLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightRegular];
-        _countLabel.textColor = [UIColor tertiaryLabelColor];
-        [self.contentView addSubview:_countLabel];
-
-        _chev = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right"
-                                                         withConfiguration:[UIImageSymbolConfiguration
-                                                                              configurationWithPointSize:10.0
-                                                                                                  weight:UIImageSymbolWeightBold]]];
-        _chev.contentMode = UIViewContentModeScaleAspectFit;
-        _chev.tintColor = [UIColor tertiaryLabelColor];
-        [self.contentView addSubview:_chev];
-
-        _more = [UIButton buttonWithType:UIButtonTypeCustom];
-        _more.tintColor = [UIColor secondaryLabelColor];
-        [_more setImage:[UIImage systemImageNamed:@"ellipsis.circle"
-                                withConfiguration:[UIImageSymbolConfiguration
-                                                     configurationWithPointSize:16.0
-                                                                         weight:UIImageSymbolWeightSemibold]]
-               forState:UIControlStateNormal];
-        [self.contentView addSubview:_more];
-    }
-    return self;
-}
-
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    CGRect b = self.contentView.bounds;
-    CGFloat h = CGRectGetHeight(b), w = CGRectGetWidth(b);
-    CGFloat pad = 14.0, iconW = 20.0;
-
-    _folderIcon.frame = CGRectMake(pad, (h - iconW) / 2.0, iconW, iconW);
-    _chev.frame = CGRectMake(w - pad - 8.0, (h - 12.0) / 2.0, 8.0, 12.0);
-    _more.frame = CGRectMake(CGRectGetMinX(_chev.frame) - 6.0 - 26.0, (h - 26.0) / 2.0, 26.0, 26.0);
-
-    CGFloat x = CGRectGetMaxX(_folderIcon.frame) + 10.0;
-    CGFloat avail = MAX(0.0, CGRectGetMinX(_more.frame) - 6.0 - x);
-    CGSize ns = [_nameLabel sizeThatFits:CGSizeMake(CGFLOAT_MAX, h)];
-    CGFloat nw = MIN(ns.width, avail);
-    _nameLabel.frame = CGRectMake(x, 0, nw, h);
-    _countLabel.frame = CGRectMake(x + nw + 6.0, 0, MAX(0.0, avail - nw - 6.0), h);
-}
-
-- (void)sl_setName:(NSString *)name count:(NSUInteger)count expanded:(BOOL)expanded managed:(BOOL)managed {
-    _nameLabel.text = name ?: @"";
-    _countLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)count];
-    _chev.transform = expanded ? CGAffineTransformMakeRotation((CGFloat)M_PI_2) : CGAffineTransformIdentity;
-    _more.hidden = !managed;
-    [self setNeedsLayout];
-}
-
-@end
-
 @implementation SLVoicePackController
 
 - (instancetype)init {
@@ -390,29 +306,12 @@ static UIImage *SLPauseGlyph(void) {
         }
         self.folderList = fs;
         self.ungrouped = [SLVoicePack packsInFolder:@"未分组"];
-
-        // v0.4.41：一级页改成「分组块」—— 每个文件夹一块，未分组沉到最后一块
-        NSMutableArray *gs = [NSMutableArray array];
-        for (NSString *f in fs) {
-            [gs addObject:@{ @"name": f, @"packs": [SLVoicePack packsInFolder:f], @"managed": @YES }];
-        }
-        if (self.ungrouped.count) {
-            [gs addObject:@{ @"name": @"未分组", @"packs": self.ungrouped, @"managed": @NO }];
-        }
-        self.groups = gs;
-
-        // 第一次进来：只有一块就默认摊开（省一次点击），多块就都收起（一屏能看全所有分组）
-        if (!self.expandedGroups) {
-            self.expandedGroups = [NSMutableSet set];
-            if (gs.count == 1) [self.expandedGroups addObject:gs.firstObject[@"name"]];
-        }
     } else {
         self.items = [SLVoicePack packsInFolder:self.folder];
     }
-    SLLog(@"PACK-PAGE data root=%d folders=%lu ungrouped=%lu items=%lu groups=%lu",
+    SLLog(@"PACK-PAGE data root=%d folders=%lu ungrouped=%lu items=%lu",
           (int)self.isRoot, (unsigned long)self.folderList.count,
-          (unsigned long)self.ungrouped.count, (unsigned long)self.items.count,
-          (unsigned long)self.groups.count);
+          (unsigned long)self.ungrouped.count, (unsigned long)self.items.count);
     [self.tableView reloadData];
 }
 
@@ -509,9 +408,8 @@ static UIImage *SLPauseGlyph(void) {
             if (err.length && !n) lastErr = err;
         } else {
             NSString *err = nil;
-            // 二级页里导入 = 直接落进当前文件夹；一级页的「…」里 = 落进指定的那个分组
-            NSString *target = self.isRoot ? self.importTargetFolder : self.folder;
-            if ([SLVoicePack importFileAtURL:url folder:target error:&err]) {
+            // 二级页里导入 = 直接落进当前文件夹
+            if ([SLVoicePack importFileAtURL:url folder:(self.isRoot ? nil : self.folder) error:&err]) {
                 added++;
             } else {
                 SLLog(@"PACK-IMPORT file fail %@ / %@", url.lastPathComponent, err ?: @"");
@@ -519,7 +417,6 @@ static UIImage *SLPauseGlyph(void) {
             }
         }
     }
-    self.importTargetFolder = nil;
     [self sl_reload];
     if (added > 0) {
         [AWECAUtils showToast:[NSString stringWithFormat:@"已导入 %ld 个", (long)added] duration:1.6];
@@ -530,7 +427,6 @@ static UIImage *SLPauseGlyph(void) {
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
     (void)controller;
-    self.importTargetFolder = nil;   // 取消后别让下一次导入还落进这个文件夹
     SLLog(@"PACK-IMPORT cancelled");
 }
 
@@ -636,44 +532,52 @@ static UIImage *SLPauseGlyph(void) {
 
 #pragma mark - 表格结构
 
-// v0.4.41：一级页 = 「启用语音包」一张卡 + 每个分组一张卡。
-// 卡里第 0 行永远是分组标题（点它展开 / 收起），展开后再跟它自己的包。
-- (BOOL)sl_groupExpanded:(NSInteger)gi {
-    if (gi < 0 || gi >= (NSInteger)self.groups.count) return NO;
-    return [self.expandedGroups containsObject:self.groups[(NSUInteger)gi][@"name"]];
+- (NSInteger)sl_folderSection {
+    return self.folderList.count ? 1 : -1;
+}
+
+- (NSInteger)sl_ungroupedSection {
+    if (!self.ungrouped.count) return -1;
+    return self.folderList.count ? 2 : 1;
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
     if (!self.isRoot) return 1;
-    return 1 + (NSInteger)self.groups.count;
+    return 1 + (self.folderList.count ? 1 : 0) + (self.ungrouped.count ? 1 : 0);
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
     if (!self.isRoot) return self.items.count;
-    if (section == 0) return 1;                     // 只剩「启用语音包」
-    NSInteger gi = section - 1;
-    if (![self sl_groupExpanded:gi]) return 1;      // 收起：只剩标题行
-    NSArray *ps = self.groups[(NSUInteger)gi][@"packs"];
-    return 1 + MAX(1, (NSInteger)ps.count);         // 标题 + 包（空文件夹给一行说明）
+    if (section == 0) return 1;   // v0.4.40：原声行删了，只剩「启用语音包」
+    if (section == [self sl_folderSection]) return self.folderList.count;
+    return self.ungrouped.count;
+}
+
+- (NSString *)sl_headerTextForSection:(NSInteger)section {
+    if (!self.isRoot) return nil;
+    if (section == [self sl_folderSection]) return @"文件夹";
+    if (section == [self sl_ungroupedSection]) return @"未分组";
+    return nil;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
+    NSString *t = [self sl_headerTextForSection:section];
+    if (!t.length) return nil;
+    return SLPackHeader(t, [self sl_leadingForTableView:tv], tv.bounds.size.width);
 }
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
     (void)tv;
-    return section == 0 ? 8.0 : 2.0;   // 分组标题已在卡内，不再画分区头
+    return [self sl_headerTextForSection:section].length ? 22 : 8;
 }
 
 - (NSString *)sl_footerTextForSection:(NSInteger)section {
-    if (!self.isRoot) {
-        return section == 0
-            ? @"点一行装一发，发完自动回原声，再点一次即可撤销"
-            : nil;
-    }
-    if (section == 0) {
-        if (!self.groups.count) return @"还没有语音包 · 点右上 ＋ 导入音频或文件夹";
-        return @"关掉后点球不再弹胶囊 · 长按球进设置";
-    }
+    // v0.4.43：说明压成一行。这个页面只有一件事要做（挑一条装一发），
+    // 原来的两行说明书把列表挤下去半屏。
+    if (!self.isRoot) return section == 0 ? @"点一行装一发 · 再点一次撤销" : nil;
+    if (section == 0) return @"点一条装一发 · 发完自动回原声";
     return nil;
 }
 
@@ -718,24 +622,24 @@ static UIImage *SLPauseGlyph(void) {
         return cell;
     }
 
-    if (self.isRoot) {
-        NSInteger gi = ip.section - 1;
-        if (gi >= 0 && gi < (NSInteger)self.groups.count && ip.row == 0) {
-            static NSString *gid = @"group";
-            SLPackGroupCell *cell = [tv dequeueReusableCellWithIdentifier:gid];
-            if (!cell) cell = [[SLPackGroupCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:gid];
-            cell.backgroundColor = SLPackGlassColor();
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            NSDictionary *g = self.groups[(NSUInteger)gi];
-            cell.more.tag = gi;
-            [cell.more removeTarget:self action:@selector(sl_groupMore:) forControlEvents:UIControlEventTouchUpInside];
-            [cell.more addTarget:self action:@selector(sl_groupMore:) forControlEvents:UIControlEventTouchUpInside];
-            [cell sl_setName:(g[@"name"] ?: @"")
-                       count:[(NSArray *)g[@"packs"] count]
-                    expanded:[self sl_groupExpanded:gi]
-                     managed:[g[@"managed"] boolValue]];
-            return cell;
-        }
+    if (self.isRoot && ip.section == [self sl_folderSection]) {
+        static NSString *fid = @"folder";
+        UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:fid];
+        if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:fid];
+        cell.backgroundColor = SLPackGlassColor();
+        NSString *name = self.folderList[ip.row];
+        NSUInteger n = [SLVoicePack packsInFolder:name].count;
+        cell.textLabel.text = name;
+        cell.textLabel.textColor = [UIColor labelColor];
+        cell.imageView.image = [UIImage systemImageNamed:@"folder.fill"];
+        cell.imageView.tintColor = [UIColor systemBlueColor];
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%lu 个", (unsigned long)n];
+        cell.detailTextLabel.font = [UIFont systemFontOfSize:13];
+        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        cell.accessoryView = nil;
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        return cell;
     }
 
     static NSString *rid = @"pack";
@@ -753,15 +657,11 @@ static UIImage *SLPauseGlyph(void) {
 
     NSDictionary *pack = [self sl_packAt:ip];
     if (!pack) {
-        // 空文件夹展开时的那一行（不是数据行，点它也没用）
-        [cell sl_setName:(self.isRoot ? @"空文件夹 · 长按「…」导入" : @"") active:NO];
-        cell.nameLabel.textColor = [UIColor tertiaryLabelColor];
+        [cell sl_setName:@"" active:NO];
         cell.durLabel.text = nil;
         cell.playButton.hidden = YES;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
         return cell;
     }
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.playButton.hidden = NO;
     // v0.4.40：点亮 = 已装好、等下一次录音的那一条（发完就灭）
     BOOL active = [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
@@ -781,56 +681,17 @@ static UIImage *SLPauseGlyph(void) {
     if (!self.isRoot) {
         return ip.row < self.items.count ? self.items[ip.row] : nil;
     }
-    if (ip.section == 0) return nil;
-    NSInteger gi = ip.section - 1;
-    if (gi < 0 || gi >= (NSInteger)self.groups.count) return nil;
-    NSArray *ps = self.groups[(NSUInteger)gi][@"packs"];
-    NSInteger idx = ip.row - 1;                      // 第 0 行是分组标题
-    if (idx < 0 || idx >= (NSInteger)ps.count) return nil;
-    return ps[(NSUInteger)idx];
+    if (ip.section == [self sl_ungroupedSection]) {
+        return ip.row < self.ungrouped.count ? self.ungrouped[ip.row] : nil;
+    }
+    return nil;
 }
 
 - (void)sl_switchChanged:(UISwitch *)sw {
     [SLVoicePack setEnabled:sw.on];
     if (sw.on && ![SLVoicePack activePack]) {
         [AWECAUtils showToast:@"还没选语音包，先点一条" duration:2.0];
-    } else if (!sw.on) {
-        [AWECAUtils showToast:@"已关闭 · 点球不再弹胶囊" duration:1.8];
     }
-}
-
-#pragma mark - 分组展开 / 管理
-
-- (void)sl_toggleGroup:(NSInteger)gi {
-    if (gi < 0 || gi >= (NSInteger)self.groups.count) return;
-    NSString *name = self.groups[(NSUInteger)gi][@"name"];
-    if ([self.expandedGroups containsObject:name]) [self.expandedGroups removeObject:name];
-    else [self.expandedGroups addObject:name];
-    [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:(NSUInteger)(gi + 1)]
-                  withRowAnimation:UITableViewRowAnimationFade];
-}
-
-// 「…」= 这个分组的管理入口：导入到此 / 重命名 / 删除
-- (void)sl_groupMore:(UIButton *)btn {
-    NSInteger gi = btn.tag;
-    if (gi < 0 || gi >= (NSInteger)self.groups.count) return;
-    NSString *name = self.groups[(NSUInteger)gi][@"name"];
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:name
-                                                                  message:nil
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"导入到此文件夹" style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *a) {
-        self.importTargetFolder = name;
-        [self sl_pickFiles];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"重命名文件夹" style:UIAlertActionStyleDefault
-                                            handler:^(UIAlertAction *a) { [self sl_renameFolder:name]; }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"删除文件夹" style:UIAlertActionStyleDestructive
-                                            handler:^(UIAlertAction *a) { [self sl_deleteFolder:name]; }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.sourceView = btn;
-    sheet.popoverPresentationController.sourceRect = btn.bounds;
-    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - 选择 / 进入文件夹
@@ -839,10 +700,10 @@ static UIImage *SLPauseGlyph(void) {
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (self.isRoot && ip.section == 0) return;   // 只剩一个开关，点整行不做事情
 
-    // v0.4.41：分组标题行 = 展开 / 收起（不再跳到二级页 —— 包就在标题下面）
-    if (self.isRoot && ip.row == 0) {
+    if (self.isRoot && ip.section == [self sl_folderSection]) {
+        NSString *name = self.folderList[ip.row];
         [self sl_stopPreview];
-        [self sl_toggleGroup:ip.section - 1];
+        [self.navigationController pushViewController:[[SLVoicePackController alloc] initInFolder:name] animated:YES];
         return;
     }
 
@@ -852,7 +713,6 @@ static UIImage *SLPauseGlyph(void) {
     BOOL on = [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
     if (on) {
         [SLVoicePack setOneShotPending:NO];
-        SLClearArmedAudio();
         [self.tableView reloadData];
         SLRefreshFloatButton();
         [AWECAUtils showToast:@"已切回原声" duration:1.5];
@@ -860,10 +720,7 @@ static UIImage *SLPauseGlyph(void) {
     }
     [SLVoicePack selectPack:pack];
     [SLVoicePack setOneShotPending:YES];
-    [SLVoicePack setArmedSource:SLArmedSourcePack];
     [SLVoicePack setEnabled:YES];
-    // v0.4.41：同一个槽位，语音包后写就要把之前合成的 AI 音赶走
-    SLClearArmedAudio();
     [self.tableView reloadData];
     SLRefreshFloatButton();
     SLPackPrewarm();
@@ -873,8 +730,26 @@ static UIImage *SLPauseGlyph(void) {
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
     if (self.isRoot && ip.section == 0) return nil;
-    // 分组标题行不左滑：文件夹的重命名 / 删除 / 导入都收进「…」里了
-    if (self.isRoot && ip.row == 0) return nil;
+
+    // 文件夹行：重命名 / 删除
+    if (self.isRoot && ip.section == [self sl_folderSection]) {
+        NSString *name = self.folderList[ip.row];
+        UIContextualAction *rename = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                            title:@"重命名"
+                                                                          handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+            done(YES);
+            [self sl_renameFolder:name];
+        }];
+        rename.backgroundColor = [UIColor systemBlueColor];
+
+        UIContextualAction *del = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+                                                                         title:@"删除"
+                                                                       handler:^(UIContextualAction *a, UIView *v, void (^done)(BOOL)) {
+            done(YES);
+            [self sl_deleteFolder:name];
+        }];
+        return [UISwipeActionsConfiguration configurationWithActions:@[del, rename]];
+    }
 
     NSDictionary *pack = [self sl_packAt:ip];
     if (!pack) return nil;
