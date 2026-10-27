@@ -224,14 +224,33 @@ static NSString *SLRelOfPath(NSString *path) {
     if ([name isEqualToString:@"未分组"]) return NO;
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *dir = [[self rootDir] stringByAppendingPathComponent:name];
-    for (NSString *item in ([fm contentsOfDirectoryAtPath:dir error:nil] ?: @[])) {
-        if ([item hasPrefix:@"."]) continue;
-        return NO;   // 非空，不允许删
+
+    // v0.4.44：允许删非空文件夹 —— 里面的音频一起删掉。
+    // 原来只要目录里有一个文件就 return NO，等于「装过东西的文件夹永远删不掉」，
+    // 只能一条条先移走，实际根本没人这么干。
+    // 顺序：先摘索引、再删目录。反过来的话中途被杀进程会留下指向不存在文件的条目，
+    // 虽然 allPacks 靠「文件是否存在」能自愈，但索引会越积越脏。
+    NSArray<NSDictionary *> *inside = [self packsInFolder:name];
+    NSString *sel = [[NSUserDefaults standardUserDefaults] stringForKey:kSLPackSelKey];
+    BOOL activeGone = NO;
+    for (NSDictionary *p in inside) {
+        NSString *rel = p[@"rel"];
+        if (![rel isKindOfClass:[NSString class]] || !rel.length) continue;
+        if (sel.length && [rel isEqualToString:sel]) activeGone = YES;
+        [self sl_removeEntryRel:rel];
     }
+    if (activeGone) {
+        // 选中的那条就在这个文件夹里：清掉选择，别让胶囊继续挂着一个已经没了的包
+        [[NSUserDefaults standardUserDefaults] removeObjectForKey:kSLPackSelKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        [self setOneShotPending:NO];
+        SLLog(@"pack rmdir: 当前选中的包被删，已回原声");
+    }
+
     NSError *e = nil;
-    [fm removeItemAtPath:dir error:&e];
+    [fm removeItemAtPath:dir error:&e];   // 目录连同内容一起删
     if (e) { SLLog(@"pack rmdir fail %@ / %@", name, e.localizedDescription); return NO; }
-    SLLog(@"pack rmdir %@", name);
+    SLLog(@"pack rmdir %@（连带 %lu 条音频）", name, (unsigned long)inside.count);
     return YES;
 }
 

@@ -168,8 +168,13 @@ static CGPoint SLLoadFloatPos(CGSize size);
 #define SLBallSide 48.0
 #define SLPillMaxW 196.0
 
-// v0.4.37：浮窗内导航栏整体下压的留白（设置页 / 语音包页 / 地图页统一）
-static const CGFloat kSLPanelTopPad = 14.0;
+// v0.4.44：下压留白改成 0。
+// 之前留 14pt 是为了让搜索栏不压圆角，但导航栏是透明的 —— 那 14pt 成了整张卡片上
+// 唯一「没被任何内容盖住」的裸玻璃，比下面被列表染色的区域更亮，就是用户看到的那条白边。
+// 改外观、改裁剪都治不了它，因为它根本不是某张图画的，而是「空出来的那块」。
+// 现在导航栏贴到卡片顶：44pt 高的内容垂直居中，实际距顶 10pt，26pt 圆角在 y=10 处
+// 只向内收 5.5pt，而按钮/搜索胶囊距左右边缘 12~16pt —— 不会压到弧线。
+static const CGFloat kSLPanelTopPad = 0.0;
 
 // v0.4.43：1×1 全透明图。
 // 老写法 setBackgroundImage:[UIImage new] 传的是 0×0 的空图，UIKit 会**当没设**，
@@ -356,6 +361,8 @@ static UIImage *SLTransparentImage(void) {
     UIView *_sep;
     UILabel *_name;
     UIButton *_menuBtn;
+    // v0.4.44：中间文字区热区（展开态点它收球）
+    UIButton *_midBtn;
     UIImageView *_chev;
     UIButton *_homeBtn;
     UIView *_homeHit;
@@ -452,6 +459,12 @@ static UIImage *SLTransparentImage(void) {
         [self addSubview:_name];
 
         // 右端箭头是独立按钮：只有它弹语音包列表，胶囊其他位置点了就收回成球
+        _midBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+        _midBtn.frame = CGRectZero;
+        _midBtn.hidden = YES;
+        [_midBtn addTarget:self action:@selector(sl_tap) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_midBtn];
+
         _menuBtn = [UIButton buttonWithType:UIButtonTypeCustom];
         _menuBtn.frame = CGRectZero;
         [_menuBtn addTarget:self action:@selector(sl_menuTap) forControlEvents:UIControlEventTouchUpInside];
@@ -823,11 +836,13 @@ static UIImage *SLTransparentImage(void) {
     _glyph.frame = exp ? CGRectMake(SLMX(13.0, 22.0), (h - 22.0) / 2.0, 22.0, 22.0)
                        : CGRectMake((w - 22.0) / 2.0, (h - 22.0) / 2.0, 22.0, 22.0);
     _glyph.hidden = (_thumb.hidden == NO) || (_emoji.hidden == NO);
-    CGFloat iconS = 42.0;
-    _thumb.frame = exp ? CGRectMake(SLMX(3.0, iconS), (h - iconS) / 2.0, iconS, iconS) : b;
+    // v0.4.44：自定义图标在球态是铺满 48 的，展开态原来缩到 42，切胶囊时明显小一圈。
+    // 改成两种形态都用满 48（左端留出一整块圆形），球和胶囊的图标视觉尺寸就一致了。
+    CGFloat iconS = SLBallSide;
+    _thumb.frame = exp ? CGRectMake(SLMX(0.0, iconS), 0, iconS, iconS) : b;
     _thumb.layer.cornerRadius = MIN(CGRectGetWidth(_thumb.bounds), CGRectGetHeight(_thumb.bounds)) / 2.0;
-    _emoji.font = [UIFont systemFontOfSize:(exp ? 17.0 : 22.0)];
-    _emoji.frame = exp ? CGRectMake(SLMX(3.0, iconS), (h - iconS) / 2.0, iconS, iconS) : b;
+    _emoji.font = [UIFont systemFontOfSize:22.0];   // v0.4.44：emoji 图标同样不缩
+    _emoji.frame = exp ? CGRectMake(SLMX(0.0, iconS), 0, iconS, iconS) : b;
 
     // v0.4.37：状态色铺满整条胶囊。原来展开态只盖左侧 48pt 圆，
     // 球是蓝的、胶囊还是白玻璃，中间像被切断。
@@ -838,6 +853,11 @@ static UIImage *SLTransparentImage(void) {
     // 镜像时两端互换、中间不动 —— 图标端跟着球走，箭头端永远在远端。
     _sep.frame = CGRectMake(SLMX(48.0, 0.5), (h - 18.0) / 2.0, 0.5, 18.0);
     _name.frame = CGRectMake(48.0, 0, MAX(0, w - 96.0), h);
+    // v0.4.44：中间这块必须有个真的按钮接走触摸。
+    // 之前只靠 self（UIButton）的 touchUpInside，但展开态中间没有任何子控件，
+    // hitTest 落在自绘图层视图上，按钮 tracking 不会开始 —— 点名字就永远没反应，
+    // 只有左端 48pt 的 _homeBtn 能收回。现在中间区自己是一块热区。
+    _midBtn.frame = exp ? CGRectMake(48.0, 0, MAX(0, w - 96.0), h) : CGRectZero;
     _menuBtn.frame = exp ? CGRectMake(SLMX(w - 48.0, 48.0), 0, 48.0, h) : CGRectZero;
     _chev.frame = CGRectMake(18.5, (h - 11.0) / 2.0, 11.0, 11.0);
     _homeBtn.frame = exp ? CGRectMake(SLMX(0.0, 48.0), 0, 48.0, h) : CGRectZero;
@@ -847,6 +867,7 @@ static UIImage *SLTransparentImage(void) {
 
     _sep.hidden = !exp;
     _name.hidden = !exp;
+    _midBtn.hidden = !exp;
     _menuBtn.hidden = !exp;
     _homeBtn.hidden = !exp;
 
@@ -1295,6 +1316,8 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
 @interface SLFloatPanelController ()
 @property (nonatomic, strong) UIControl *dim;
 @property (nonatomic, strong) UIView *cardWrap;
+/// v0.4.44：卡片圆角的硬裁剪（mask 比 clipsToBounds 可靠，contentView 是系统私有类）
+@property (nonatomic, strong) CAShapeLayer *cardMask;
 @property (nonatomic, strong) UIVisualEffectView *blur;
 @property (nonatomic, strong) UINavigationController *nav;
 @property (nonatomic, strong) UIViewController *rootVC;
@@ -1352,19 +1375,14 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     self.blur.contentView.clipsToBounds = YES;
     self.blur.contentView.layer.cornerRadius = 26;
     self.blur.contentView.layer.cornerCurve = kCACornerCurveContinuous;
-    // 兜底色调：卡片顶部那 14pt 是唯一没被内容盖住的纯玻璃，比下方被列表染色的区域更亮，
-    // 单看就是「一条白」。铺一层统一的淡底，整张卡一个颜色，即便前两条还有残留也不显。
-    if (@available(iOS 13.0, *)) {
-        self.blur.contentView.backgroundColor =
-            [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
-                return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-                    ? [UIColor colorWithWhite:0.0 alpha:0.28]
-                    : [UIColor colorWithWhite:1.0 alpha:0.32];
-            }];
-    } else {
-        self.blur.contentView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.32];
-    }
     [self.cardWrap addSubview:self.blur];
+
+    // v0.4.44：兜底裁剪交给 mask。
+    // contentView 是系统私有类（_UIVisualEffectContentView），clipsToBounds 不一定听话；
+    // mask 是硬约束，卡片里任何东西都出不了这个圆角矩形。
+    // 注意 mask 挂在 blur 上而不是 cardWrap 上 —— cardWrap 还要投阴影，mask 会把阴影一起裁掉。
+    self.cardMask = [CAShapeLayer layer];
+    self.blur.layer.mask = self.cardMask;
 
     SLSettingsPanel *root = [[SLSettingsPanel alloc] init];
     self.nav = [[UINavigationController alloc] initWithRootViewController:(self.rootVC ?: root)];
@@ -1445,6 +1463,10 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     CGRect r = CGRectMake(round((ss.width - w) / 2.0), round((ss.height - h) / 2.0) - 18.0, w, h);
     if (!CGRectEqualToRect(self.cardWrap.frame, r)) self.cardWrap.frame = r;
     self.blur.frame = self.cardWrap.bounds;
+    // v0.4.44：尺寸变了就重画 mask，否则圆角裁在旧尺寸上（会裁掉一侧）
+    self.cardMask.frame = self.blur.bounds;
+    self.cardMask.path = [UIBezierPath bezierPathWithRoundedRect:self.blur.bounds
+                                                   cornerRadius:26.0].CGPath;
     // v0.4.37：导航栏原来紧贴卡片圆角顶（搜索栏顶只低 2pt，压着弧线），
     // 整体下压 14pt；设置页、语音包页、地图页共用这一个容器，顶部留白自动统一。
     CGRect navF = self.blur.contentView.bounds;

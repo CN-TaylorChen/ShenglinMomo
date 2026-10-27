@@ -485,16 +485,25 @@ static UIImage *SLPauseGlyph(void) {
 }
 
 - (void)sl_deleteFolder:(NSString *)folder {
+    NSUInteger n = [SLVoicePack packsInFolder:folder].count;
+    // v0.4.44：现在能连内容一起删了（原来非空就拒绝，等于装过东西的文件夹永远删不掉）。
+    // 所以文案要把「会删掉几条」说清楚，别让人点下去才发现。
+    NSString *msg = n
+        ? [NSString stringWithFormat:@"里面的 %lu 条语音会一起删掉，不可恢复", (unsigned long)n]
+        : @"这个文件夹是空的";
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:
                                     [NSString stringWithFormat:@"删除文件夹「%@」？", folder]
-                                                                   message:@"只能删空文件夹，里面的音频先移走"
+                                                                   message:msg
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
+    [alert addAction:[UIAlertAction actionWithTitle:(n ? @"全部删除" : @"删除")
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *a) {
         if ([SLVoicePack removeFolder:folder]) {
             [self sl_reload];
+            SLRefreshFloatButton();
         } else {
-            [AWECAUtils showToast:@"文件夹里还有音频，先移走" duration:2.2];
+            [AWECAUtils showToast:@"删除失败，可能被占用" duration:2.2];
         }
     }]];
     [self presentViewController:alert animated:YES completion:nil];
