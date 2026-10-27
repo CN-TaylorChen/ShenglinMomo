@@ -27,6 +27,9 @@
 
 + (BOOL)isEnabled;
 + (void)setEnabled:(BOOL)on;
+/// v0.4.34：选中后按住说话就直接发这条语音包（不用再发口令）。默认开。
++ (BOOL)isAutoReplaceEnabled;
++ (void)setAutoReplaceEnabled:(BOOL)on;
 + (NSDictionary *)activePack;
 + (BOOL)isPackActive:(NSDictionary *)pack;
 + (void)selectPack:(NSDictionary *)pack;
@@ -45,3 +48,8 @@
 + (NSString *)displayDuration:(NSDictionary *)pack;
 
 @end
+
+/// v0.4.34：后台把当前语音包解码成 PCM 缓存好。
+/// 录音开始那一刻要同步拿到 PCM，现解会在录音线程上卡几百毫秒，所以选中时先热一次。
+/// 实现放在 Tweak.x（那里才有编码器和全局状态）。
+void SLPackPrewarm(void);

@@ -1,6 +1,7 @@
 #import "SLEntry.h"
 #import "SLSettingsPanel.h"
 #import "SLVoicePackController.h"
+#import "SLVoicePack.h"
 #import "AWECAUtils.h"
 #import <PhotosUI/PhotosUI.h>
 
@@ -74,6 +75,30 @@ UIImage *SLBrandIconImage(CGFloat side) {
     return SLBrandIcon(side, nil);
 }
 
+// v0.4.34：只有六根条、没有底色圆的版本，给毛玻璃悬浮球当图形用。
+// 前半段 30% 不透明度（被替换掉的原声）、后半段实心（合成声），跟圆形版一致。
+static UIImage *SLBrandGlyphImage(CGFloat side, UIColor *color) {
+    if (side <= 0) side = 44;
+    UIColor *c = color ?: [UIColor labelColor];
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat defaultFormat];
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(side, side) format:fmt];
+    return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        (void)ctx;
+        CGFloat u = side / 100.0;
+        CGFloat xs[6] = {20, 30, 40, 54, 64, 74};
+        CGFloat hs[6] = {16, 26, 20, 22, 32, 24};
+        CGFloat as[6] = {0.30, 0.30, 0.30, 1.0, 1.0, 1.0};
+        for (int i = 0; i < 6; i++) {
+            CGFloat w = 6.0 * u;
+            CGFloat h = hs[i] * u;
+            CGRect bar = CGRectMake(xs[i] * u, (side - h) / 2.0, w, h);
+            [[c colorWithAlphaComponent:as[i]] setFill];
+            [[UIBezierPath bezierPathWithRoundedRect:bar cornerRadius:w / 2.0] fill];
+        }
+    }];
+}
+
 UIImage *SLBrandIconImageTinted(CGFloat side, UIColor *bg) {
     return SLBrandIcon(side, bg);
 }
@@ -108,46 +133,263 @@ static BOOL SLSaveFloatIconImage(UIImage *img) {
 }
 
 static void SLApplyFloatIcon(UIButton *btn);
+static NSString *SLFloatPackName(void);   // 胶囊上显示的当前语音包名
 
 // ===================== 浮动入口 =====================
 
 #define SLBtnTag 20931
 
-// ===================== 设置浮窗 =====================
+// ===================== 设置 / 语音包浮窗 =====================
 // v0.4.33：设置页不再用 PageSheet 从底部整页推上来，改成一张固定尺寸的
 // 圆角毛玻璃浮窗，浮在陌陌界面中间。尺寸写死，只有窗内内容能滚动。
+// v0.4.34：语音包也住进同一个容器（原先还是 PageSheet，跟设置页两套观感）。
 
 @interface SLFloatPanelController : UIViewController
-+ (void)presentFrom:(UIViewController *)host;
++ (void)presentFrom:(UIViewController *)host root:(UIViewController *)root;
++ (void)presentSettingsFrom:(UIViewController *)host;
++ (void)presentVoicePackFrom:(UIViewController *)host;
 @end
+
+// ===================== 悬浮球：毛玻璃 + 三态 + 长按胶囊 =====================
+// v0.4.34：
+//   1) 球体换成毛玻璃（SystemMaterial + 0.5pt 白描边），图形跟着深浅色反色，不再是一块黑斑；
+//   2) 三态：录音红环呼吸 / 合成蓝弧转圈 / 就绪整圈合拢，由 Tweak.x 的钩子驱动；
+//   3) 长按球 → 横向展开成胶囊（显示当前语音包名并停住）；
+//      胶囊上再长按 → 弹语音包浮窗；单击胶囊 → 收回成球；单击球 → 进设置。
+//      语音包界面只有「胶囊形态下长按」这一条入口。
+
+#define SLBallSide 48.0
 
 @interface SLFloatButton : UIButton
+@property (nonatomic, assign) BOOL slExpanded;
+@property (nonatomic, assign) SLFloatState slState;
+- (void)sl_loadIcon;
+- (void)sl_applyState:(SLFloatState)state;
+- (void)sl_expand:(BOOL)expanded animated:(BOOL)animated;
 @end
 
-@implementation SLFloatButton
+@implementation SLFloatButton {
+    UIVisualEffectView *_chrome;
+    UIView *_tint;
+    UIImageView *_glyph;
+    UIImageView *_thumb;
+    UILabel *_emoji;
+    UIView *_sep;
+    UILabel *_name;
+    UIImageView *_chev;
+    CAShapeLayer *_ring;
+    CAShapeLayer *_ringArc;
+    CFTimeInterval _longPressAt;
+}
+
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         self.backgroundColor = [UIColor clearColor];
-        self.layer.cornerRadius = 24;
         self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.22;
-        self.layer.shadowRadius = 7;
+        self.layer.shadowOpacity = 0.20;
+        self.layer.shadowRadius = 8;
         self.layer.shadowOffset = CGSizeMake(0, 2);
-        self.titleLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
-        [self setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-        [self addTarget:self action:@selector(sl_openPanel) forControlEvents:UIControlEventTouchUpInside];
+
+        _chrome = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+        _chrome.userInteractionEnabled = NO;
+        _chrome.layer.cornerRadius = SLBallSide / 2.0;
+        _chrome.layer.cornerCurve = kCACornerCurveContinuous;
+        _chrome.layer.borderWidth = 0.5;
+        _chrome.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.5].CGColor;
+        _chrome.clipsToBounds = YES;
+        [self addSubview:_chrome];
+
+        _tint = [[UIView alloc] initWithFrame:CGRectZero];
+        _tint.userInteractionEnabled = NO;
+        _tint.alpha = 0.0;
+        [self addSubview:_tint];
+
+        _glyph = [[UIImageView alloc] initWithFrame:CGRectZero];
+        _glyph.contentMode = UIViewContentModeScaleAspectFit;
+        _glyph.userInteractionEnabled = NO;
+        [self addSubview:_glyph];
+
+        _thumb = [[UIImageView alloc] initWithFrame:CGRectZero];
+        _thumb.contentMode = UIViewContentModeScaleAspectFill;
+        _thumb.clipsToBounds = YES;
+        _thumb.userInteractionEnabled = NO;
+        [self addSubview:_thumb];
+
+        _emoji = [[UILabel alloc] initWithFrame:CGRectZero];
+        _emoji.textAlignment = NSTextAlignmentCenter;
+        _emoji.font = [UIFont systemFontOfSize:22];
+        _emoji.userInteractionEnabled = NO;
+        [self addSubview:_emoji];
+
+        _sep = [[UIView alloc] initWithFrame:CGRectZero];
+        _sep.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.3];
+        [self addSubview:_sep];
+
+        _name = [[UILabel alloc] initWithFrame:CGRectZero];
+        _name.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+        _name.textColor = [UIColor labelColor];
+        _name.lineBreakMode = NSLineBreakByTruncatingTail;
+        _name.userInteractionEnabled = NO;
+        [self addSubview:_name];
+
+        _chev = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.down"]];
+        _chev.contentMode = UIViewContentModeScaleAspectFit;
+        _chev.tintColor = [UIColor secondaryLabelColor];
+        [self addSubview:_chev];
+
+        _ring = [CAShapeLayer layer];
+        _ring.fillColor = nil;
+        _ring.lineWidth = 2.0;
+        _ring.hidden = YES;
+        [self.layer addSublayer:_ring];
+
+        _ringArc = [CAShapeLayer layer];
+        _ringArc.fillColor = nil;
+        _ringArc.lineWidth = 2.0;
+        _ringArc.lineCap = kCALineCapRound;
+        _ringArc.hidden = YES;
+        [self.layer addSublayer:_ringArc];
+
+        [self addTarget:self action:@selector(sl_tap) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(sl_pan:)];
         [self addGestureRecognizer:pan];
-        // 长按直接弹语音包，省掉「进设置 → 找语音包 → 再选」这串层级
         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(sl_longPress:)];
         lp.minimumPressDuration = 0.45;
-        lp.allowableMovement = 12;
+        lp.allowableMovement = 12;   // 拖动换位置时不会误触
         [self addGestureRecognizer:lp];
-        SLApplyFloatIcon(self);
+
+        [self sl_loadIcon];
+        [self sl_applyState:SLFloatStateIdle];
     }
     return self;
 }
+
+#pragma mark 图标
+
+- (void)sl_loadIcon {
+    NSString *v = SLFloatIconValue();
+    _glyph.hidden = YES;
+    _thumb.hidden = YES;
+    _emoji.hidden = YES;
+
+    UIImage *img = nil;
+    if ([v hasPrefix:@"image:"]) {
+        img = [UIImage imageWithContentsOfFile:SLFloatIconImagePath([v substringFromIndex:6])];
+        if (!img) v = kSLFloatIconDefault;
+    }
+    if (img) {
+        _thumb.image = img;
+        _thumb.hidden = NO;
+    } else if ([v hasPrefix:@"emoji:"]) {
+        _emoji.text = [v substringFromIndex:6];
+        _emoji.hidden = NO;
+    } else {
+        _glyph.image = [SLBrandGlyphImage(44, [UIColor blackColor]) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        _glyph.tintColor = [UIColor labelColor];
+        _glyph.hidden = NO;
+    }
+    _name.text = SLFloatPackName();
+    [self setNeedsLayout];
+}
+
+#pragma mark 状态
+
+- (void)sl_applyState:(SLFloatState)state {
+    self.slState = state;
+    UIColor *accent = nil;
+    if (state == SLFloatStateRecording) accent = [UIColor systemRedColor];
+    else if (state == SLFloatStateSynthesizing || state == SLFloatStateReady) accent = [UIColor systemBlueColor];
+
+    _tint.backgroundColor = accent ? [accent colorWithAlphaComponent:0.16] : [UIColor clearColor];
+    _tint.alpha = accent ? 1.0 : 0.0;
+    _glyph.tintColor = accent ?: [UIColor labelColor];
+    _emoji.alpha = 1.0;
+    _name.textColor = accent ?: [UIColor labelColor];
+
+    [_ring removeAllAnimations];
+    [_ringArc removeAllAnimations];
+    _ring.strokeColor = (accent ?: [UIColor clearColor]).CGColor;
+    _ringArc.strokeColor = [UIColor systemBlueColor].CGColor;
+
+    if (state == SLFloatStateRecording) {
+        _ring.strokeEnd = 1.0;
+        _ring.hidden = self.slExpanded;
+        _ringArc.hidden = YES;
+        CABasicAnimation *pulse = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        pulse.fromValue = @(1.0);
+        pulse.toValue = @(0.3);
+        pulse.duration = 0.72;
+        pulse.autoreverses = YES;
+        pulse.repeatCount = HUGE_VALF;
+        [_ring addAnimation:pulse forKey:@"pulse"];
+    } else if (state == SLFloatStateSynthesizing) {
+        _ring.hidden = YES;
+        _ringArc.hidden = self.slExpanded;
+        _ringArc.strokeStart = 0.0;
+        _ringArc.strokeEnd = 0.28;
+        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        spin.fromValue = @(0.0);
+        spin.toValue = @(M_PI * 2.0);
+        spin.duration = 0.95;
+        spin.repeatCount = HUGE_VALF;
+        [_ringArc addAnimation:spin forKey:@"spin"];
+    } else if (state == SLFloatStateReady) {
+        _ring.strokeEnd = 1.0;
+        _ring.hidden = self.slExpanded;
+        _ringArc.hidden = YES;
+    } else {
+        _ring.hidden = YES;
+        _ringArc.hidden = YES;
+        _ring.strokeEnd = 0;
+    }
+    [self setNeedsLayout];
+}
+
+#pragma mark 展开 / 收起
+
+- (CGSize)sl_pillSize {
+    [_name sizeToFit];
+    CGFloat tw = MIN(_name.bounds.size.width, 92.0);
+    CGFloat w = 55.0 + MAX(tw, 26.0) + 26.0;
+    return CGSizeMake(MIN(MAX(w, 122.0), 184.0), SLBallSide);
+}
+
+- (void)sl_expand:(BOOL)expanded animated:(BOOL)animated {
+    if (self.slExpanded == expanded) return;
+    if (expanded) _name.text = SLFloatPackName();
+    self.slExpanded = expanded;
+
+    CGSize target = expanded ? [self sl_pillSize] : CGSizeMake(SLBallSide, SLBallSide);
+    CGRect f = self.frame;
+    CGRect nf = f;
+    nf.size = target;
+    // 贴右边就向左长，贴左边就向右长，尽量不越出屏幕
+    BOOL growLeft = NO;
+    if (self.superview) growLeft = (CGRectGetMidX(f) > CGRectGetMidX(self.superview.bounds));
+    if (growLeft) nf.origin.x = CGRectGetMaxX(f) - target.width;
+    if (self.superview) {
+        CGFloat minX = 6.0, maxX = CGRectGetWidth(self.superview.bounds) - 6.0;
+        if (CGRectGetMaxX(nf) > maxX) nf.origin.x = maxX - target.width;
+        if (nf.origin.x < minX) nf.origin.x = minX;
+    }
+
+    void (^apply)(void) = ^{
+        self.frame = nf;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.22 delay:0 usingSpringWithDamping:0.9 initialSpringVelocity:0.4
+                            options:UIViewAnimationOptionCurveEaseOut animations:apply completion:nil];
+    } else {
+        apply();
+    }
+    [self sl_applyState:self.slState];
+}
+
+#pragma mark 手势
+
 - (void)sl_pan:(UIPanGestureRecognizer *)g {
     if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:self.superview];
@@ -157,27 +399,77 @@ static void SLApplyFloatIcon(UIButton *btn);
         [[NSUserDefaults standardUserDefaults] setObject:pos forKey:@"SLFloatPos"];
     }
 }
-- (void)sl_openPanel {
+
+- (void)sl_tap {
+    // 长按刚结束时个别机型还会补一次 touchUpInside，这里挡掉，免得胶囊一展开就被收回
+    if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.5) return;
+    if (self.slExpanded) {   // 胶囊：单击只收回，避免误进设置
+        [self sl_expand:NO animated:YES];
+        return;
+    }
     UIViewController *top = [AWECAUtils topViewController];
     if (!top) return;
-    [SLFloatPanelController presentFrom:top];
+    [SLFloatPanelController presentSettingsFrom:top];
 }
+
 - (void)sl_longPress:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
+    _longPressAt = CFAbsoluteTimeGetCurrent();
+    if (!self.slExpanded) {   // 第一次长按：展开成胶囊并停住
+        [self sl_expand:YES animated:YES];
+        return;
+    }
+    // 胶囊形态下再长按：这才是语音包入口
+    [self sl_expand:NO animated:YES];
     UIViewController *top = [AWECAUtils topViewController];
     if (!top) return;
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[[SLVoicePackController alloc] init]];
-    nav.modalPresentationStyle = UIModalPresentationPageSheet;
-    if (@available(iOS 15.0, *)) {
-        UISheetPresentationController *sheet = nav.sheetPresentationController;
-        if (sheet) {
-            sheet.detents = @[UISheetPresentationControllerDetent.mediumDetent, UISheetPresentationControllerDetent.largeDetent];
-            sheet.prefersGrabberVisible = YES;
-            sheet.preferredCornerRadius = 22;
-        }
-    }
-    [top presentViewController:nav animated:YES completion:nil];
+    [SLFloatPanelController presentVoicePackFrom:top];
 }
+
+#pragma mark 布局
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGRect b = self.bounds;
+    CGFloat h = SLBallSide;
+    CGFloat top = (CGRectGetHeight(b) - h) / 2.0;
+    BOOL exp = self.slExpanded;
+
+    _chrome.frame = CGRectMake(0, top, CGRectGetWidth(b), h);
+    _chrome.layer.cornerRadius = h / 2.0;
+
+    CGFloat iconS = exp ? 34.0 : h;
+    CGFloat iconY = top + (h - iconS) / 2.0;
+    _glyph.frame = exp ? CGRectMake(8.0 + (34.0 - 18.0) / 2.0, top + (h - 18.0) / 2.0, 18.0, 18.0)
+                       : CGRectMake((CGRectGetWidth(b) - 22.0) / 2.0, (CGRectGetHeight(b) - 22.0) / 2.0, 22.0, 22.0);
+    _thumb.frame = exp ? CGRectMake(8.0, iconY, iconS, iconS)
+                       : CGRectMake((CGRectGetWidth(b) - h) / 2.0, top, h, h);
+    _thumb.layer.cornerRadius = MIN(CGRectGetWidth(_thumb.bounds), CGRectGetHeight(_thumb.bounds)) / 2.0;
+    _emoji.frame = exp ? CGRectMake(8.0, iconY, iconS, iconS) : CGRectMake(0, top, CGRectGetWidth(b), h);
+
+    _tint.frame = exp ? CGRectMake(0, top, 48.0, h) : CGRectMake(0, top, CGRectGetWidth(b), h);
+    _tint.layer.cornerRadius = CGRectGetWidth(_tint.bounds) / 2.0;
+
+    _sep.frame = CGRectMake(47.0, top + (h - 18.0) / 2.0, 0.5, 18.0);
+    _name.frame = CGRectMake(55.0, top, CGRectGetWidth(b) - 55.0 - 22.0, h);
+    _chev.frame = CGRectMake(CGRectGetWidth(b) - 17.0, top + (h - 10.0) / 2.0, 10.0, 10.0);
+    _sep.hidden = !exp;
+    _name.hidden = !exp;
+    _chev.hidden = !exp;
+
+    CGFloat cx = CGRectGetWidth(b) / 2.0;
+    CGFloat cy = CGRectGetHeight(b) / 2.0;
+    CGFloat r = (h - 3.0) / 2.0;
+    UIBezierPath *path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(cx, cy) radius:r
+                                                    startAngle:-M_PI_2
+                                                      endAngle:-M_PI_2 + M_PI * 2.0
+                                                     clockwise:YES];
+    _ring.path = path.CGPath;
+    _ringArc.path = path.CGPath;
+    if (exp || self.slState == SLFloatStateIdle) _ring.hidden = YES;
+    if (exp || self.slState != SLFloatStateSynthesizing) _ringArc.hidden = YES;
+}
+
 @end
 
 @interface SLFloatPanelController ()
@@ -185,16 +477,28 @@ static void SLApplyFloatIcon(UIButton *btn);
 @property (nonatomic, strong) UIView *cardWrap;
 @property (nonatomic, strong) UIVisualEffectView *blur;
 @property (nonatomic, strong) UINavigationController *nav;
+@property (nonatomic, strong) UIViewController *rootVC;
 @end
 
 @implementation SLFloatPanelController
 
-+ (void)presentFrom:(UIViewController *)host {
-    if (!host) return;
++ (void)presentFrom:(UIViewController *)host root:(UIViewController *)root {
+    if (!host || !root) return;
+    // 已经有浮窗开着就不叠第二层，避免连点两次出现两张卡片
+    if (host.presentedViewController) return;
     SLFloatPanelController *vc = [[SLFloatPanelController alloc] init];
+    vc.rootVC = root;
     vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
     vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     [host presentViewController:vc animated:YES completion:nil];
+}
+
++ (void)presentSettingsFrom:(UIViewController *)host {
+    [self presentFrom:host root:[[SLSettingsPanel alloc] init]];
+}
+
++ (void)presentVoicePackFrom:(UIViewController *)host {
+    [self presentFrom:host root:[[SLVoicePackController alloc] init]];
 }
 
 - (void)viewDidLoad {
@@ -222,7 +526,7 @@ static void SLApplyFloatIcon(UIButton *btn);
     [self.cardWrap addSubview:self.blur];
 
     SLSettingsPanel *root = [[SLSettingsPanel alloc] init];
-    self.nav = [[UINavigationController alloc] initWithRootViewController:root];
+    self.nav = [[UINavigationController alloc] initWithRootViewController:(self.rootVC ?: root)];
     self.nav.view.backgroundColor = [UIColor clearColor];
     [self addChildViewController:self.nav];
     [self.blur.contentView addSubview:self.nav.view];
@@ -263,33 +567,49 @@ static void SLApplyFloatIcon(UIButton *btn);
 
 @end
 
+// 胶囊上显示的当前语音包名（没选就写「未选语音包」，省得胶囊空着一条）
+static NSString *SLFloatPackName(void) {
+    NSDictionary *pack = [SLVoicePack activePack];
+    NSString *n = pack[@"name"];
+    return n.length ? n : @"未选语音包";
+}
+
 // 按当前设置把图标套到按钮上
 static void SLApplyFloatIcon(UIButton *btn) {
-    if (!btn) return;
-    NSString *v = SLFloatIconValue();
-    if ([v isEqualToString:kSLFloatIconDefault]) {
-        btn.backgroundColor = [UIColor clearColor];
-        [btn setBackgroundImage:SLBrandIconImage(96) forState:UIControlStateNormal];
-        [btn setTitle:nil forState:UIControlStateNormal];
+    if (![btn isKindOfClass:[SLFloatButton class]]) return;
+    [(SLFloatButton *)btn sl_loadIcon];
+}
+
+// v0.4.34：三态入口。Tweak.x 在录音 / 合成钩子里调用，界面只改颜色和环，不做任何业务判断。
+static __weak SLFloatButton *sSLFloatBtn = nil;
+
+void SLFloatSetState(SLFloatState state) {
+    // 录音 / 合成的钩子不一定在主线程，碰 UI 一律回主队列
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ SLFloatSetState(state); });
         return;
     }
-    if ([v hasPrefix:@"image:"]) {
-        UIImage *img = [UIImage imageWithContentsOfFile:SLFloatIconImagePath([v substringFromIndex:6])];
-        if (img) {
-            btn.backgroundColor = [UIColor clearColor];
-            [btn setBackgroundImage:img forState:UIControlStateNormal];
-            [btn setTitle:nil forState:UIControlStateNormal];
-            return;
-        }
-        v = kSLFloatIconDefault;   // 图片丢了就退回默认文字
+    SLFloatButton *b = sSLFloatBtn;
+    if (!b) return;
+    [b sl_applyState:state];
+    if (state == SLFloatStateReady) {
+        // 就绪只是「亮一下」，1.6 秒后自己退回空闲
+        __weak SLFloatButton *wb = b;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.6 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            SLFloatButton *bb = wb;
+            if (bb && bb.slState == SLFloatStateReady) [bb sl_applyState:SLFloatStateIdle];
+        });
     }
-    btn.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.85];
-    [btn setBackgroundImage:nil forState:UIControlStateNormal];
-    NSString *t = [v hasPrefix:@"emoji:"] ? [v substringFromIndex:6] : @"🎙️";
-    [btn setTitle:t forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:22];
-    btn.titleLabel.adjustsFontSizeToFitWidth = YES;   // 自定义两个字符也塞得下
-    btn.titleLabel.minimumScaleFactor = 0.6;
+}
+
+// 浮窗内部是子控制器，点「完成」时先向上找真正的呈现者
+void SLCloseHostingPanel(UIViewController *vc) {
+    if (!vc) return;
+    UIViewController *c = vc;
+    while (c && !c.presentingViewController) c = c.parentViewController;
+    if (c) [c dismissViewControllerAnimated:YES completion:nil];
+    else [vc dismissViewControllerAnimated:YES completion:nil];
 }
 
 // iOS15 SDK 起 -[UIApplication windows] 被弃用，工程开了 -Werror，这里局部抑制并优先走场景 API
@@ -312,8 +632,11 @@ static UIWindow *SLKeyWindow(void) {
 }
 
 void SLRefreshFloatButton(void) {
-    UIWindow *w = SLKeyWindow();
-    UIButton *btn = (UIButton *)[w viewWithTag:SLBtnTag];
+    SLFloatButton *btn = sSLFloatBtn;
+    if (!btn) {
+        UIWindow *w = SLKeyWindow();
+        btn = (SLFloatButton *)[w viewWithTag:SLBtnTag];
+    }
     SLApplyFloatIcon(btn);
 }
 
@@ -331,7 +654,9 @@ void SLEnsureFloatButton(void) {
         btn.tag = SLBtnTag;
         [w addSubview:btn];
         NSLog(@"SL-MOMO: float button mounted at %@", NSStringFromCGPoint(c));
+        SLPackPrewarm();   // v0.4.34：启动后就把当前语音包解好，第一次录音也不用等
     }
+    sSLFloatBtn = btn;
 }
 
 

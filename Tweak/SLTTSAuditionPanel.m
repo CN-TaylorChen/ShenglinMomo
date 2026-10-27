@@ -221,116 +221,92 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 
     UIColor *tint = self.view.tintColor ?: [UIColor systemBlueColor];
 
-    // 卡片：固定尺寸 + 手工排版。原来整块 Auto Layout，约束互相顶，
-    // 声波条直接跑出圆圈、进度环也不见了（v0.4.32 改）。
-    CGFloat cardW = MIN(320.0, self.view.bounds.size.width - 32.0);
-    CGFloat cardH = 436.0;
+    // v0.4.34：卡片再收一档。原来 320×436，屏幕中间糊一大块，
+    // 播放键单独占一行、两边全空。现在 300×300：播放键并进播放条左侧，
+    // 右边接满波形和时间；标题组跟图标同一条垂直中线，文字统一左对齐。
+    CGFloat cardW = MIN(300.0, self.view.bounds.size.width - 40.0);
+    CGFloat cardH = 300.0;
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake((self.view.bounds.size.width - cardW) / 2.0,
                                                           (self.view.bounds.size.height - cardH) / 2.0,
                                                           cardW, cardH)];
     card.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin |
                             UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
-    card.layer.cornerRadius = 26.0;
+    card.layer.cornerRadius = 24.0;
     card.layer.cornerCurve = kCACornerCurveContinuous;
     card.layer.shadowColor = [UIColor blackColor].CGColor;
     card.layer.shadowOpacity = 0.16;
-    card.layer.shadowRadius = 28.0;
-    card.layer.shadowOffset = CGSizeMake(0, 14);
-    card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:card.bounds cornerRadius:26.0].CGPath;
+    card.layer.shadowRadius = 26.0;
+    card.layer.shadowOffset = CGSizeMake(0, 12);
+    card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:card.bounds cornerRadius:24.0].CGPath;
     [self.view addSubview:card];
     self.card = card;
 
     // 卡片本体毛玻璃，不再是死白底
     UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
     glass.frame = card.bounds;
-    glass.layer.cornerRadius = 26.0;
+    glass.layer.cornerRadius = 24.0;
     glass.layer.cornerCurve = kCACornerCurveContinuous;
     glass.clipsToBounds = YES;
     [card addSubview:glass];
 
     UIView *hair = [[UIView alloc] initWithFrame:CGRectMake(0.5, 0.5, cardW - 1.0, cardH - 1.0)];
-    hair.layer.cornerRadius = 25.5;
+    hair.layer.cornerRadius = 23.5;
     hair.layer.cornerCurve = kCACornerCurveContinuous;
     hair.layer.borderWidth = 0.5;
     hair.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.5].CGColor;
     hair.userInteractionEnabled = NO;
     [card addSubview:hair];
 
-    CGFloat ix = 22.0;              // 内容左右内缩
+    CGFloat ix = 18.0;              // 内容左右内缩（所有文字共用这一条左基线）
     CGFloat cw = cardW - ix * 2.0;  // 内容宽
 
-    // 图标 + 标题 + 文案（左对齐，比原来全居中更耐看）
-    UIView *iconChip = [[UIView alloc] initWithFrame:CGRectMake(ix, 22, 44, 44)];
+    // —— 头部：图标 + 标题 + 一句话，整组按图标中线居中 ——
+    UIView *iconChip = [[UIView alloc] initWithFrame:CGRectMake(ix, 18, 38, 38)];
     iconChip.backgroundColor = [tint colorWithAlphaComponent:0.13];
-    iconChip.layer.cornerRadius = 14.0;
+    iconChip.layer.cornerRadius = 12.0;
     iconChip.layer.cornerCurve = kCACornerCurveContinuous;
     [card addSubview:iconChip];
 
     UIImageView *glyph = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"waveform"]];
     glyph.tintColor = tint;
     glyph.contentMode = UIViewContentModeScaleAspectFit;
-    glyph.frame = CGRectMake(11, 11, 22, 22);
+    glyph.frame = CGRectMake(10, 10, 18, 18);
     [iconChip addSubview:glyph];
 
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(ix + 56, 25, cw - 56, 22)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(ix + 50, 19, cw - 50, 20)];
     title.text = @"试听 AI 语音";
-    title.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    title.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
     title.textColor = [UIColor labelColor];
     [card addSubview:title];
 
-    UILabel *body = [[UILabel alloc] initWithFrame:CGRectMake(ix + 56, 49, cw - 56, 34)];
-    NSString *t = self.bodyText.length > 40
-        ? [[self.bodyText substringToIndex:40] stringByAppendingString:@"…"]
+    UILabel *body = [[UILabel alloc] initWithFrame:CGRectMake(ix + 50, 41, cw - 50, 16)];
+    NSString *t = self.bodyText.length > 26
+        ? [[self.bodyText substringToIndex:26] stringByAppendingString:@"…"]
         : self.bodyText;
-    body.text = t.length ? [NSString stringWithFormat:@"「%@」", t] : @"（没有文字内容）";
-    body.font = [UIFont systemFontOfSize:13];
+    // v0.4.34：不再用「」包住，用户明确说下面这行小字不要带括号
+    body.text = t.length ? t : @"没有文字内容";
+    body.font = [UIFont systemFontOfSize:12];
     body.textColor = [UIColor secondaryLabelColor];
-    body.numberOfLines = 2;
+    body.numberOfLines = 1;
     body.lineBreakMode = NSLineBreakByTruncatingTail;
     [card addSubview:body];
 
-    // 声波面板：整块浅底，声波条铺满整行，下面一行时间
-    UIView *wavePanel = [[UIView alloc] initWithFrame:CGRectMake(ix, 92, cw, 84)];
-    wavePanel.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.07];
-    wavePanel.layer.cornerRadius = 18.0;
-    wavePanel.layer.cornerCurve = kCACornerCurveContinuous;
-    [card addSubview:wavePanel];
+    // —— 播放条：左边播放键（带小进度环），右边整条波形 + 时间 ——
+    UIView *player = [[UIView alloc] initWithFrame:CGRectMake(ix, 72, cw, 74)];
+    player.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.08];
+    player.layer.cornerRadius = 16.0;
+    player.layer.cornerCurve = kCACornerCurveContinuous;
+    [card addSubview:player];
 
-    SLWaveBarView *wave = [[SLWaveBarView alloc] initWithFrame:CGRectMake(14, 12, cw - 28, 36)];
-    NSArray<NSNumber *> *hs = [self sl_waveHeights:self.pcm16k bars:44];
-    if (hs.count < 8) hs = [self sl_fakeHeights:44];   // 没有 PCM（退回播原文件）时别留一块空白
-    [wave setHeights:hs
-              played:tint
-                idle:[UIColor colorWithWhite:0.76 alpha:1]];
-    [wavePanel addSubview:wave];
-    self.wave = wave;
-
-    UILabel *cur = [[UILabel alloc] initWithFrame:CGRectMake(16, 55, 70, 16)];
-    cur.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightMedium];
-    cur.textColor = [UIColor secondaryLabelColor];
-    cur.text = @"0:00";
-    [wavePanel addSubview:cur];
-    self.curLabel = cur;
-
-    UILabel *total = [[UILabel alloc] initWithFrame:CGRectMake(cw - 16 - 70, 55, 70, 16)];
-    total.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightMedium];
-    total.textColor = [UIColor secondaryLabelColor];
-    total.textAlignment = NSTextAlignmentRight;
-    total.text = SLFmtTime(self.duration);
-    [wavePanel addSubview:total];
-    self.totalLabel = total;
-
-    // 播放键：外面套一层 76 的容器，进度环画在按钮外侧（半径 34），
-    // 不再像原来那样画在按钮边界上、被圆角吃干净看不见。
-    UIView *playWrap = [[UIView alloc] initWithFrame:CGRectMake((cardW - 76.0) / 2.0, 190, 76, 76)];
+    UIView *playWrap = [[UIView alloc] initWithFrame:CGRectMake(12, 14, 46, 46)];
     playWrap.backgroundColor = [UIColor clearColor];
-    [card addSubview:playWrap];
+    [player addSubview:playWrap];
 
     UIButton *play = [UIButton buttonWithType:UIButtonTypeCustom];
-    play.frame = CGRectMake(8, 8, 60, 60);
+    play.frame = CGRectMake(5, 5, 36, 36);
     play.backgroundColor = tint;
     play.tintColor = [UIColor whiteColor];
-    play.layer.cornerRadius = 30.0;
+    play.layer.cornerRadius = 18.0;
     play.layer.cornerCurve = kCACornerCurveContinuous;
     [play setImage:[UIImage systemImageNamed:@"play.fill"] forState:UIControlStateNormal];
     play.imageView.contentMode = UIViewContentModeScaleAspectFit;
@@ -338,20 +314,20 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     [playWrap addSubview:play];
     self.playButton = play;
 
-    UIBezierPath *ringPath = [UIBezierPath bezierPathWithArcCenter:CGPointMake(38, 38) radius:34
+    UIBezierPath *ringPath = [UIBezierPath bezierPathWithArcCenter:CGPointMake(23, 23) radius:21
                                                           startAngle:-M_PI_2
                                                             endAngle:-M_PI_2 + M_PI * 2
                                                            clockwise:YES];
     CAShapeLayer *rt = [CAShapeLayer layer];
-    rt.lineWidth = 3.0;
+    rt.lineWidth = 2.5;
     rt.fillColor = nil;
-    rt.strokeColor = [tint colorWithAlphaComponent:0.16].CGColor;
+    rt.strokeColor = [tint colorWithAlphaComponent:0.18].CGColor;
     rt.path = ringPath.CGPath;
     [playWrap.layer addSublayer:rt];
     self.ringTrack = rt;
 
     CAShapeLayer *rf = [CAShapeLayer layer];
-    rf.lineWidth = 3.0;
+    rf.lineWidth = 2.5;
     rf.fillColor = nil;
     rf.strokeColor = tint.CGColor;
     rf.lineCap = kCALineCapRound;
@@ -360,27 +336,53 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     [playWrap.layer addSublayer:rf];
     self.ringFill = rf;
 
-    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(ix, 274, cw, 32)];
-    hint.font = [UIFont systemFontOfSize:12];
+    CGFloat waveX = 70.0;
+    CGFloat waveW = cw - waveX - 14.0;
+    SLWaveBarView *wave = [[SLWaveBarView alloc] initWithFrame:CGRectMake(waveX, 15, waveW, 26)];
+    NSArray<NSNumber *> *hs = [self sl_waveHeights:self.pcm16k bars:40];
+    if (hs.count < 8) hs = [self sl_fakeHeights:40];   // 没有 PCM（退回播原文件）时别留一块空白
+    [wave setHeights:hs
+              played:tint
+                idle:[UIColor colorWithWhite:0.78 alpha:1]];
+    [player addSubview:wave];
+    self.wave = wave;
+
+    UILabel *cur = [[UILabel alloc] initWithFrame:CGRectMake(waveX, 44, 56, 14)];
+    cur.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium];
+    cur.textColor = [UIColor secondaryLabelColor];
+    cur.text = @"0:00";
+    [player addSubview:cur];
+    self.curLabel = cur;
+
+    UILabel *total = [[UILabel alloc] initWithFrame:CGRectMake(waveX + waveW - 64, 44, 64, 14)];
+    total.font = [UIFont monospacedDigitSystemFontOfSize:11 weight:UIFontWeightMedium];
+    total.textColor = [UIColor secondaryLabelColor];
+    total.textAlignment = NSTextAlignmentRight;
+    total.text = SLFmtTime(self.duration);
+    [player addSubview:total];
+    self.totalLabel = total;
+
+    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(ix, 154, cw, 15)];
+    hint.font = [UIFont systemFontOfSize:11.5];
     hint.textColor = [UIColor tertiaryLabelColor];
-    hint.textAlignment = NSTextAlignmentCenter;
+    hint.textAlignment = NSTextAlignmentLeft;
     hint.text = @"觉得可以就去录音，录音会被替换成这条";
-    hint.numberOfLines = 2;
+    hint.numberOfLines = 1;
     [card addSubview:hint];
     self.hintLabel = hint;
 
     // 主按钮：自定义图文按钮，图标与文字之间留 7pt，不再挤成一坨
     SLIconTextButton *use = [SLIconTextButton buttonWithType:UIButtonTypeCustom];
-    use.frame = CGRectMake(ix, 314, cw, 50);
+    use.frame = CGRectMake(ix, 181, cw, 46);
     [use setTitle:@"用这条，去录音" forState:UIControlStateNormal];
-    use.titleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
+    use.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     use.backgroundColor = tint;
     [use setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     use.tintColor = [UIColor whiteColor];
-    use.layer.cornerRadius = 15.0;
+    use.layer.cornerRadius = 14.0;
     use.layer.cornerCurve = kCACornerCurveContinuous;
     [use setImage:[UIImage systemImageNamed:@"mic.fill"] forState:UIControlStateNormal];
-    use.sl_iconSize = 17.0;
+    use.sl_iconSize = 16.0;
     use.sl_spacing = 7.0;
     [use addTarget:self action:@selector(sl_useTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:use];
@@ -388,23 +390,23 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     // 次要按钮行：两个等宽胶囊
     CGFloat halfW = (cw - 10.0) / 2.0;
     UIButton *retry = [UIButton buttonWithType:UIButtonTypeCustom];
-    retry.frame = CGRectMake(ix, 376, halfW, 44);
+    retry.frame = CGRectMake(ix, 237, halfW, 42);
     [retry setTitle:@"重新合成" forState:UIControlStateNormal];
-    retry.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    retry.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
     [retry setTitleColor:tint forState:UIControlStateNormal];
     retry.backgroundColor = [tint colorWithAlphaComponent:0.13];
-    retry.layer.cornerRadius = 13.0;
+    retry.layer.cornerRadius = 12.0;
     retry.layer.cornerCurve = kCACornerCurveContinuous;
     [retry addTarget:self action:@selector(sl_retryTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:retry];
 
     UIButton *cancel = [UIButton buttonWithType:UIButtonTypeCustom];
-    cancel.frame = CGRectMake(ix + halfW + 10.0, 376, halfW, 44);
+    cancel.frame = CGRectMake(ix + halfW + 10.0, 237, halfW, 42);
     [cancel setTitle:@"取消" forState:UIControlStateNormal];
-    cancel.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    cancel.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
     [cancel setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
     cancel.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.13];
-    cancel.layer.cornerRadius = 13.0;
+    cancel.layer.cornerRadius = 12.0;
     cancel.layer.cornerCurve = kCACornerCurveContinuous;
     [cancel addTarget:self action:@selector(sl_cancelTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:cancel];

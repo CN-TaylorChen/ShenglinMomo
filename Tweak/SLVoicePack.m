@@ -8,6 +8,7 @@
 #define kSLPacksKey   @"SLVoicePacks"       // 数组：[{name, rel, folder, dur}]
 #define kSLPackOnKey  @"SLVoicePackOn"      // 开关
 #define kSLPackSelKey @"SLVoicePackActive"  // 选中的 rel
+#define kSLPackAutoKey @"SLVoicePackAuto"   // v0.4.34：选中后录音直接替换，不用口令
 
 static NSArray<NSString *> *SLAudioExts(void) {    static NSArray<NSString *> *exts = nil;
     static dispatch_once_t once;
@@ -358,6 +359,19 @@ static NSString *SLRelOfPath(NSString *path) {
 + (void)setEnabled:(BOOL)on {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     [d setBool:on forKey:kSLPackOnKey];
+    [d synchronize];
+}
+
+// v0.4.34：选中语音包后「录音即替换」，不再需要发口令。默认开，
+// 因为这就是语音包本身的用法；关掉后退回口令（#yyb）触发。
++ (BOOL)isAutoReplaceEnabled {
+    id v = [[NSUserDefaults standardUserDefaults] objectForKey:kSLPackAutoKey];
+    return v ? [v boolValue] : YES;
+}
+
++ (void)setAutoReplaceEnabled:(BOOL)on {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d setBool:on forKey:kSLPackAutoKey];
     [d synchronize];
 }
 

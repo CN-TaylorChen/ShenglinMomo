@@ -5,6 +5,7 @@
 
 #import "SLVoicePackController.h"
 #import "SLVoicePack.h"
+#import "SLEntry.h"
 #import "SLTrimController.h"
 #import "AWECAUtils.h"
 #import "SLLog.h"
@@ -56,12 +57,58 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 // ===================== 语音包列表单元格 =====================
 // v0.4.33：只显示原文件名，一个字都不改。名字比行宽长时，在行内横向缓慢滚动，
 // 放得下就静止。用自定义 cell 而不是 Value1：系统的 textLabel 会溢出到右侧试听按钮上。
+// v0.4.34：
+//   · 左侧方块换成圆点（空心圈 / 蓝圈+实心点），跟「选中一条发送」的语义一致；
+//   · 右侧试听键改矢量三角 —— 原来用字体里的 ▶ 字符，12pt 下就是一个歪的实心方块；
+//   · 行本身改成半透明玻璃片，跟设置页、浮窗同材质。
+static UIColor *SLPackGlassColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithWhite:1.0 alpha:0.08]
+            : [UIColor colorWithWhite:1.0 alpha:0.62];
+    }];
+}
+
+static UIImage *SLPlayGlyph(void) {
+    static UIImage *img = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(10, 12)];
+        img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            UIBezierPath *p = [UIBezierPath bezierPath];
+            [p moveToPoint:CGPointMake(1.2, 0.8)];
+            [p addLineToPoint:CGPointMake(9.2, 6.0)];
+            [p addLineToPoint:CGPointMake(1.2, 11.2)];
+            [p closePath];
+            [ctx fillPath:p];
+        }];
+    });
+    return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+static UIImage *SLPauseGlyph(void) {
+    static UIImage *img = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(10, 12)];
+        img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0.6, 0.6, 3.4, 10.8) cornerRadius:1.4] fill];
+            [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(6.0, 0.6, 3.4, 10.8) cornerRadius:1.4] fill];
+            (void)ctx;
+        }];
+    });
+    return [img imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
 @interface SLPackCell : UITableViewCell
 @property (nonatomic, strong) UIView *badge;
+@property (nonatomic, strong) UIView *dot;
 @property (nonatomic, strong) UIView *clip;
 @property (nonatomic, strong) UILabel *nameLabel;
 @property (nonatomic, strong) UILabel *durLabel;
+@property (nonatomic, strong) UIButton *playButton;
 - (void)sl_setName:(NSString *)name active:(BOOL)active;
+- (void)sl_setPlaying:(BOOL)playing;
 - (void)sl_refreshMarquee;
 @end
 
@@ -73,26 +120,43 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 - (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
     self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
     if (self) {
+        self.backgroundColor = SLPackGlassColor();
+
         _badge = [[UIView alloc] initWithFrame:CGRectZero];
-        _badge.backgroundColor = [UIColor secondarySystemFillColor];
-        _badge.layer.cornerRadius = 6.0;
+        _badge.backgroundColor = [UIColor clearColor];
+        _badge.layer.cornerRadius = 9.0;
+        _badge.layer.borderWidth = 1.5;
+        _badge.layer.borderColor = [UIColor colorWithWhite:0.62 alpha:1.0].CGColor;
         [self.contentView addSubview:_badge];
+
+        _dot = [[UIView alloc] initWithFrame:CGRectZero];
+        _dot.backgroundColor = [UIColor systemBlueColor];
+        _dot.layer.cornerRadius = 4.5;
+        _dot.hidden = YES;
+        [_badge addSubview:_dot];
 
         _clip = [[UIView alloc] initWithFrame:CGRectZero];
         _clip.clipsToBounds = YES;
         [self.contentView addSubview:_clip];
 
         _nameLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _nameLabel.font = [UIFont systemFontOfSize:16];
+        _nameLabel.font = [UIFont systemFontOfSize:15.5];
         _nameLabel.textColor = [UIColor labelColor];
         _nameLabel.lineBreakMode = NSLineBreakByClipping;
         [_clip addSubview:_nameLabel];
 
         _durLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-        _durLabel.font = [UIFont systemFontOfSize:13];
+        _durLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightRegular];
         _durLabel.textColor = [UIColor secondaryLabelColor];
         _durLabel.textAlignment = NSTextAlignmentRight;
         [self.contentView addSubview:_durLabel];
+
+        _playButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        _playButton.layer.cornerRadius = 15.0;
+        _playButton.tintColor = [UIColor systemBlueColor];
+        _playButton.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.11];
+        [_playButton setImage:SLPlayGlyph() forState:UIControlStateNormal];
+        [self.contentView addSubview:_playButton];
     }
     return self;
 }
@@ -109,11 +173,15 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
     [super layoutSubviews];
     CGRect b = self.contentView.bounds;
     CGFloat h = CGRectGetHeight(b);
-    CGFloat pad = 16.0, badgeW = 22.0, gap = 9.0, durW = 50.0;
+    CGFloat pad = 14.0, badgeW = 18.0, gap = 10.0, durW = 44.0, playW = 30.0;
+
     _badge.frame = CGRectMake(pad, (h - badgeW) / 2.0, badgeW, badgeW);
-    _durLabel.frame = CGRectMake(CGRectGetWidth(b) - durW - pad, 0, durW, h);
+    _dot.frame = CGRectMake((badgeW - 9.0) / 2.0, (badgeW - 9.0) / 2.0, 9.0, 9.0);
+    _playButton.frame = CGRectMake(CGRectGetWidth(b) - pad - playW, (h - playW) / 2.0, playW, playW);
+    _durLabel.frame = CGRectMake(CGRectGetMinX(_playButton.frame) - 8.0 - durW, 0, durW, h);
+
     CGFloat x = CGRectGetMaxX(_badge.frame) + gap;
-    CGFloat w = CGRectGetMinX(_durLabel.frame) - gap - x;
+    CGFloat w = CGRectGetMinX(_durLabel.frame) - 10.0 - x;
     if (w < 0) w = 0;
     _clip.frame = CGRectMake(x, 0, w, h);
     [self sl_refreshMarquee];
@@ -121,9 +189,19 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 
 - (void)sl_setName:(NSString *)name active:(BOOL)active {
     _nameLabel.text = name ?: @"";
+    _nameLabel.font = [UIFont systemFontOfSize:15.5 weight:(active ? UIFontWeightSemibold : UIFontWeightRegular)];
     _nameLabel.textColor = active ? [UIColor systemBlueColor] : [UIColor labelColor];
-    _badge.backgroundColor = active ? [UIColor systemBlueColor] : [UIColor secondarySystemFillColor];
+    _badge.layer.borderColor = (active ? [UIColor systemBlueColor]
+                                       : [UIColor colorWithWhite:0.62 alpha:1.0]).CGColor;
+    _dot.hidden = !active;
     [self setNeedsLayout];
+}
+
+- (void)sl_setPlaying:(BOOL)playing {
+    [_playButton setImage:(playing ? SLPauseGlyph() : SLPlayGlyph()) forState:UIControlStateNormal];
+    _playButton.backgroundColor = playing ? [UIColor systemBlueColor]
+                                         : [[UIColor systemBlueColor] colorWithAlphaComponent:0.11];
+    _playButton.tintColor = playing ? [UIColor whiteColor] : [UIColor systemBlueColor];
 }
 
 - (void)sl_refreshMarquee {
@@ -176,6 +254,11 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
                                                       target:self
                                                       action:@selector(sl_addTapped)];
+    // v0.4.34：这一页现在装在浮窗里，表格必须透明 + 叠一层同款毛玻璃，
+    // 否则会出现「浮窗里贴了一张不透明的灰纸」。
+    self.tableView.backgroundColor = [UIColor clearColor];
+    UIVisualEffectView *veil = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+    self.tableView.backgroundView = veil;
     // 留痕：万一还有问题，日志能区分「页面没建完」和「表格结构算错」
     SLLog(@"PACK-PAGE open root=%d folder=%@", (int)self.isRoot, self.folder ?: @"-");
     [self sl_reload];
@@ -184,10 +267,9 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    // v0.4.33：长按悬浮球会把它当 sheet 弹出，此时是模态根页，需要一个「完成」收起入口
-    BOOL modalRoot = self.isRoot && self.navigationController.presentingViewController != nil
-                     && self.navigationController.viewControllers.firstObject == self;
-    if (modalRoot) {
+    // v0.4.34：浮窗根页没有返回可点，给一个「完成」直接收窗
+    BOOL navRoot = self.navigationController.viewControllers.firstObject == self;
+    if (navRoot) {
         if (!self.navigationItem.leftBarButtonItem) {
             self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
                                                                                      style:UIBarButtonItemStyleDone
@@ -201,7 +283,7 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 }
 
 - (void)sl_closeModal {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    SLCloseHostingPanel(self);
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -498,11 +580,11 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
 - (NSString *)sl_footerTextForSection:(NSInteger)section {
     if (!self.isRoot) {
         return section == 0
-            ? [NSString stringWithFormat:@"发「%@」直接发出所选语音 · 点行选中发送\n右上＋导入到此文件夹 · 左滑移动 / 裁剪 / 重命名 / 删除", SLPackCmdValue()]
+            ? [NSString stringWithFormat:@"点一行即选中：之后按住说话会直接发它，不用发「%@」\n右上＋导入到此文件夹 · 左滑移动 / 裁剪 / 重命名 / 删除", SLPackCmdValue()]
             : nil;
     }
     if (section == 0) {
-        return [NSString stringWithFormat:@"发「%@」直接发出所选语音，不走合成\n点文件夹进入 · 左滑文件夹可重命名 / 删除", SLPackCmdValue()];
+        return [NSString stringWithFormat:@"选中一条之后，按住说话录下的一句就会直接换成它（不用发「%@」）\n点文件夹进入 · 左滑文件夹可重命名 / 删除", SLPackCmdValue()];
     }
     return nil;
 }
@@ -533,6 +615,7 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
         static NSString *sid = @"switch";
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:sid];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:sid];
+        cell.backgroundColor = SLPackGlassColor();
         cell.textLabel.text = @"启用语音包";
         cell.textLabel.textColor = [UIColor labelColor];
         cell.imageView.image = nil;
@@ -549,6 +632,7 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
         static NSString *fid = @"folder";
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:fid];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:fid];
+        cell.backgroundColor = SLPackGlassColor();
         NSString *name = self.folderList[ip.row];
         NSUInteger n = [SLVoicePack packsInFolder:name].count;
         cell.textLabel.text = name;
@@ -570,28 +654,31 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.backgroundColor = SLPackGlassColor();
+    if (!cell.selectedBackgroundView) {
+        UIView *sel = [[UIView alloc] initWithFrame:CGRectZero];
+        sel.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.08];
+        cell.selectedBackgroundView = sel;
+    }
 
     NSDictionary *pack = [self sl_packAt:ip];
     if (!pack) {
         [cell sl_setName:@"" active:NO];
         cell.durLabel.text = nil;
+        cell.playButton.hidden = YES;
         return cell;
     }
+    cell.playButton.hidden = NO;
     BOOL active = [SLVoicePack isPackActive:pack];
     [cell sl_setName:(pack[@"name"] ?: @"未命名") active:active];
     cell.durLabel.text = [SLVoicePack displayDuration:pack];
 
-    // 试听按钮
-    UIButton *play = [UIButton buttonWithType:UIButtonTypeSystem];
-    play.frame = CGRectMake(0, 0, 30, 30);
-    play.layer.cornerRadius = 15;
-    play.backgroundColor = [UIColor secondarySystemFillColor];
+    // 试听按钮：矢量三角 / 播放中换成两根竖条
     BOOL playing = self.playingRel.length && [self.playingRel isEqualToString:pack[@"rel"]];
-    [play setTitle:(playing ? @"■" : @"▶") forState:UIControlStateNormal];
-    play.titleLabel.font = [UIFont systemFontOfSize:12];
-    play.tag = ip.section * 10000 + ip.row;
-    [play addTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
-    cell.accessoryView = play;
+    [cell sl_setPlaying:playing];
+    cell.playButton.tag = ip.section * 10000 + ip.row;
+    [cell.playButton removeTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [cell.playButton addTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
     return cell;
 }
 
@@ -630,8 +717,12 @@ static UIView *SLPackFooter(NSString *text, CGFloat x, CGFloat width) {
     [SLVoicePack selectPack:pack];
     [SLVoicePack setEnabled:YES];
     [self.tableView reloadData];
-    [AWECAUtils showToast:[NSString stringWithFormat:@"已选中「%@」· 发「%@」直接发出",
-                           pack[@"name"] ?: @"", SLPackCmdValue()] duration:2.0];
+    SLRefreshFloatButton();   // v0.4.34：胶囊上显示的包名跟着换
+    SLPackPrewarm();          // v0.4.34：后台先把 PCM 解好，录音时不用现等
+    NSString *msg = [SLVoicePack isAutoReplaceEnabled]
+        ? [NSString stringWithFormat:@"已选中「%@」· 按住说话直接发它", pack[@"name"] ?: @""]
+        : [NSString stringWithFormat:@"已选中「%@」· 发「%@」发出", pack[@"name"] ?: @"", SLPackCmdValue()];
+    [AWECAUtils showToast:msg duration:2.0];
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tv trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)ip {
