@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.23"
+#define SLVersion @"0.4.24"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -299,6 +299,24 @@ static void SLClearInputBars(void) {
     } @catch (NSException *e) {}
 }
 
+// v0.4.24：安全取字符串 getter —— 先确认方法返回类型是对象（'@'）再调。
+// 0.4.23 闪退根因：对「返回结构体/基本类型」的属性盲调 getter，arm64 上返回值 ABI 不匹配，直接崩。
+static NSString *SLStringGetter(id obj, NSString *name) {
+    if (!obj || !name.length) return nil;
+    SEL s = NSSelectorFromString(name);
+    if (![obj respondsToSelector:s]) return nil;
+    Method m = class_getInstanceMethod([obj class], s);
+    if (!m) return nil;
+    char ret[16] = {0};
+    method_getReturnType(m, ret, sizeof(ret));
+    if (ret[0] != '@') return nil;
+    @try {
+        id v = ((id (*)(id, SEL))objc_msgSend)(obj, s);
+        if ([v isKindOfClass:[NSString class]]) return (NSString *)v;
+    } @catch (NSException *e) { }
+    return nil;
+}
+
 static NSString *SLTextFromArgument(id arg) {
     if ([arg isKindOfClass:[NSString class]]) return (NSString *)arg;
     if ([arg isKindOfClass:[NSAttributedString class]]) return ((NSAttributedString *)arg).string;
@@ -316,12 +334,8 @@ static NSString *SLTextFromArgument(id arg) {
                            @"msgContent", @"messageText", @"msg", @"title", @"noreplyText",
                            @"additionalText", @"extraDataString", @"msgExtraInfo"];
         for (NSString *name in names) {
-            SEL s = NSSelectorFromString(name);
-            if (![arg respondsToSelector:s]) continue;
-            @try {
-                id v = ((id (*)(id, SEL))objc_msgSend)(arg, s);
-                if ([v isKindOfClass:[NSString class]] && [v length]) return v;
-            } @catch (NSException *e) { }
+            NSString *v = SLStringGetter(arg, name);
+            if (v.length) return v;
         }
         for (NSString *name in names) {
             @try {
@@ -2410,25 +2424,22 @@ static NSString *SLCommandTextIn(id obj) {
         return SLTextHasAnyCommand((NSString *)obj) ? (NSString *)obj : nil;
     }
     NSMutableArray *names = [NSMutableArray arrayWithObjects:
-        @"text", @"textv2", @"content", @"originText", @"rawText", @"inputText",
-        @"msgContent", @"messageText", @"body", @"instantMessageText", @"msg", nil];
+        @"text", @"textv2", @"originText", @"rawText", @"inputText",
+        @"msgContent", @"messageText", @"body", nil];
     unsigned int pc = 0;
     objc_property_t *props = class_copyPropertyList([obj class], &pc);
     for (unsigned int i = 0; i < pc; i++) {
+        // 只认「声明为 NSString 的属性」。对 imageInfo/siteinfo 这类非字符串属性调 getter
+        // 会踩 ABI（返回结构体时尤其致命），0.4.23 就是死在这里。
+        const char *attrs = property_getAttributes(props[i]);
+        if (!attrs || strncmp(attrs, "T@\"NSString\"", 12) != 0) continue;
         const char *nm = property_getName(props[i]);
         if (nm) [names addObject:[NSString stringWithUTF8String:nm]];
     }
     if (props) free(props);
     for (NSString *name in names) {
-        SEL s = NSSelectorFromString(name);
-        id v = nil;
-        @try { if ([obj respondsToSelector:s]) v = ((id (*)(id, SEL))objc_msgSend)(obj, s); } @catch (NSException *e) { v = nil; }
-        if (![v isKindOfClass:[NSString class]] || ![v length]) {
-            @try { v = [obj valueForKey:name]; } @catch (NSException *e) { v = nil; }
-        }
-        if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] && SLTextHasAnyCommand((NSString *)v)) {
-            return (NSString *)v;
-        }
+        NSString *v = SLStringGetter(obj, name);
+        if (v.length && SLTextHasAnyCommand(v)) return v;
     }
     return nil;
 }
@@ -2437,8 +2448,13 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
     void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
     if (orig == NULL) return;
 
+    if (!SLIsEnabled()) { orig(self, _cmd, arg); return; }
+
     NSString *shown = SLTextFromArgument(arg);
-    NSString *full = SLCommandTextIn(arg);
+    // 音频 / 图片 / 表情这类 content 没有文本：立刻透传，绝不进字段扫描。
+    // 小宇宙发语音时 arg 就是这种对象（text=nil），0.4.23 在这里扫属性扫崩了。
+    if (!shown.length) { orig(self, _cmd, arg); return; }
+    NSString *full = SLTextHasAnyCommand(shown) ? shown : SLCommandTextIn(arg);
 
     if (!SLIsEnabled() || !full.length) {
         static int quiet = 0;
