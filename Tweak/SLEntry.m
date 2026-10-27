@@ -1225,10 +1225,14 @@ static __weak SLPackMenu *sSLPackMenu = nil;
             in.top = top;
             sv.contentInset = in;
         }
-        UIEdgeInsets si = sv.scrollIndicatorInsets;
-        if (fabs(si.top - top) > 0.5) {
-            si.top = top;
-            sv.scrollIndicatorInsets = si;
+        // 滚动条也跟着让开导航栏。v0.4.42：老接口 scrollIndicatorInsets 在 iOS 13 已弃用，
+        // 而这里开着 -Werror → 直接编译失败；改用 verticalScrollIndicatorInsets。
+        if (@available(iOS 13.0, *)) {
+            UIEdgeInsets si = sv.verticalScrollIndicatorInsets;
+            if (fabs(si.top - top) > 0.5) {
+                si.top = top;
+                sv.verticalScrollIndicatorInsets = si;
+            }
         }
         // 底色必须是透的，滚动时露出的是浮窗那层毛玻璃
         if (sv.backgroundColor && ![sv.backgroundColor isEqual:[UIColor clearColor]]) {
