@@ -3,6 +3,7 @@
 #import "SLVoicePackController.h"
 #import "SLVoicePack.h"
 #import "AWECAUtils.h"
+#import "SLLog.h"
 #import <PhotosUI/PhotosUI.h>
 
 // ===================== 悬浮球图标 =====================
