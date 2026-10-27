@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.20"
+#define SLVersion @"0.4.21"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -1144,8 +1144,20 @@ static void SLSendText(id self, SEL _cmd) {
     SLLog(@"#tts hit via %@ -sendText, text=%@", NSStringFromClass([self class]), SLShorten(text, 40));
     id handler = SLFindAudioHandlerNear(bar);
     if (!handler) {
+        // v0.4.21：小宇宙私聊的发送器 MDChatUniverseHandler 不在输入栏响应链上，
+        // 老逻辑会误判「没找到语音发送入口」→ 退回文字，于是私聊口令完全没反应。
+        // 实际替换由全局编码器接管（MDAudioStreamBus → MDOpusEncoder），SLArmTTS 不使用
+        // handler 实参（只用来判空），所以这里对小宇宙输入栏直接装填，不再退回文字。
+        Class ub = NSClassFromString(@"MDChatUniverseInputBar");
+        Class uh = NSClassFromString(@"MDChatUniverseHandler");
+        if (ub && uh && [self isKindOfClass:ub]) {
+            SLLog(@"Universe 输入栏：响应链未命中 handler，但仍装填（录音由全局编码器接管替换）");
+            SLArmTTS(self, content, ^{ if (orig) orig(self, _cmd); });
+            SLClearTextInView(tv);
+            return;
+        }
         SLLog(@"no audio handler near input bar -> fallback to text");
-        // v0.4.20：不再静默退回文本（小宇宙私聊就是这么「口令没反应」的），给个可见提示。
+        // v0.4.20：不再静默退回文本，给个可见提示。
         [AWECAUtils showToast:@"没找到语音发送入口，这条按文字发了" duration:2.0];
         if (orig) orig(self, _cmd);
         return;

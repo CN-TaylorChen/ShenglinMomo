@@ -1,0 +1,8 @@
+# 构建产物（本地 build_release.ps1 / theos 输出）
+ShenglinMomo-build/
+.theos/
+packages/
+*.deb
+*.dylib
+*.zip
+.DS_Store
