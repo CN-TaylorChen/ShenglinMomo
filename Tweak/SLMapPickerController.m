@@ -32,6 +32,7 @@ static const CGFloat kSLPanelPad = 16;       // 卡片内容左右内边距
 static const CGFloat kSLQuickTop = 112;      // 快捷位置行（坐标芯片下沿 102 + 10）
 static const CGFloat kSLQuickH = 34;
 static const CGFloat kSLPinTipOffset = 23;   // 水滴尖端相对 pinView 中心的 y 偏移（58 - 35）
+static const CGFloat kSLPanelFloat = 16;     // 卡片整体上浮的间距，不再沉到屏幕最底
 
 static UIColor *SLAccent(void) {
     return [UIColor colorWithRed:0.216 green:0.541 blue:0.867 alpha:1.0];
@@ -73,6 +74,11 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) UIButton *confirmBtn;
 @property (nonatomic, strong) UIButton *starBtn;
 @property (nonatomic, strong) UIButton *tuneBtn;
+@property (nonatomic, strong) UIButton *trackBtn;
+@property (nonatomic, strong) UIView *brandView;
+@property (nonatomic, strong) UILabel *starCap;
+@property (nonatomic, strong) UILabel *tuneCap;
+@property (nonatomic, strong) UILabel *trackCap;
 
 @property (nonatomic, strong) UIScrollView *quickRow;      // 快捷位置（收藏过的点）
 @property (nonatomic, copy) NSArray<SLFavoriteItem *> *quickItems;
@@ -104,6 +110,8 @@ static UIColor *SLHairline(void) {
 - (void)sl_buildPanel;
 - (void)sl_buildResult;
 - (void)sl_buildQuick;
+- (void)sl_buildBrand;
+- (UILabel *)sl_capLabel:(NSString *)text;
 - (void)sl_reloadQuick;
 - (CLLocationCoordinate2D)sl_currentCoord;
 - (CGPoint)sl_pinTipPoint;
@@ -125,6 +133,7 @@ static UIColor *SLHairline(void) {
 - (void)sl_openFavorites;
 - (void)sl_locate;
 - (void)sl_tune;
+- (void)sl_track;
 - (void)sl_copyCoord;
 - (void)sl_toast:(NSString *)text;
 
@@ -152,6 +161,7 @@ static UIColor *SLHairline(void) {
     [self sl_buildPanel];
     [self sl_buildQuick];
     [self sl_buildResult];
+    [self sl_buildBrand];
     // 先把快捷位置排出来，第一帧的卡片高度就是最终高度，避免进场后「长高」一下
     [self sl_reloadQuick];
 
@@ -174,6 +184,7 @@ static UIColor *SLHairline(void) {
     nb.scrollEdgeAppearance = ap;
     nb.tintColor = [UIColor labelColor];
     self.navigationItem.title = @"";
+    self.navigationItem.titleView = self.brandView;
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -186,6 +197,7 @@ static UIColor *SLHairline(void) {
     nb.scrollEdgeAppearance = ap;
     nb.tintColor = nil;
     self.navigationItem.title = @"";
+    self.navigationItem.titleView = nil;
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -210,18 +222,18 @@ static UIColor *SLHairline(void) {
     //    中间那条会露出页面底色（陌陌主题下是透明/灰白），看着像地图断了一截。
     self.mapView.frame = CGRectMake(0, 0, w, h);
 
-    // 2) 卡片：左右内缩 8，贴屏幕底；高度按内容算（有快捷位置行就多一行）
+    // 2) 卡片：左右内缩 8，整体上浮一截（不再沉到屏幕最底）；高度按内容算（有快捷位置行就多一行）
     BOOL hasQuick = !self.quickRow.hidden;
     CGFloat btnY = hasQuick ? (kSLQuickTop + kSLQuickH + 10) : (kSLQuickTop - 8);
-    CGFloat bodyH = btnY + 50 + 14;
+    CGFloat bodyH = btnY + 50 + 18;            // 50 按钮高 + 18 给按钮下方小标注留位
     CGFloat panelH = bodyH + safeBottom;
-    CGFloat panelY = h - panelH;
+    CGFloat panelY = h - panelH - kSLPanelFloat;
 
     self.panel.frame = CGRectMake(kSLPanelInset, panelY, w - kSLPanelInset * 2, panelH);
     CGFloat pw = self.panel.bounds.size.width;
     CGFloat pad = kSLPanelPad;
-    CGFloat side = 52, gap = 10;
-    CGFloat mainW = pw - pad * 2 - side * 2 - gap * 2;
+    CGFloat side = 50, gap = 8;
+    CGFloat mainW = pw - pad * 2 - side * 3 - gap * 3;
 
     self.grabber.frame = CGRectMake(pw / 2 - 18, 10, 36, 5);
     self.iconBadge.frame = CGRectMake(pad, 24, 40, 40);
@@ -229,7 +241,7 @@ static UIColor *SLHairline(void) {
     self.nameLabel.frame = CGRectMake(68, 22, pw - 68 - pad, 21);
     self.subLabel.frame = CGRectMake(68, 45, pw - 68 - pad, 17);
 
-    CGFloat chipW = MIN(216, pw - pad * 2);
+    CGFloat chipW = pw - pad * 2;              // 经纬度整行铺满，右侧放「复制」
     self.coordChip.frame = CGRectMake(pad, 70, chipW, 32);
     self.coordLabel.frame = CGRectMake(10, 0, chipW - 10 - 46, 32);
     self.coordCopyBtn.frame = CGRectMake(chipW - 46, 0, 42, 32);
@@ -239,9 +251,16 @@ static UIColor *SLHairline(void) {
     self.confirmBtn.frame = CGRectMake(pad, btnY, mainW, 50);
     self.starBtn.frame = CGRectMake(pad + mainW + gap, btnY, side, 50);
     self.tuneBtn.frame = CGRectMake(pad + mainW + gap * 2 + side, btnY, side, 50);
+    self.trackBtn.frame = CGRectMake(pad + mainW + gap * 3 + side * 2, btnY, side, 50);
 
-    // 3) 搜索胶囊
-    CGFloat capsuleY = safeTop + 6;
+    // 方形按钮下方小标注（收藏 / 微调 / 轨迹），让人一眼看懂
+    CGFloat capY = btnY + 50 + 2;
+    self.starCap.frame = CGRectMake(self.starBtn.frame.origin.x, capY, side, 14);
+    self.tuneCap.frame = CGRectMake(self.tuneBtn.frame.origin.x, capY, side, 14);
+    self.trackCap.frame = CGRectMake(self.trackBtn.frame.origin.x, capY, side, 14);
+
+    // 3) 搜索胶囊（下移，给顶部品牌胶囊让位）
+    CGFloat capsuleY = safeTop + 50;
     self.searchCapsule.frame = CGRectMake(16, capsuleY, w - 32, 48);
     CGFloat capW = self.searchCapsule.bounds.size.width;
     self.searchIcon.frame = CGRectMake(14, 14, 20, 20);
@@ -376,7 +395,7 @@ static UIColor *SLHairline(void) {
 - (void)sl_buildPanel {
     UIView *panel = [[UIView alloc] initWithFrame:CGRectZero];
     panel.backgroundColor = [UIColor whiteColor];
-    panel.layer.cornerRadius = 18;
+    panel.layer.cornerRadius = 26;
     panel.layer.cornerCurve = kCACornerCurveContinuous;
     panel.layer.borderWidth = 0.5;
     panel.layer.borderColor = SLHairline().CGColor;
@@ -463,6 +482,22 @@ static UIColor *SLHairline(void) {
     self.tuneBtn.tintColor = [UIColor colorWithWhite:0.37 alpha:1];
     [self.tuneBtn addTarget:self action:@selector(sl_tune) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:self.tuneBtn];
+
+    self.trackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+    self.trackBtn.backgroundColor = SLChipBg();
+    self.trackBtn.layer.cornerRadius = 14;
+    self.trackBtn.layer.cornerCurve = kCACornerCurveContinuous;
+    [self.trackBtn setImage:[UIImage systemImageNamed:@"route"] forState:UIControlStateNormal];
+    self.trackBtn.tintColor = [UIColor colorWithWhite:0.37 alpha:1];
+    [self.trackBtn addTarget:self action:@selector(sl_track) forControlEvents:UIControlEventTouchUpInside];
+    [panel addSubview:self.trackBtn];
+
+    self.starCap = [self sl_capLabel:@"收藏"];
+    self.tuneCap = [self sl_capLabel:@"微调"];
+    self.trackCap = [self sl_capLabel:@"轨迹"];
+    [panel addSubview:self.starCap];
+    [panel addSubview:self.tuneCap];
+    [panel addSubview:self.trackCap];
 }
 
 - (void)sl_buildResult {
@@ -959,6 +994,43 @@ static UIColor *SLHairline(void) {
         [UIView animateWithDuration:0.22 animations:^{ l.alpha = 0; }
                          completion:^(BOOL f) { [l removeFromSuperview]; }];
     });
+}
+
+#pragma mark - 品牌 / 轨迹占位
+
+- (void)sl_buildBrand {
+    // 顶部导航栏品牌胶囊：定位针 + 「声临 陌陌版」（不含版本号）。
+    // 底部卡片改回显示地点名，品牌不占底部空间。
+    UIView *b = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 150, 30)];
+    b.userInteractionEnabled = NO;
+    b.backgroundColor = [UIColor colorWithRed:0.902 green:0.945 blue:0.984 alpha:1.0];
+    b.layer.cornerRadius = 15;
+    b.layer.cornerCurve = kCACornerCurveContinuous;
+    UIImageView *g = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"mappin.fill"]];
+    g.tintColor = SLAccent();
+    g.contentMode = UIViewContentModeScaleAspectFit;
+    g.frame = CGRectMake(12, 7, 16, 16);
+    [b addSubview:g];
+    UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(32, 0, 110, 30)];
+    t.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
+    t.textColor = [UIColor colorWithRed:0.094 green:0.373 blue:0.647 alpha:1.0];
+    t.text = @"声临 陌陌版";
+    [b addSubview:t];
+    self.brandView = b;
+}
+
+- (UILabel *)sl_capLabel:(NSString *)text {
+    UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];
+    l.font = [UIFont systemFontOfSize:11];
+    l.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+    l.textAlignment = NSTextAlignmentCenter;
+    l.text = text;
+    return l;
+}
+
+- (void)sl_track {
+    // v0.4.27 占位：完整「选两点 → 模拟移动 → 改速度 → 显示每段公里数」放下一步
+    [self sl_toast:@"轨迹模拟 v0.4.27 即将上线"];
 }
 
 @end
