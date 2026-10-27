@@ -1,6 +1,14 @@
 //
 //  SLMapPickerController.m
-//  地图选点页：悬浮搜索胶囊 + 水滴定位针 + 底部悬浮卡片 + 收藏
+//  地图选点页：悬浮搜索胶囊 + 水滴定位针 + 底部悬浮卡片（含快捷位置）+ 收藏
+//
+//  v0.4.26 版式改造：
+//    1) 地图铺满整屏（含安全区），卡片浮在它上面 —— 原来地图只铺到卡片上沿、
+//       卡片又留 12pt 缝，中间那条会露出页面底色，看着像地图断了一截
+//    2) 卡片左右各内缩 8pt、统一 18 圆角、0.5pt 描边，贴屏幕底
+//    3) 高度按内容自适应（原来写死 210，内容排完还剩一大块空白）
+//    4) 新增「快捷位置」行：收藏过的位置一点即达
+//    5) 针尖改成落在「可视区中心」—— 地图全屏后屏幕中心会被卡片挡住
 //
 //  为什么用 frame 而不是自动布局：陌陌的导航控制器会改写 additionalSafeAreaInsets，
 //  自动布局在这里算出来的底部高度会随键盘弹出抖动；frame 一次算准，省掉一类问题。
@@ -18,8 +26,12 @@
 // 没有历史坐标时的落点：北京天安门。只是个起始视野，用户一搜就会跳走。
 static const CLLocationCoordinate2D kSLDefaultCenter = {39.90870, 116.39750};
 
-// 面板内容高度（不含底部安全区）
-static const CGFloat kSLPanelBody = 210;
+// 卡片版式（v0.4.26 起高度按内容算，不再写死）
+static const CGFloat kSLPanelInset = 8;      // 卡片左右内缩
+static const CGFloat kSLPanelPad = 16;       // 卡片内容左右内边距
+static const CGFloat kSLQuickTop = 112;      // 快捷位置行（坐标芯片下沿 102 + 10）
+static const CGFloat kSLQuickH = 34;
+static const CGFloat kSLPinTipOffset = 23;   // 水滴尖端相对 pinView 中心的 y 偏移（58 - 35）
 
 static UIColor *SLAccent(void) {
     return [UIColor colorWithRed:0.216 green:0.541 blue:0.867 alpha:1.0];
@@ -62,8 +74,17 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) UIButton *starBtn;
 @property (nonatomic, strong) UIButton *tuneBtn;
 
+@property (nonatomic, strong) UIScrollView *quickRow;      // 快捷位置（收藏过的点）
+@property (nonatomic, copy) NSArray<SLFavoriteItem *> *quickItems;
 @property (nonatomic, strong) UIView *resultCard;
 @property (nonatomic, strong) UITableView *resultTable;
+
+// v0.4.26：针尖位置与地图中心的换算状态
+@property (nonatomic, assign) BOOL pinLayoutReady;          // 针尖位置是否已算好（布局前不能换坐标）
+@property (nonatomic, assign) BOOL slAdjusting;             // 正在做偏移修正，regionDidChange 不要反查地址
+@property (nonatomic, assign) CGFloat lastPinTipY;          // 上次布局的针尖 y，用来判断卡片高度是否变了
+@property (nonatomic, assign) CLLocationCoordinate2D pendingFocus;   // 首帧布局后要落到的坐标
+@property (nonatomic, assign) BOOL hasPendingFocus;
 
 @property (nonatomic, copy) NSArray<MKMapItem *> *results;
 // v0.4.19：无结果时不再收键盘，改成卡片里显示一行提示
@@ -82,6 +103,13 @@ static UIColor *SLHairline(void) {
 - (void)sl_buildSearch;
 - (void)sl_buildPanel;
 - (void)sl_buildResult;
+- (void)sl_buildQuick;
+- (void)sl_reloadQuick;
+- (CLLocationCoordinate2D)sl_currentCoord;
+- (CGPoint)sl_pinTipPoint;
+- (void)sl_alignPinToCoord:(CLLocationCoordinate2D)coord;
+- (void)sl_focusCoord:(CLLocationCoordinate2D)coord meters:(double)meters;
+- (void)sl_quickTap:(UIButton *)btn;
 - (void)sl_refreshCoordinate;
 - (void)sl_refreshStar;
 - (CLLocationCoordinate2D)sl_refCoord;
@@ -122,10 +150,15 @@ static UIColor *SLHairline(void) {
     [self sl_buildPin];
     [self sl_buildSearch];
     [self sl_buildPanel];
+    [self sl_buildQuick];
     [self sl_buildResult];
+    // 先把快捷位置排出来，第一帧的卡片高度就是最终高度，避免进场后「长高」一下
+    [self sl_reloadQuick];
 
     CLLocationCoordinate2D start = self.hasInitial ? self.initialCoord : kSLDefaultCenter;
     [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(start, 3000, 3000) animated:NO];
+    self.pendingFocus = start;
+    self.hasPendingFocus = YES;
     [self sl_refreshCoordinate];
     SLLog(@"VLOC 选点页打开 起点 %.6f,%.6f 收藏 %lu 条",
           start.latitude, start.longitude, (unsigned long)[SLFavoriteStore count]);
@@ -158,26 +191,56 @@ static UIColor *SLHairline(void) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self sl_refreshStar];
+    // 从收藏页返回后收藏可能变了，重排一次快捷位置（顺带重算卡片高度）
+    [self sl_reloadQuick];
 }
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGFloat w = self.view.bounds.size.width;
     CGFloat h = self.view.bounds.size.height;
+    if (w <= 0 || h <= 0) return;
     CGFloat safeBottom = 0, safeTop = 0;
     if (@available(iOS 11.0, *)) {
         safeBottom = self.view.safeAreaInsets.bottom;
         safeTop = self.view.safeAreaInsets.top;
     }
 
-    CGFloat panelH = kSLPanelBody + safeBottom;
-    CGFloat panelY = h - panelH - 12;
+    // 1) 地图铺满整屏（含安全区）。原来只铺到卡片上沿、卡片又留 12pt 缝，
+    //    中间那条会露出页面底色（陌陌主题下是透明/灰白），看着像地图断了一截。
+    self.mapView.frame = CGRectMake(0, 0, w, h);
 
-    // 地图铺到卡片上沿：这样 mapView.centerCoordinate 就是「针尖真正压住的点」
-    self.mapView.frame = CGRectMake(0, 0, w, panelY);
-    self.pinView.center = CGPointMake(w / 2.0, panelY / 2.0);
+    // 2) 卡片：左右内缩 8，贴屏幕底；高度按内容算（有快捷位置行就多一行）
+    BOOL hasQuick = !self.quickRow.hidden;
+    CGFloat btnY = hasQuick ? (kSLQuickTop + kSLQuickH + 10) : (kSLQuickTop - 8);
+    CGFloat bodyH = btnY + 50 + 14;
+    CGFloat panelH = bodyH + safeBottom;
+    CGFloat panelY = h - panelH;
 
-    // 搜索胶囊
+    self.panel.frame = CGRectMake(kSLPanelInset, panelY, w - kSLPanelInset * 2, panelH);
+    CGFloat pw = self.panel.bounds.size.width;
+    CGFloat pad = kSLPanelPad;
+    CGFloat side = 52, gap = 10;
+    CGFloat mainW = pw - pad * 2 - side * 2 - gap * 2;
+
+    self.grabber.frame = CGRectMake(pw / 2 - 18, 10, 36, 5);
+    self.iconBadge.frame = CGRectMake(pad, 24, 40, 40);
+    self.iconGlyph.frame = CGRectMake(9, 9, 22, 22);
+    self.nameLabel.frame = CGRectMake(68, 22, pw - 68 - pad, 21);
+    self.subLabel.frame = CGRectMake(68, 45, pw - 68 - pad, 17);
+
+    CGFloat chipW = MIN(216, pw - pad * 2);
+    self.coordChip.frame = CGRectMake(pad, 70, chipW, 32);
+    self.coordLabel.frame = CGRectMake(10, 0, chipW - 10 - 46, 32);
+    self.coordCopyBtn.frame = CGRectMake(chipW - 46, 0, 42, 32);
+
+    self.quickRow.frame = CGRectMake(pad, kSLQuickTop, pw - pad * 2, kSLQuickH);
+
+    self.confirmBtn.frame = CGRectMake(pad, btnY, mainW, 50);
+    self.starBtn.frame = CGRectMake(pad + mainW + gap, btnY, side, 50);
+    self.tuneBtn.frame = CGRectMake(pad + mainW + gap * 2 + side, btnY, side, 50);
+
+    // 3) 搜索胶囊
     CGFloat capsuleY = safeTop + 6;
     self.searchCapsule.frame = CGRectMake(16, capsuleY, w - 32, 48);
     CGFloat capW = self.searchCapsule.bounds.size.width;
@@ -187,30 +250,32 @@ static UIColor *SLHairline(void) {
     CGFloat fieldX = 42;
     self.searchField.frame = CGRectMake(fieldX, 0, self.bookmarkBtn.frame.origin.x - 8 - fieldX, 48);
 
-    // 搜索结果卡
+    // 4) 搜索结果卡
     self.resultCard.frame = CGRectMake(16, capsuleY + 48 + 8, w - 32,
                                        MIN(232, panelY - (capsuleY + 48 + 8) - 12));
     self.resultTable.frame = self.resultCard.bounds;
 
-    // 底部卡片
-    self.panel.frame = CGRectMake(12, panelY, w - 24, panelH);
-    CGFloat pw = self.panel.bounds.size.width;
-    CGFloat pad = 16;
-    CGFloat side = 52, gap = 10;
-    CGFloat mainW = pw - pad * 2 - side * 2 - gap * 2;
+    // 5) 针尖落在「搜索栏下沿 ~ 卡片上沿」这段可视区的中心，不再是屏幕中心
+    //    （地图全屏后屏幕中心会被卡片挡住，针就藏在卡片后面了）
+    CLLocationCoordinate2D keep = [self sl_currentCoord];   // 先用旧针位算出当前坐标
+    CGFloat visTop = capsuleY + 48 + 6;
+    CGFloat visBottom = panelY - 12;
+    CGFloat tipY = (visTop + visBottom) / 2.0;
+    self.pinView.center = CGPointMake(w / 2.0, tipY - kSLPinTipOffset);
 
-    self.grabber.frame = CGRectMake(pw / 2 - 18, 12, 36, 5);
-    self.iconBadge.frame = CGRectMake(pad, 28, 40, 40);
-    self.iconGlyph.frame = CGRectMake(9, 9, 22, 22);
-    self.nameLabel.frame = CGRectMake(68, 28, pw - 68 - pad, 22);
-    self.subLabel.frame = CGRectMake(68, 52, pw - 68 - pad, 18);
-    self.coordChip.frame = CGRectMake(pad, 78, 216, 32);
-    self.coordLabel.frame = CGRectMake(10, 0, 216 - 10 - 46, 32);
-    self.coordCopyBtn.frame = CGRectMake(216 - 46, 0, 42, 32);
-
-    self.confirmBtn.frame = CGRectMake(pad, 126, mainW, 50);
-    self.starBtn.frame = CGRectMake(pad + mainW + gap, 126, side, 50);
-    self.tuneBtn.frame = CGRectMake(pad + mainW + gap * 2 + side, 126, side, 50);
+    BOOL hadPin = self.pinLayoutReady;
+    self.pinLayoutReady = YES;
+    if (!hadPin) {
+        if (self.hasPendingFocus) {
+            self.hasPendingFocus = NO;
+            [self sl_focusCoord:self.pendingFocus meters:3000];
+        }
+    } else if (fabs(self.lastPinTipY - tipY) > 0.5) {
+        // 卡片高度变了（快捷位置行出现 / 消失），针尖跟着移动 —— 把原坐标锚回针下，
+        // 否则用户会觉得「什么都没动，坐标却变了」。
+        [self sl_alignPinToCoord:keep];
+    }
+    self.lastPinTipY = tipY;
 }
 
 #pragma mark - 构建
@@ -311,9 +376,9 @@ static UIColor *SLHairline(void) {
 - (void)sl_buildPanel {
     UIView *panel = [[UIView alloc] initWithFrame:CGRectZero];
     panel.backgroundColor = [UIColor whiteColor];
-    panel.layer.cornerRadius = 26;
+    panel.layer.cornerRadius = 18;
     panel.layer.cornerCurve = kCACornerCurveContinuous;
-    panel.layer.borderWidth = 1;
+    panel.layer.borderWidth = 0.5;
     panel.layer.borderColor = SLHairline().CGColor;
     panel.layer.shadowColor = [UIColor blackColor].CGColor;
     panel.layer.shadowOpacity = 0.10;
@@ -426,15 +491,125 @@ static UIColor *SLHairline(void) {
 
 #pragma mark - 坐标 / 地址
 
+// 针尖（水滴尖端）在 self.view 里的位置。pinView 高 70，尖端在局部 y=58、中心在 y=35。
+- (CGPoint)sl_pinTipPoint {
+    return CGPointMake(self.pinView.center.x, self.pinView.center.y + kSLPinTipOffset);
+}
+
+// 当前选中点 = 针尖压住的那个点。
+// v0.4.26：地图铺满整屏后屏幕中心 ≠ 针尖位置，不能再用 mapView.centerCoordinate。
+- (CLLocationCoordinate2D)sl_currentCoord {
+    if (!self.pinLayoutReady) return self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self.mapView convertPoint:[self sl_pinTipPoint] toCoordinateFromView:self.view];
+    return CLLocationCoordinate2DIsValid(c) ? c : self.mapView.centerCoordinate;
+}
+
+// 只调中心，让 coord 正好落在针尖下，不改缩放。
+// 做法：看针尖处当前是什么坐标，把差值加到地图中心上；迭代两次（远距离时经纬度线性近似有误差，二次基本收敛）。
+- (void)sl_alignPinToCoord:(CLLocationCoordinate2D)coord {
+    if (!self.pinLayoutReady || !CLLocationCoordinate2DIsValid(coord)) return;
+    CGPoint tip = [self sl_pinTipPoint];
+    self.slAdjusting = YES;
+    for (int i = 0; i < 2; i++) {
+        CLLocationCoordinate2D atPin = [self.mapView convertPoint:tip toCoordinateFromView:self.view];
+        if (!CLLocationCoordinate2DIsValid(atPin)) break;
+        double dLat = coord.latitude - atPin.latitude;
+        double dLng = coord.longitude - atPin.longitude;
+        if (fabs(dLat) < 1e-9 && fabs(dLng) < 1e-9) break;
+        CLLocationCoordinate2D c0 = self.mapView.centerCoordinate;
+        CLLocationCoordinate2D next = CLLocationCoordinate2DMake(c0.latitude + dLat, c0.longitude + dLng);
+        if (!CLLocationCoordinate2DIsValid(next)) break;
+        [self.mapView setCenterCoordinate:next animated:NO];
+    }
+    self.slAdjusting = NO;
+}
+
+// 把某个坐标搬到针尖下（必要时连带缩放）
+- (void)sl_focusCoord:(CLLocationCoordinate2D)coord meters:(double)meters {
+    if (!CLLocationCoordinate2DIsValid(coord)) return;
+    if (meters < 200) meters = 200;
+    [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(coord, meters, meters) animated:NO];
+    [self sl_alignPinToCoord:coord];
+}
+
+#pragma mark - 快捷位置
+
+- (void)sl_buildQuick {
+    UIScrollView *sv = [[UIScrollView alloc] initWithFrame:CGRectZero];
+    sv.showsHorizontalScrollIndicator = NO;
+    sv.showsVerticalScrollIndicator = NO;
+    sv.alwaysBounceHorizontal = YES;
+    sv.hidden = YES;          // 没有收藏时整行不存在，卡片高度跟着变矮
+    self.quickRow = sv;
+    [self.panel addSubview:sv];
+}
+
+- (void)sl_reloadQuick {
+    for (UIView *v in [self.quickRow.subviews copy]) [v removeFromSuperview];
+
+    NSArray<SLFavoriteItem *> *all = [SLFavoriteStore items];
+    NSUInteger n = MIN(all.count, (NSUInteger)8);
+    self.quickItems = n ? [all subarrayWithRange:NSMakeRange(0, n)] : @[];
+
+    BOOL wasHidden = self.quickRow.hidden;
+    self.quickRow.hidden = (n == 0);
+    if (wasHidden != self.quickRow.hidden) [self.view setNeedsLayout];   // 高度变了，重排版
+    if (n == 0) return;
+
+    CLLocationCoordinate2D cur = [self sl_currentCoord];
+    SLFavoriteItem *active = [SLFavoriteStore itemNear:cur within:300];
+    UIFont *f = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    CGFloat x = 0;
+    for (NSUInteger i = 0; i < n; i++) {
+        SLFavoriteItem *it = self.quickItems[i];
+        NSString *title = it.name.length ? it.name : @"未命名";
+        CGFloat tw = ceil([title sizeWithAttributes:@{NSFontAttributeName: f}].width);
+        CGFloat bw = tw + 26;
+        BOOL on = (active && [active.uid isEqualToString:it.uid]);
+
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+        b.frame = CGRectMake(x, 0, bw, kSLQuickH);
+        b.tag = (NSInteger)i;
+        b.backgroundColor = on ? SLGoldBg() : SLChipBg();
+        b.layer.cornerRadius = kSLQuickH / 2.0;
+        b.layer.cornerCurve = kCACornerCurveContinuous;
+        b.titleLabel.font = f;
+        [b setTitle:title forState:UIControlStateNormal];
+        [b setTitleColor:(on ? SLGold() : [UIColor colorWithWhite:0.30 alpha:1])
+                forState:UIControlStateNormal];
+        [b addTarget:self action:@selector(sl_quickTap:) forControlEvents:UIControlEventTouchUpInside];
+        [self.quickRow addSubview:b];
+        x += bw + 8;
+    }
+    self.quickRow.contentSize = CGSizeMake(MAX((CGFloat)0.0, x - 8), kSLQuickH);
+}
+
+- (void)sl_quickTap:(UIButton *)btn {
+    NSInteger idx = btn.tag;
+    if (idx < 0 || idx >= (NSInteger)self.quickItems.count) return;
+    SLFavoriteItem *it = self.quickItems[(NSUInteger)idx];
+    [self sl_focusCoord:it.coordinate meters:1200];
+    self.placeShort = it.name;
+    self.placeName = it.address.length ? it.address : it.name;
+    self.nameLabel.text = it.name.length ? it.name : @"已选位置";
+    [self sl_refreshCoordinate];
+    [self sl_reverseGeocode];
+    SLLog(@"VLOC 快捷位置「%@」%.6f,%.6f", it.name, it.coordinate.latitude, it.coordinate.longitude);
+}
+
+#pragma mark - 地址
+
 - (void)mapView:(MKMapView *)mapView regionDidChangeAnimated:(BOOL)animated {
     [self sl_refreshCoordinate];
+    // 自己在做针尖偏移修正时，这一串回调不代表用户拖动，不必反复反查地址
+    if (self.slAdjusting) return;
     // 拖动过程中会连续回调，节流后再去反查地址，避免 CLGeocoder 被刷爆（苹果对它有频率限制）
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_reverseGeocode) object:nil];
     [self performSelector:@selector(sl_reverseGeocode) withObject:nil afterDelay:0.6];
 }
 
 - (void)sl_refreshCoordinate {
-    CLLocationCoordinate2D c = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self sl_currentCoord];
     self.coordLabel.text = [NSString stringWithFormat:@"%.6f, %.6f", c.latitude, c.longitude];
     self.subLabel.text = [self sl_subtitleText];
     [self sl_refreshStar];
@@ -446,7 +621,7 @@ static UIColor *SLHairline(void) {
 }
 
 - (NSString *)sl_subtitleText {
-    CLLocationCoordinate2D c = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self sl_currentCoord];
     CLLocationCoordinate2D ref = [self sl_refCoord];
     NSString *dist = @"";
     if (CLLocationCoordinate2DIsValid(ref)) {
@@ -464,7 +639,7 @@ static UIColor *SLHairline(void) {
 }
 
 - (void)sl_refreshStar {
-    CLLocationCoordinate2D c = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self sl_currentCoord];
     SLFavoriteItem *near = [SLFavoriteStore itemNear:c within:300];
     self.starBtn.selected = (near != nil);
     self.starBtn.backgroundColor = near ? SLGoldBg() : SLChipBg();
@@ -472,7 +647,7 @@ static UIColor *SLHairline(void) {
 }
 
 - (void)sl_reverseGeocode {
-    CLLocationCoordinate2D c = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self sl_currentCoord];
     if (!CLLocationCoordinate2DIsValid(c)) return;
     if (!self.geocoder) self.geocoder = [[CLGeocoder alloc] init];
     if (self.geocoder.isGeocoding) [self.geocoder cancelGeocode];
@@ -549,7 +724,7 @@ static UIColor *SLHairline(void) {
     MKLocalSearchRequest *req = [[MKLocalSearchRequest alloc] init];
     req.naturalLanguageQuery = q;
     // 限定在当前视野周边，否则搜「便利店」可能返回外地的同名 POI
-    req.region = MKCoordinateRegionMakeWithDistance(self.mapView.centerCoordinate, 120000, 120000);
+    req.region = MKCoordinateRegionMakeWithDistance([self sl_currentCoord], 120000, 120000);
     self.search = [[MKLocalSearch alloc] initWithRequest:req];
 
     __weak typeof(self) ws = self;
@@ -641,7 +816,7 @@ static UIColor *SLHairline(void) {
     [tv deselectRowAtIndexPath:ip animated:YES];
     if (self.emptyHint || (NSUInteger)ip.row >= self.results.count) return;
     MKMapItem *it = self.results[(NSUInteger)ip.row];
-    [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(it.placemark.coordinate, 1500, 1500) animated:YES];
+    [self sl_focusCoord:it.placemark.coordinate meters:1500];
     self.placeName = [self sl_nameOfPlacemark:it.placemark];
     self.placeShort = [self sl_shortOfPlacemark:it.placemark];
     self.nameLabel.text = self.placeName.length ? self.placeName : @"已选位置";
@@ -653,7 +828,7 @@ static UIColor *SLHairline(void) {
 #pragma mark - 收藏
 
 - (void)sl_starTap {
-    CLLocationCoordinate2D c = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self sl_currentCoord];
     if (!CLLocationCoordinate2DIsValid(c)) {
         [self sl_toast:@"坐标无效，请重新选择"];
         return;
@@ -671,6 +846,7 @@ static UIColor *SLHairline(void) {
         BOOL added = [SLFavoriteStore saveName:name coordinate:c address:addr];
         [self sl_refreshStar];
         [self sl_refreshCoordinate];
+        [self sl_reloadQuick];
         SLLog(@"VLOC 收藏%s「%@」%.6f,%.6f", added ? "新增" : "更新", name, c.latitude, c.longitude);
         [self sl_toast:added ? [NSString stringWithFormat:@"已收藏「%@」", name]
                              : [NSString stringWithFormat:@"已更新「%@」", name]];
@@ -680,6 +856,7 @@ static UIColor *SLHairline(void) {
         if (near) [SLFavoriteStore removeItem:near];
         [self sl_refreshStar];
         [self sl_refreshCoordinate];
+        [self sl_reloadQuick];
         [self sl_toast:@"已取消收藏"];
     }];
 }
@@ -690,7 +867,7 @@ static UIColor *SLHairline(void) {
     vc.onPick = ^(CLLocationCoordinate2D coord, NSString *name) {
         __strong typeof(ws) self = ws;
         if (!self) return;
-        [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(coord, 1200, 1200) animated:YES];
+        [self sl_focusCoord:coord meters:1200];
         if (name.length) {
             self.placeShort = name;
             self.nameLabel.text = name;
@@ -706,11 +883,11 @@ static UIColor *SLHairline(void) {
 - (void)sl_locate {
     CLLocationCoordinate2D c = [self sl_refCoord];
     if (!CLLocationCoordinate2DIsValid(c)) c = self.hasInitial ? self.initialCoord : kSLDefaultCenter;
-    [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(c, 1200, 1200) animated:YES];
+    [self sl_focusCoord:c meters:1200];
 }
 
 - (void)sl_tune {
-    CLLocationCoordinate2D cur = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D cur = [self sl_currentCoord];
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"手动输入坐标"
                                                                message:@"纬度在前，经度在后"
                                                         preferredStyle:UIAlertControllerStyleAlert];
@@ -736,20 +913,20 @@ static UIColor *SLHairline(void) {
             [self sl_toast:@"坐标无效"];
             return;
         }
-        [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(c, 1200, 1200) animated:YES];
+        [self sl_focusCoord:c meters:1200];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)sl_copyCoord {
-    CLLocationCoordinate2D c = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self sl_currentCoord];
     NSString *s = [NSString stringWithFormat:@"%.6f, %.6f", c.latitude, c.longitude];
     [UIPasteboard generalPasteboard].string = s;
     [self sl_toast:@"坐标已复制"];
 }
 
 - (void)sl_confirm {
-    CLLocationCoordinate2D c = self.mapView.centerCoordinate;
+    CLLocationCoordinate2D c = [self sl_currentCoord];
     if (!CLLocationCoordinate2DIsValid(c)) {
         [self sl_toast:@"坐标无效，请重新选择"];
         return;

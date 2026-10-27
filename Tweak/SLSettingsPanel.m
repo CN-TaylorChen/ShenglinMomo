@@ -22,16 +22,11 @@
 #import "SLMapPickerController.h"
 #import "SLTTSAuditionPanel.h"
 
-// 定义在 Tweak.x 里（音波侦察探针，默认关）
-extern BOOL SLWaveProbeEnabled(void);
-extern void SLSetWaveProbeEnabled(BOOL on);
-extern void SLRunWaveProbeScan(void);
-
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.25"
+#define SLVersion @"0.4.26"
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 
@@ -137,7 +132,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 2) return 4;   // 合成口令 + 语音包口令 + 短录音补全 + 合成后先试听
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
-    return 2;                     // 音波探针 + 运行日志
+    return 1;                     // 运行日志
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
@@ -172,7 +167,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 2) return @"合成口令：以这个口令开头发的文字才会转语音\n语音包口令：单独一条，命中后直接发所选语音\n短录音补全：录音比 AI 语音短时自动补足全长，不必录完\n合成后先试听：合成完先弹一张卡片，听满意了再录";
     if (section == 3) return @"Key 只保存在本机，不会上传";
     if (section == 4) return @"开启后陌陌上报的坐标会替换为你选的点\n只影响本机陌陌，不改系统定位\n坐标与 IP 归属地差太远时可能触发风控，建议固定一个常用位置";
-    if (section == 5) return @"音波探针：只挂陌陌自己的音波类并写日志，用来定位音波录音落盘在哪\n会影响性能，采完日志记得关掉并重启陌陌\n没反应时先看运行日志";
+    if (section == 5) return @"记录插件的运行过程。出问题时把最后一段发给我\n日志只写在本机，不会上传";
     return nil;
 }
 
@@ -336,15 +331,6 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     }
 
     if (ip.section == 5) {
-        if (ip.row == 0) {
-            cell.textLabel.text = @"音波探针";
-            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-            sw.on = SLWaveProbeEnabled();
-            [sw addTarget:self action:@selector(sl_waveProbeChanged:) forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            return cell;
-        }
         cell.textLabel.text = @"运行日志";
         cell.detailTextLabel.text = @"点此查看";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -412,9 +398,9 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     }
     if (ip.section == 2 && ip.row == 3) return;   // 「合成后先试听」是开关行
     if (ip.section == 5) {
-        if (ip.row == 0) return;                  // 「音波探针」是开关行
         SLLogViewController *vc = [[SLLogViewController alloc] init];
         [self.navigationController pushViewController:vc animated:YES];
+        return;
     }
 }
 
@@ -422,14 +408,6 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     [SLTTSAuditionPanel setEnabled:sw.on];
 }
 
-- (void)sl_waveProbeChanged:(UISwitch *)sw {
-    SLSetWaveProbeEnabled(sw.on);
-    if (sw.on) {
-        [AWECAUtils showToast:@"重启陌陌后生效；录一段音波，再去「运行日志」看 SWAVE 行" duration:3.4];
-    } else {
-        [AWECAUtils showToast:@"重启陌陌后完全停用" duration:2.4];
-    }
-}
 
 #pragma mark - 虚拟定位
 

@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.25"
+#define SLVersion @"0.4.26"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLPackCmdKey @"SLPackCommand"
@@ -118,7 +118,7 @@ static NSString *SLKey(Class cls, SEL sel) {
 // 也是父类那份实现。之前拿调用方 cls 做记账 key，埋了两个雷：
 //   ① 兄弟子类（同父不同类）走同一份 IMP，沿链查不到 key → orig=NULL → 原实现被静默吞掉；
 //   ② 同一个 Method 被二次注册时，第二次读到的 cur 已经是「上一次的钩子」，
-//      于是 key 被改写成钩子自己 → 钩子调钩子 → 无限递归爆栈（0.4.20 语音/音波闪退的真因）。
+//      于是 key 被改写成钩子自己 → 钩子调钩子 → 无限递归爆栈（0.4.20 语音闪退的真因）。
 static Class SLClassOwningMethod(Class cls, SEL sel) {
     Class c = cls;
     while (c) {
@@ -2105,212 +2105,6 @@ static void SLInstallVirtualLocationHooks(void) {
     SLLog(@"VLOC 当前 %@", [SLVirtualLocation summary]);
 }
 
-#pragma mark - 音波探针（v0.4.20，只记日志，不改任何发送行为）
-
-// 目的：音波（发布语音动态）走的是独立的一套录音流程，不经过聊天那条 opus 链路。
-// 但陌陌的 Swift 类没有 OC 方法表，离线解析不出它调了哪个录音器、文件落在哪。
-// 所以这里在运行时把所有「名字像录音」的类的方法挂上只读探针，录一段音波看日志就能确定。
-// 铁律：探针只打日志，绝不改参数、不改返回值，最坏情况是日志多几行。
-
-static void SLProbeScanAudioFiles(void);
-
-static NSMutableDictionary *SLProbeLastLog(void) {
-    static NSMutableDictionary *d = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ d = [NSMutableDictionary dictionary]; });
-    return d;
-}
-
-// 同一个「类.方法」5 秒内只记一次，避免录音回调刷爆日志。
-// 探针会在 CloudKit / AVFoundation 的后台队列上被并发调用，裸 NSMutableDictionary
-// 并发写会破坏哈希表（0.4.20 随机闪退的来源之一），这里必须加锁。
-static BOOL SLProbeShouldLog(NSString *key) {
-    NSMutableDictionary *d = SLProbeLastLog();
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    @synchronized (d) {
-        NSNumber *last = d[key];
-        if (last && (now - last.doubleValue) < 5.0) return NO;
-        d[key] = @(now);
-        return YES;
-    }
-}
-
-static BOOL SLProbeSelWanted(NSString *sel) {
-    static NSArray<NSString *> *kws;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        kws = @[@"record", @"Record", @"audio", @"Audio", @"path", @"Path", @"file", @"File",
-                @"publish", @"Publish", @"upload", @"Upload", @"finish", @"Finish", @"save", @"Save"];
-    });
-    for (NSString *k in kws) {
-        if ([sel rangeOfString:k].location != NSNotFound) return YES;
-    }
-    return NO;
-}
-
-static void SLProbeSchedScan(void) {
-    // 一次发送会连打几十次 stop/finish 回调，原来每次都排一次全盘目录遍历，
-    // 主线程被扫目录堵死 → 卡顿甚至被系统 watchdog 杀掉。这里 8 秒内只扫一次。
-    static NSTimeInterval lastScan = 0;
-    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    if (now - lastScan < 8.0) return;
-    lastScan = now;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
-                   dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        @try { SLProbeScanAudioFiles(); } @catch (NSException *e) {}
-    });
-}
-
-static void SLProbe0(id self, SEL _cmd) {
-    NSString *sel = NSStringFromSelector(_cmd);
-    NSString *cls = NSStringFromClass([self class]);
-    if (SLProbeShouldLog([NSString stringWithFormat:@"%@.%@", cls, sel])) {
-        SLLog(@"SWAVE %@ -%@", cls, sel);
-    }
-    void (*orig)(id, SEL) = (void (*)(id, SEL))SLGetOrigIMP(self, _cmd);
-    if (orig) orig(self, _cmd);
-    if ([sel rangeOfString:@"stop" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-        [sel rangeOfString:@"finish" options:NSCaseInsensitiveSearch].location != NSNotFound) {
-        SLProbeSchedScan();   // 停止录音后扫一遍目录，看新落了什么文件
-    }
-}
-
-static void SLProbe1(id self, SEL _cmd, id a) {
-    NSString *sel = NSStringFromSelector(_cmd);
-    NSString *cls = NSStringFromClass([self class]);
-    if (SLProbeShouldLog([NSString stringWithFormat:@"%@.%@", cls, sel])) {
-        NSString *desc = @"(nil)";
-        if ([a isKindOfClass:[NSURL class]]) desc = [(NSURL *)a path];
-        else if ([a isKindOfClass:[NSString class]]) desc = a;
-        else if ([a isKindOfClass:[NSData class]]) desc = [NSString stringWithFormat:@"<NSData %lu B>", (unsigned long)[(NSData *)a length]];
-        else if (a) desc = [a description];
-        SLLog(@"SWAVE %@ -%@(%@)", cls, sel, desc);
-    }
-    void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
-    if (orig) orig(self, _cmd, a);
-}
-
-// 列目录找最近 3 分钟内新出现/被改过的音频视频文件——这是确定「落盘路径 + 格式」最直接的办法
-static void SLProbeScanAudioFiles(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSArray<NSString *> *roots = @[
-        [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"],
-        [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Caches"],
-        [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"],
-        NSTemporaryDirectory(),
-    ];
-    NSSet<NSString *> *exts = [NSSet setWithObjects:@"m4a", @"aac", @"caf", @"wav", @"mp3", @"opus",
-                               @"amr", @"ogg", @"oga", @"mp4", @"mov", @"aiff", nil];
-    NSDate *cut = [NSDate dateWithTimeIntervalSinceNow:-180];
-    NSMutableArray<NSString *> *found = [NSMutableArray array];
-
-    for (NSString *root in roots) {
-        NSDirectoryEnumerator *en = [fm enumeratorAtPath:root];
-        NSString *rel = nil;
-        int guard = 0;
-        while ((rel = [en nextObject]) && guard++ < 20000) {
-            if (rel.pathComponents.count > 4) {
-                [en skipDescendants];
-                continue;
-            }
-            if (![exts containsObject:rel.pathExtension.lowercaseString]) continue;
-            NSString *full = [root stringByAppendingPathComponent:rel];
-            NSDictionary *attr = [fm attributesOfItemAtPath:full error:nil];
-            NSDate *m = attr[NSFileModificationDate];
-            if (!m || [m compare:cut] != NSOrderedDescending) continue;
-            [found addObject:[NSString stringWithFormat:@"%@ (%@B, %.0fs前)", full,
-                              attr[NSFileSize], -[m timeIntervalSinceNow]]];
-        }
-    }
-
-    if (!found.count) {
-        SLLog(@"SWAVE 扫描：近 3 分钟没有新的音频文件");
-        return;
-    }
-    NSArray *head = [found subarrayWithRange:NSMakeRange(0, MIN(found.count, 12))];
-    SLLog(@"SWAVE 扫描到 %lu 个新文件：%@", (unsigned long)found.count, [head componentsJoinedByString:@"  |  "]);
-}
-
-// v0.4.20：探针默认关闭，只在设置页手动打开时安装。
-// 0.4.20 那版无条件扫全表（603 个方法，含 CloudKit / LaunchServices / _DPDataRecorder 这些
-// 系统高频方法），启动要遍历全部类 → 卡；而且会把已有功能钩子二次覆盖 → 自递归闪退。
-static NSString *const kSLWaveProbeKey = @"SLWaveProbe";
-
-BOOL SLWaveProbeEnabled(void) {
-    return [[NSUserDefaults standardUserDefaults] boolForKey:kSLWaveProbeKey];
-}
-
-void SLSetWaveProbeEnabled(BOOL on) {
-    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kSLWaveProbeKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-    SLLog(@"SWAVE 开关 -> %@（重启陌陌生效）", on ? @"开" : @"关");
-}
-
-// 只认手机里第三方 App 自己的 image（陌陌主二进制），系统库一律不碰。
-static BOOL SLClassIsAppOwned(Class c) {
-    const char *img = class_getImageName(c);
-    if (!img) return NO;
-    NSString *p = [NSString stringWithUTF8String:img];
-    if (!p.length) return NO;
-    if ([p hasPrefix:@"/System/"] || [p hasPrefix:@"/usr/lib/"]) return NO;
-    if ([p containsString:@"/PrivateFrameworks/"] || [p containsString:@"/Frameworks/"]) return NO;
-    return [p containsString:@".app/"];
-}
-
-// 音波侦察用的窄探针：只挂陌陌自己的、名字里带 Wave / VoiceMessage 的类。
-static void SLInstallSoundWaveProbe(void) {
-    static BOOL done = NO;
-    if (done) return;
-    done = YES;
-    if (!SLWaveProbeEnabled()) {
-        SLLog(@"SWAVE 探针未开启（设置 → 诊断），跳过");
-        return;
-    }
-
-    int n = objc_getClassList(NULL, 0);
-    if (n <= 0) return;
-    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
-    if (!buf) return;
-    n = objc_getClassList(buf, n);
-
-    NSMutableArray<NSString *> *hits = [NSMutableArray array];
-    for (int i = 0; i < n; i++) {
-        Class c = buf[i];
-        NSString *cn = NSStringFromClass(c);
-        if (!cn.length) continue;
-        if ([cn rangeOfString:@"Wave"].location == NSNotFound &&
-            [cn rangeOfString:@"VoiceMessage"].location == NSNotFound) continue;
-        if (!SLClassIsAppOwned(c)) continue;   // 只碰陌陌自己的类
-
-        unsigned int mc = 0;
-        Method *ms = class_copyMethodList(c, &mc);
-        for (unsigned int k = 0; k < mc; k++) {
-            NSString *sel = NSStringFromSelector(method_getName(ms[k]));
-            if (!SLProbeSelWanted(sel)) continue;
-            if ([sel isEqualToString:@"dealloc"] || [sel hasPrefix:@"init"] || [sel hasPrefix:@"set"]) continue;
-            const char *t = method_getTypeEncoding(ms[k]);
-            if (!t) continue;
-            IMP rep = NULL;
-            if (strncmp(t, "v16@0:8", 7) == 0) rep = (IMP)SLProbe0;
-            else if (strncmp(t, "v24@0:8@", 8) == 0) rep = (IMP)SLProbe1;
-            if (!rep) continue;   // 参数复杂的直接跳过，宁可少测也不猜签名
-            if (SLRegisterMethod(c, method_getName(ms[k]), rep)) {
-                [hits addObject:[NSString stringWithFormat:@"%@.%@", cn, sel]];
-            }
-        }
-        if (ms) free(ms);
-    }
-    free(buf);
-    SLLog(@"SWAVE 窄探针装上 %lu 个方法：%@", (unsigned long)hits.count,
-          [hits componentsJoinedByString:@", "]);
-}
-
-void SLRunWaveProbeScan(void) {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        @try { SLProbeScanAudioFiles(); } @catch (NSException *e) {}
-    });
-}
-
 // v0.4.20：音波发布后闪退的兜底。
 // iOS 15 起，给「老式构造」的 UIButton（buttonWithType:）设 configurationUpdateHandler
 // 会直接 NSAssert：Invalid parameter not satisfying: configuration != nil。
@@ -2617,10 +2411,6 @@ static void SLInstallHooks(void) {
     @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
     // v0.4.20：事件探针（抓小宇宙私聊的真实发送入口，只记录不改行为）
     @try { SLInstallActionProbe(); } @catch (NSException *e) {}
-    // v0.4.20：音波探针默认关。0.4.20 无条件扫全表是「启动卡一下」和「录音发送闪退」的元凶。
-    if (SLWaveProbeEnabled()) {
-        @try { SLInstallSoundWaveProbe(); } @catch (NSException *e) {}
-    }
 }
 
 NSString *SLHookStatusSummary(void) {
