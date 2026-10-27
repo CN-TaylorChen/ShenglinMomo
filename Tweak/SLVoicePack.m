@@ -352,7 +352,9 @@ static NSString *SLRelOfPath(NSString *path) {
 
 + (BOOL)isEnabled {
     id v = [[NSUserDefaults standardUserDefaults] objectForKey:kSLPackOnKey];
-    return v ? [v boolValue] : NO;
+    // v0.4.41：没设过就当开启。这个开关现在的语义是「关掉后点球不再展开胶囊」，
+    // 默认 NO 会让新装的人点球毫无反应，看着像插件坏了。
+    return v ? [v boolValue] : YES;
 }
 
 + (void)setEnabled:(BOOL)on {
@@ -364,12 +366,21 @@ static NSString *SLRelOfPath(NSString *path) {
 // v0.4.40：一次性装填。点包置 YES，真正发送成功后由 Tweak.x 的 AUDIO-SEND 置回 NO。
 // 刻意不落盘：重启陌陌就回原声，不会「上次开着、这次忘了」。
 static BOOL sSLOneShotPending = NO;
+static SLArmedSource sSLArmedSource = SLArmedSourceNone;
 
 + (BOOL)isOneShotPending { return sSLOneShotPending; }
 
 + (void)setOneShotPending:(BOOL)on {
     sSLOneShotPending = on;
+    if (!on) sSLArmedSource = SLArmedSourceNone;   // 槽位空了，来源自然也没了
     SLLog(@"one-shot pending = %d", (int)on);
+}
+
++ (SLArmedSource)armedSource { return sSLArmedSource; }
+
++ (void)setArmedSource:(SLArmedSource)src {
+    sSLArmedSource = src;
+    SLLog(@"armed source = %ld", (long)src);
 }
 
 + (NSDictionary *)activePack {

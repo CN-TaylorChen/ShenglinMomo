@@ -28,5 +28,10 @@ void SLFloatSetState(SLFloatState state);
 // 点「完成」要先向上找到真正的呈现者，否则 dismiss 自己什么也不会发生。
 void SLCloseHostingPanel(UIViewController *vc);
 
+// v0.4.41：清掉当前装填的那一发（语音包 / #tts 合成音都算）。
+// 语音包和「#tts 即时合成」共用同一个槽位，后写覆盖先写 —— 选包时调它把合成音赶走，
+// 否则会出现「明明选了包，发出去却是刚才那段合成音」。实现放在 Tweak.x。
+void SLClearArmedAudio(void);
+
 @interface SLFloatIconController : UITableViewController
 @end

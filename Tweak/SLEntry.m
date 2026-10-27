@@ -183,6 +183,13 @@ static const CGFloat kSLPanelTopPad = 14.0;
 // 挂在窗口上，和胶囊同一套毛玻璃；点一行即切换，点空白收起。
 @interface SLPackMenu : UIView <AVAudioPlayerDelegate>
 + (void)showFromAnchor:(UIView *)anchor;
+/// v0.4.41：拖动胶囊时让列表跟着走（不重建，只挪位置）
++ (void)sl_repositionForAnchor:(UIView *)anchor;
+/// 收球 / 换页时把还开着的列表一起收掉
++ (void)sl_dismissCurrent;
+- (void)sl_buildWithAnchor:(UIView *)anchor;
+- (void)sl_dismiss;
+- (CGRect)sl_cardFrameForAnchor:(UIView *)anchor width:(CGFloat)cardW height:(CGFloat)cardH;
 @end
 
 @interface SLPackMenuRow : UIControl
@@ -219,12 +226,12 @@ static const CGFloat kSLPanelTopPad = 14.0;
         [self addSubview:_title];
 
         // v0.4.40：原声不再是列表里的一行 —— 撤销靠「再点一次已选中的那条」。
-        // 所以右侧标记从「蓝点（已选）」换成「xmark.circle（可清除）」：
-        // 圆叉在 iOS 里读作「清除这个选择」，不会被误认成「删除这条语音包」（那是红垃圾桶）。
-        _check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"xmark.circle"]];
+        // v0.4.41：右侧永远有一个圈。以前只在选中时冒出一个圆叉，未选中整条右边空着，
+        // 一列名字参差不齐；现在换成标准的单选圈（空圈 / 勾选），一眼看出能选。
+        _check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"circle"]];
         _check.contentMode = UIViewContentModeScaleAspectFit;
-        _check.tintColor = [UIColor secondaryLabelColor];
-        _check.hidden = YES;
+        _check.tintColor = [UIColor tertiaryLabelColor];
+        _check.hidden = NO;
         _check.userInteractionEnabled = NO;
         [self addSubview:_check];
     }
@@ -475,6 +482,9 @@ static const CGFloat kSLPanelTopPad = 14.0;
     if (prev == SLFloatStateReady && state == SLFloatStateIdle) {
         [self sl_playPulse:[UIColor systemBlueColor]];
     }
+    // v0.4.41：状态一变就重读名字。原来只改颜色不改文字，发完那一发胶囊还挂着
+    // 刚才的包名 —— 用户以为没发出去，实际问题只是字没刷新。
+    _name.text = SLFloatPackName();
     [self setNeedsLayout];
 }
 
@@ -537,23 +547,39 @@ static const CGFloat kSLPanelTopPad = 14.0;
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated {
     if (self.slExpanded == expanded) return;
     if (expanded) _name.text = SLFloatPackName();
+    BOOL wasMirrored = _mirrored;
     self.slExpanded = expanded;
 
     CGSize target = expanded ? [self sl_pillSize] : CGSizeMake(SLBallSide, SLBallSide);
     CGRect f = self.frame;
     CGRect nf = f;
     nf.size = target;
-    // 贴右边就向左长，贴左边就向右长，尽量不越出屏幕。
-    // v0.4.40：这个方向同时决定胶囊内部镜像 —— 图标端永远停在球原来的位置，
-    // 否则球在右边时图标被顶到最左、箭头正好压在球原位上，看起来像整颗球瞬移了。
-    BOOL growLeft = YES;
-    if (self.superview) growLeft = (CGRectGetMidX(f) > CGRectGetMidX(self.superview.bounds));
-    _mirrored = growLeft;
-    if (growLeft) nf.origin.x = CGRectGetMaxX(f) - target.width;
-    if (self.superview) {
-        CGFloat minX = 6.0, maxX = CGRectGetWidth(self.superview.bounds) - 6.0;
-        if (CGRectGetMaxX(nf) > maxX) nf.origin.x = maxX - target.width;
-        if (nf.origin.x < minX) nf.origin.x = minX;
+    if (expanded) {
+        // 贴右边就向左长，贴左边就向右长，尽量不越出屏幕。
+        // v0.4.40：这个方向同时决定胶囊内部镜像 —— 图标端永远停在球原来的位置，
+        // 否则球在右边时图标被顶到最左、箭头正好压在球原位上，看起来像整颗球瞬移了。
+        BOOL growLeft = YES;
+        if (self.superview) growLeft = (CGRectGetMidX(f) > CGRectGetMidX(self.superview.bounds));
+        _mirrored = growLeft;
+        if (growLeft) nf.origin.x = CGRectGetMaxX(f) - target.width;
+        if (self.superview) {
+            CGFloat minX = 6.0, maxX = CGRectGetWidth(self.superview.bounds) - 6.0;
+            if (CGRectGetMaxX(nf) > maxX) nf.origin.x = maxX - target.width;
+            if (nf.origin.x < minX) nf.origin.x = minX;
+        }
+    } else {
+        // v0.4.41：收起时球要落回「图标那一端」，不是胶囊的左边缘。
+        // 向左长（镜像）的胶囊图标在右端，直接缩 origin.x 会让球无视觉地跳到左边去。
+        [SLPackMenu sl_dismissCurrent];   // 球都收了，旁边还挂着列表很怪
+        if (wasMirrored) nf.origin.x = CGRectGetMaxX(f) - SLBallSide;
+        _mirrored = NO;
+        if (self.superview) {
+            CGPoint c = SLClampFloatPos(CGPointMake(CGRectGetMidX(nf), CGRectGetMidY(nf)),
+                                        self.superview.bounds.size);
+            nf.origin = CGPointMake(c.x - SLBallSide / 2.0, c.y - SLBallSide / 2.0);
+            // 拖动过的胶囊，收起来之后这个位置就是球以后的新家
+            SLStoreFloatPos(c, self.superview.bounds.size);
+        }
     }
 
     // 直接换尺寸，不做插值：形变过程中玻璃层会被系统重新采样，反而留残影。
@@ -582,12 +608,39 @@ static const CGFloat kSLPanelTopPad = 14.0;
 #pragma mark 手势
 
 - (void)sl_pan:(UIPanGestureRecognizer *)g {
-    // v0.4.40：展开态不响应拖动 —— 190pt 宽的胶囊拖起来只会在边缘露出一半，
-    // 想换位置先收回成球。
-    if (self.slExpanded) return;
     UIView *sv = self.superview;
     if (!sv) return;
     CGSize sz = sv.bounds.size;
+
+    // v0.4.41：展开态也能拖 —— 按住中间文字那一条拖整条（两端 48pt 是按钮，不参与拖动）。
+    // 拖动时不做吸附：胶囊本身就长，硬吸边只会让它一半出屏；收起成球时再按球位置存。
+    if (self.slExpanded) {
+        if (g.state == UIGestureRecognizerStateChanged) {
+            CGPoint t = [g translationInView:sv];
+            CGRect f = self.frame;
+            f.origin.x += t.x;
+            f.origin.y += t.y;
+            CGFloat minX = 6.0, maxX = sz.width - 6.0 - f.size.width;
+            if (maxX < minX) maxX = minX;
+            if (f.origin.x < minX) f.origin.x = minX;
+            if (f.origin.x > maxX) f.origin.x = maxX;
+            CGFloat minY = 8.0, maxY = sz.height - 8.0 - f.size.height;
+            if (maxY < minY) maxY = minY;
+            if (f.origin.y < minY) f.origin.y = minY;
+            if (f.origin.y > maxY) f.origin.y = maxY;
+            self.frame = f;
+            [g setTranslation:CGPointZero inView:sv];
+            [SLPackMenu sl_repositionForAnchor:self];   // 打开的列表跟着走
+        } else if (g.state == UIGestureRecognizerStateEnded
+                   || g.state == UIGestureRecognizerStateCancelled) {
+            // 只存「球位」：图标那一端收起来后球就落在那里
+            CGPoint c = CGPointMake(_mirrored ? (CGRectGetMaxX(self.frame) - SLBallSide / 2.0)
+                                              : (CGRectGetMinX(self.frame) + SLBallSide / 2.0),
+                                    self.center.y);
+            SLStoreFloatPos(SLClampFloatPos(c, sz), sz);
+        }
+        return;
+    }
 
     if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [g translationInView:sv];
@@ -618,6 +671,12 @@ static const CGFloat kSLPanelTopPad = 14.0;
     // v0.4.39：展开态不再"点哪都收回去"，收球只认左端热区（_homeBtn）。
     // 球态时 _homeBtn 是隐藏的，所以点球仍然是展开。
     if (self.slExpanded) return;
+    // v0.4.41：关掉「启用语音包」之后点球不再展开 —— 这个开关终于有了实际作用，
+    // 而不是一个「开了也不知道变了什么」的装饰。
+    if (![SLVoicePack isEnabled]) {
+        [AWECAUtils showToast:@"语音包已关闭 · 长按球可打开设置" duration:1.8];
+        return;
+    }
     [self sl_expand:YES animated:YES];
 }
 
@@ -711,6 +770,9 @@ static const CGFloat kSLPanelTopPad = 14.0;
 
 #pragma mark - 胶囊下拉：语音包列表
 
+// v0.4.41：全场最多一个列表。拖动胶囊时要能让它跟着走，所以要有个引用。
+static __weak SLPackMenu *sSLPackMenu = nil;
+
 @implementation SLPackMenu {
     UIControl *_catcher;
     UIView *_card;
@@ -719,14 +781,17 @@ static const CGFloat kSLPanelTopPad = 14.0;
     NSMutableArray<SLPackMenuRow *> *_rowViews;
     AVAudioPlayer *_player;
     NSInteger _playingRow;
+    __weak UIView *_anchor;
 }
 
 + (void)showFromAnchor:(UIView *)anchor {
     UIWindow *win = anchor.window;
     if (!win || !anchor) return;
+    if (sSLPackMenu) [sSLPackMenu sl_dismiss];   // 不叠第二张
     SLPackMenu *m = [[SLPackMenu alloc] initWithFrame:win.bounds];
     m.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [win addSubview:m];
+    sSLPackMenu = m;
     [m sl_buildWithAnchor:anchor];
 }
 
@@ -742,6 +807,46 @@ static const CGFloat kSLPanelTopPad = 14.0;
         [self addSubview:_catcher];
     }
     return self;
+}
+
+// v0.4.41：卡片位置只在这里算一次。拖动胶囊时按同一套规则重算，列表就像挂在胶囊上。
+- (CGRect)sl_cardFrameForAnchor:(UIView *)anchor width:(CGFloat)cardW height:(CGFloat)cardH {
+    CGRect ar = [anchor convertRect:anchor.bounds toView:self];
+    CGFloat winW = CGRectGetWidth(self.bounds);
+    CGFloat winH = CGRectGetHeight(self.bounds);
+    CGFloat x = CGRectGetMaxX(ar) - cardW;
+    x = MAX(12.0, MIN(x, winW - 12.0 - cardW));
+    CGFloat y = CGRectGetMaxY(ar) + 14.0;
+    CGFloat safeB = 0;
+    if (@available(iOS 11.0, *)) safeB = self.safeAreaInsets.bottom;
+    if (y + cardH > winH - safeB - 12.0) y = CGRectGetMinY(ar) - 14.0 - cardH;
+    if (y < 12.0) y = 12.0;   // 上下都挤的时候至少别顶出屏幕
+    return CGRectMake(x, y, cardW, cardH);
+}
+
++ (void)sl_repositionForAnchor:(UIView *)anchor {
+    SLPackMenu *m = sSLPackMenu;
+    if (!m || !m->_card || !anchor) return;
+    CGRect f = [m sl_cardFrameForAnchor:anchor
+                                  width:CGRectGetWidth(m->_card.frame)
+                                 height:CGRectGetHeight(m->_card.frame)];
+    m->_card.frame = f;
+}
+
++ (void)sl_dismissCurrent {
+    SLPackMenu *m = sSLPackMenu;
+    if (m) [m sl_dismiss];
+}
+
+// 列表是全屏遮罩（点空白收起），但胶囊必须还能被按住拖动 ——
+// 所以落在胶囊上的触摸原样交回给它自己，其余照旧由遮罩处理。
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *anchor = _anchor;
+    if (anchor && anchor.window == self.window) {
+        CGPoint p = [self convertPoint:point toView:anchor];
+        if ([anchor pointInside:p withEvent:event]) return [anchor hitTest:p withEvent:event];
+    }
+    return [super hitTest:point withEvent:event];
 }
 
 - (void)sl_buildWithAnchor:(UIView *)anchor {
@@ -762,21 +867,15 @@ static const CGFloat kSLPanelTopPad = 14.0;
     CGFloat rowH = 48.0;
     NSUInteger visible = MIN(_rows.count, (NSUInteger)5);
 
+    _anchor = anchor;
     CGRect ar = [anchor convertRect:anchor.bounds toView:self];
     CGFloat cardW = CGRectGetWidth(ar);
     if (cardW < 120.0) cardW = 196.0;
     CGFloat cardH = visible * rowH + 12.0;
 
-    CGFloat winW = CGRectGetWidth(self.bounds);
-    CGFloat winH = CGRectGetHeight(self.bounds);
-    CGFloat x = CGRectGetMaxX(ar) - cardW;
-    x = MAX(12.0, MIN(x, winW - 12.0 - cardW));
-    CGFloat y = CGRectGetMaxY(ar) + 14.0;
-    CGFloat safeB = 0;
-    if (@available(iOS 11.0, *)) safeB = self.safeAreaInsets.bottom;
-    if (y + cardH > winH - safeB - 12.0) y = CGRectGetMinY(ar) - 14.0 - cardH;
-
-    _card = [[UIView alloc] initWithFrame:CGRectMake(x, y, cardW, cardH)];
+    _card = [[UIView alloc] initWithFrame:[self sl_cardFrameForAnchor:anchor
+                                                               width:cardW
+                                                              height:cardH]];
     _card.layer.cornerRadius = 22.0;
     _card.layer.cornerCurve = kCACornerCurveContinuous;
     _card.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -821,10 +920,13 @@ static const CGFloat kSLPanelTopPad = 14.0;
         // v0.4.40：「选中」= 已装好、等下一录音的那一条（不是「上次用过的那条」）。
         // 发出去之后 pending 被清，这里就不再点亮。
         BOOL on = pack && [SLVoicePack isOneShotPending] && [SLVoicePack isPackActive:pack];
-        r.check.hidden = !on;
 
         // 左侧 30pt 圆形试听键：点它只试听、不选中；点名称那侧才是装填 / 撤销
         BOOL placeholder = (pack == nil);
+        // v0.4.41：右侧总是有圈（占位行除外），空圈 / 蓝勾一眼看出能不能选
+        r.check.hidden = placeholder;
+        r.check.image = [UIImage systemImageNamed:(on ? @"checkmark.circle.fill" : @"circle")];
+        r.check.tintColor = on ? [UIColor systemBlueColor] : [UIColor tertiaryLabelColor];
         r.play.tag = (NSInteger)i;
         [r.play addTarget:self action:@selector(sl_playTapped:) forControlEvents:UIControlEventTouchUpInside];
         r.play.enabled = !placeholder;
@@ -946,12 +1048,17 @@ static const CGFloat kSLPanelTopPad = 14.0;
     if (on) {
         // 再点一次已装好的那条 = 撤销这一发，回到原声（不用发出去消耗掉）
         [SLVoicePack setOneShotPending:NO];
+        SLClearArmedAudio();
         [AWECAUtils showToast:@"已切回原声" duration:1.5];
         SLLog(@"one-shot cancelled by re-tap");
     } else {
         [SLVoicePack selectPack:pack];
         [SLVoicePack setOneShotPending:YES];
+        [SLVoicePack setArmedSource:SLArmedSourcePack];
         [SLVoicePack setEnabled:YES];
+        // v0.4.41：槽位只有一个 —— 之前用 #tts 合成的音必须在这里让位，
+        // 否则会出现「明明选了包，发出去却是刚才那段合成音」。
+        SLClearArmedAudio();
         SLPackPrewarm();
         [AWECAUtils showToast:[NSString stringWithFormat:@"已装好「%@」· 下一条语音发它", pack[@"name"] ?: @""]
                      duration:1.8];
@@ -963,6 +1070,7 @@ static const CGFloat kSLPanelTopPad = 14.0;
 
 - (void)sl_dismiss {
     [self sl_stopAudition];
+    if (sSLPackMenu == self) sSLPackMenu = nil;
     [UIView animateWithDuration:0.14 animations:^{
         self->_card.alpha = 0.0;
         self->_card.transform = CGAffineTransformMakeScale(0.97, 0.97);
@@ -980,6 +1088,7 @@ static const CGFloat kSLPanelTopPad = 14.0;
 @property (nonatomic, strong) UINavigationController *nav;
 @property (nonatomic, strong) UIViewController *rootVC;
 - (void)sl_applyNavTransparency;
+- (void)sl_fixScrollInsetsIn:(UIView *)view top:(CGFloat)top;
 @end
 
 @implementation SLFloatPanelController
@@ -1083,11 +1192,57 @@ static const CGFloat kSLPanelTopPad = 14.0;
                                      navF.size.width, MAX(0.0, navF.size.height - kSLPanelTopPad));
 }
 
+// v0.4.41：顶部那条白的真正根因（这次是真的）。
+// 导航栏是透明的，表格一旦滚动，内容会钻到导航栏底下 —— 而列表底色是浅灰白，
+// 那块区域于是露出一条实心白带，跟四周的毛玻璃完全不是一种材质，看着就是「冒出一条白」。
+// 改外观（四套 UINavigationBarAppearance）治不了它，因为白带根本不是导航栏画的。
+// 解法：内容永远不进导航栏区域 —— 表格顶内边距 = 导航栏下沿，并关掉系统的自动内边距
+// （否则它会把安全区再算一遍，留白翻倍）。三个页面（设置 / 语音包 / 地图）共用这一处。
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    UINavigationBar *nb = self.nav.navigationBar;
+    if (!nb || !self.nav.view) return;
+    CGFloat top = CGRectGetMaxY(nb.frame);
+    if (top < 44.0) top = 44.0;      // 有些状态（转场中）拿到的还是 0
+    [self sl_fixScrollInsetsIn:self.nav.view top:top];
+}
+
+- (void)sl_fixScrollInsetsIn:(UIView *)view top:(CGFloat)top {
+    if ([view isKindOfClass:[UIScrollView class]]) {
+        UIScrollView *sv = (UIScrollView *)view;
+        // 只处理「顶在导航栏底下」的表格。地图页的列表是自己手算 frame 避让过的
+        // （从导航栏下沿才开始），再给它塞一份顶内边距只会白空一截。
+        CGFloat y = [sv convertPoint:CGPointZero toView:self.nav.view].y;
+        if (y > top - 1.0) return;
+        if (@available(iOS 11.0, *)) {
+            if (sv.contentInsetAdjustmentBehavior != UIScrollViewContentInsetAdjustmentNever) {
+                sv.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+            }
+        }
+        // 幂等：值没变就不写，避免 contentInset 变化引发的布局回环
+        UIEdgeInsets in = sv.contentInset;
+        if (fabs(in.top - top) > 0.5) {
+            in.top = top;
+            sv.contentInset = in;
+        }
+        UIEdgeInsets si = sv.scrollIndicatorInsets;
+        if (fabs(si.top - top) > 0.5) {
+            si.top = top;
+            sv.scrollIndicatorInsets = si;
+        }
+        // 底色必须是透的，滚动时露出的是浮窗那层毛玻璃
+        if (sv.backgroundColor && ![sv.backgroundColor isEqual:[UIColor clearColor]]) {
+            sv.backgroundColor = [UIColor clearColor];
+        }
+        return;   // 不再往列表内部钻：cell 里的横向滚动视图不该被改
+    }
+    for (UIView *sub in view.subviews) [self sl_fixScrollInsetsIn:sub top:top];
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     // 从地图页 / 语音包页返回时也重刷一遍，防止子页把外观改回去
-    [self sl_applyNavTransparency];
-    self.cardWrap.alpha = 0.0;
+    [self sl_applyNavTransparency];    self.cardWrap.alpha = 0.0;
     self.cardWrap.transform = CGAffineTransformMakeScale(0.94, 0.94);
 }
 
@@ -1105,10 +1260,13 @@ static const CGFloat kSLPanelTopPad = 14.0;
 
 @end
 
-// 胶囊上显示的当前选择（原声 / 语音包名）
+// 胶囊上显示的当前选择（原声 / 语音包名 / AI 语音）
 // v0.4.40：原声 = 没有装填。不再有「原声开关」，只看有没有待发的那一发。
+// v0.4.41：槽位里可能是语音包，也可能是 #tts 现场合成的音 —— 后者以前会谎报成「原声」，
+// 用户以为没装东西，发出去却是合成音。现在按来源如实显示。
 static NSString *SLFloatPackName(void) {
     if (![SLVoicePack isOneShotPending]) return @"原声";
+    if ([SLVoicePack armedSource] == SLArmedSourceAI) return @"AI 语音";
     NSDictionary *pack = [SLVoicePack activePack];
     NSString *n = pack[@"name"];
     return n.length ? n : @"原声";

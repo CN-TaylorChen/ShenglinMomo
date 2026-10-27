@@ -32,6 +32,17 @@
 /// 内存态：重启陌陌即回原声。
 + (BOOL)isOneShotPending;
 + (void)setOneShotPending:(BOOL)on;
+
+/// v0.4.41：当前这一个槽位里装的是谁。语音包和「#tts 即时合成」共用同一个槽位，
+/// 后写的覆盖先写的（不再出现「选了包却发出合成音」这种自相矛盾的状态）。
+/// 胶囊文字直接读它 —— 装的是语音包显示包名，装的是合成音显示「AI 语音」。
+typedef NS_ENUM(NSInteger, SLArmedSource) {
+    SLArmedSourceNone = 0,   // 空槽 = 原声
+    SLArmedSourcePack = 1,   // 装了某个语音包
+    SLArmedSourceAI   = 2,   // 装了 #tts 现场合成的 AI 语音
+};
++ (SLArmedSource)armedSource;
++ (void)setArmedSource:(SLArmedSource)src;
 + (NSDictionary *)activePack;
 + (BOOL)isPackActive:(NSDictionary *)pack;
 + (void)selectPack:(NSDictionary *)pack;
