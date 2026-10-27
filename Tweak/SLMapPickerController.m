@@ -74,11 +74,7 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) UIButton *confirmBtn;
 @property (nonatomic, strong) UIButton *starBtn;
 @property (nonatomic, strong) UIButton *tuneBtn;
-@property (nonatomic, strong) UIButton *trackBtn;
 @property (nonatomic, strong) UIView *brandView;
-@property (nonatomic, strong) UILabel *starCap;
-@property (nonatomic, strong) UILabel *tuneCap;
-@property (nonatomic, strong) UILabel *trackCap;
 
 @property (nonatomic, strong) UIScrollView *quickRow;      // 快捷位置（收藏过的点）
 @property (nonatomic, copy) NSArray<SLFavoriteItem *> *quickItems;
@@ -108,38 +104,7 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, copy) NSArray<NSString *> *slSlotNames;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *slSlotValid;
 @property (nonatomic, strong) NSMutableArray<NSValue *> *slSlotCoords;
-
-// 轨迹模拟（v0.4.28）
-@property (nonatomic, assign) BOOL slTracking;
-@property (nonatomic, assign) BOOL slPlaying;
-@property (nonatomic, assign) CLLocationCoordinate2D slStart;
-@property (nonatomic, assign) CLLocationCoordinate2D slEnd;
-@property (nonatomic, assign) BOOL slHasStart;
-@property (nonatomic, assign) BOOL slHasEnd;
-@property (nonatomic, assign) double slSpeedKmh;
-@property (nonatomic, strong) NSTimer *slTrackTimer;
-@property (nonatomic, assign) NSTimeInterval slTrackAccum;
-@property (nonatomic, assign) CFAbsoluteTime slTrackPlayStart;
-@property (nonatomic, assign) double slTrackMeters;
-@property (nonatomic, assign) double slTrackBearing;
-@property (nonatomic, assign) double slTrackTraveled;
-@property (nonatomic, strong) UIView *trackSheet;
-@property (nonatomic, strong) UILabel *trackTitle;
-@property (nonatomic, strong) UIButton *trackClose;
-@property (nonatomic, strong) UILabel *startLabel;
-@property (nonatomic, strong) UILabel *endLabel;
-@property (nonatomic, strong) UIButton *startSetBtn;
-@property (nonatomic, strong) UIButton *endSetBtn;
-@property (nonatomic, strong) UILabel *trackDistLabel;
-@property (nonatomic, strong) UISegmentedControl *speedSeg;
-@property (nonatomic, strong) UILabel *trackEtaLabel;
-@property (nonatomic, strong) UIProgressView *trackProgress;
-@property (nonatomic, strong) UILabel *trackProgLabel;
-@property (nonatomic, strong) UIButton *playBtn;
-@property (nonatomic, strong) MKPolyline *slRouteLine;
-@property (nonatomic, strong) MKPointAnnotation *slStartAnn;
-@property (nonatomic, strong) MKPointAnnotation *slEndAnn;
-@property (nonatomic, strong) MKPointAnnotation *slMoveAnn;
+@property (nonatomic, copy) NSArray<NSArray<SLFavoriteItem *> *> *slSlotItems;
 
 - (void)sl_buildMap;
 - (void)sl_buildPin;
@@ -155,6 +120,7 @@ static UIColor *SLHairline(void) {
 - (void)sl_alignPinToCoord:(CLLocationCoordinate2D)coord;
 - (void)sl_focusCoord:(CLLocationCoordinate2D)coord meters:(double)meters;
 - (void)sl_quickSlotTap:(UIButton *)btn;
+- (void)sl_showSlotSheet:(NSString *)slot items:(NSArray<SLFavoriteItem *> *)items;
 - (void)sl_refreshCoordinate;
 - (void)sl_refreshStar;
 - (CLLocationCoordinate2D)sl_refCoord;
@@ -170,19 +136,6 @@ static UIColor *SLHairline(void) {
 - (void)sl_openFavorites;
 - (void)sl_locate;
 - (void)sl_tune;
-- (void)sl_track;
-- (void)sl_buildTrack;
-- (void)sl_layoutTrack;
-- (void)sl_exitTrack;
-- (void)sl_setStart;
-- (void)sl_setEnd;
-- (void)sl_speedChanged:(UISegmentedControl *)seg;
-- (void)sl_playToggle;
-- (void)sl_trackTick;
-- (void)sl_drawRoute;
-- (void)sl_clearRoute;
-- (double)sl_bearingFrom:(CLLocationCoordinate2D)a to:(CLLocationCoordinate2D)b;
-- (CLLocationCoordinate2D)sl_destinationFrom:(CLLocationCoordinate2D)a bearing:(double)bearing meters:(double)meters;
 - (void)sl_copyCoord;
 - (void)sl_toast:(NSString *)text;
 
@@ -211,7 +164,6 @@ static UIColor *SLHairline(void) {
     [self sl_buildQuick];
     [self sl_buildResult];
     [self sl_buildBrand];
-    [self sl_buildTrack];
     // 先把快捷位置排出来，第一帧的卡片高度就是最终高度，避免进场后「长高」一下
     [self sl_reloadQuick];
 
@@ -275,7 +227,7 @@ static UIColor *SLHairline(void) {
     // 2) 卡片：左右内缩 8，整体上浮一截（不再沉到屏幕最底）；高度按内容算（有快捷位置行就多一行）
     BOOL hasQuick = !self.quickRow.hidden;
     CGFloat btnY = hasQuick ? (kSLQuickTop + kSLQuickH + 10) : (kSLQuickTop - 8);
-    CGFloat bodyH = btnY + 50 + 18;            // 50 按钮高 + 18 给按钮下方小标注留位
+    CGFloat bodyH = btnY + 50 + 12;
     CGFloat panelH = bodyH + safeBottom;
     CGFloat panelY = h - panelH - kSLPanelFloat;
 
@@ -283,13 +235,8 @@ static UIColor *SLHairline(void) {
     CGFloat pw = self.panel.bounds.size.width;
     CGFloat pad = kSLPanelPad;
 
-    // 轨迹模拟面板：与底部卡片同位置但更高，进入轨迹模式时切换显示
-    CGFloat trackH = 384;
-    CGFloat trackY = h - trackH - kSLPanelFloat;
-    self.trackSheet.frame = CGRectMake(kSLPanelInset, trackY, w - kSLPanelInset * 2, trackH);
-    [self sl_layoutTrack];
     CGFloat side = 50, gap = 8;
-    CGFloat mainW = pw - pad * 2 - side * 3 - gap * 3;
+    CGFloat mainW = pw - pad * 2 - side * 2 - gap * 2;
 
     self.grabber.frame = CGRectMake(pw / 2 - 18, 10, 36, 5);
     self.iconBadge.frame = CGRectMake(pad, 24, 40, 40);
@@ -308,13 +255,6 @@ static UIColor *SLHairline(void) {
     self.confirmBtn.frame = CGRectMake(pad, btnY, mainW, 50);
     self.starBtn.frame = CGRectMake(pad + mainW + gap, btnY, side, 50);
     self.tuneBtn.frame = CGRectMake(pad + mainW + gap * 2 + side, btnY, side, 50);
-    self.trackBtn.frame = CGRectMake(pad + mainW + gap * 3 + side * 2, btnY, side, 50);
-
-    // 方形按钮下方小标注（收藏 / 微调 / 轨迹），让人一眼看懂
-    CGFloat capY = btnY + 50 + 2;
-    self.starCap.frame = CGRectMake(self.starBtn.frame.origin.x, capY, side, 14);
-    self.tuneCap.frame = CGRectMake(self.tuneBtn.frame.origin.x, capY, side, 14);
-    self.trackCap.frame = CGRectMake(self.trackBtn.frame.origin.x, capY, side, 14);
 
     // 3) 搜索胶囊（下移，给顶部品牌胶囊让位）
     CGFloat capsuleY = safeTop + 50;
@@ -335,7 +275,7 @@ static UIColor *SLHairline(void) {
     //    （地图全屏后屏幕中心会被卡片挡住，针就藏在卡片后面了）
     CLLocationCoordinate2D keep = [self sl_currentCoord];   // 先用旧针位算出当前坐标
     CGFloat visTop = capsuleY + 48 + 6;
-    CGFloat visBottom = (self.slTracking ? trackY : panelY) - 12;
+    CGFloat visBottom = panelY - 12;
     CGFloat tipY = (visTop + visBottom) / 2.0;
     self.pinView.center = CGPointMake(w / 2.0, tipY - kSLPinTipOffset);
 
@@ -402,20 +342,29 @@ static UIColor *SLHairline(void) {
 
 - (void)sl_buildSearch {
     UIView *cap = [[UIView alloc] initWithFrame:CGRectZero];
-    cap.backgroundColor = [UIColor whiteColor];
+    cap.backgroundColor = [UIColor clearColor];
     cap.layer.cornerRadius = 24;
     cap.layer.cornerCurve = kCACornerCurveContinuous;
     cap.layer.borderWidth = 1;
-    cap.layer.borderColor = SLHairline().CGColor;
+    cap.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.6].CGColor;
     cap.layer.shadowColor = [UIColor blackColor].CGColor;
-    cap.layer.shadowOpacity = 0.10;
-    cap.layer.shadowRadius = 14;
+    cap.layer.shadowOpacity = 0.12;
+    cap.layer.shadowRadius = 16;
     cap.layer.shadowOffset = CGSizeMake(0, 6);
     self.searchCapsule = cap;
     [self.view addSubview:cap];
 
+    // 毛玻璃底板：半透明磨砂，浮在地图上像原生搜索栏
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    blur.layer.cornerRadius = 24;
+    blur.layer.cornerCurve = kCACornerCurveContinuous;
+    blur.layer.masksToBounds = YES;
+    blur.frame = cap.bounds;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [cap addSubview:blur];
+
     self.searchIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
-    self.searchIcon.tintColor = [UIColor tertiaryLabelColor];
+    self.searchIcon.tintColor = SLAccent();
     self.searchIcon.contentMode = UIViewContentModeScaleAspectFit;
     [cap addSubview:self.searchIcon];
 
@@ -440,7 +389,7 @@ static UIColor *SLHairline(void) {
     [cap addSubview:self.bookmarkBtn];
 
     self.locateBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.locateBtn.backgroundColor = SLChipBg();
+    self.locateBtn.backgroundColor = [UIColor colorWithWhite:1 alpha:0.7];
     self.locateBtn.layer.cornerRadius = 15;
     [self.locateBtn setImage:[UIImage systemImageNamed:@"location"] forState:UIControlStateNormal];
     self.locateBtn.tintColor = [UIColor colorWithWhite:0.37 alpha:1];
@@ -540,148 +489,6 @@ static UIColor *SLHairline(void) {
     [self.tuneBtn addTarget:self action:@selector(sl_tune) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:self.tuneBtn];
 
-    self.trackBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.trackBtn.backgroundColor = SLChipBg();
-    self.trackBtn.layer.cornerRadius = 14;
-    self.trackBtn.layer.cornerCurve = kCACornerCurveContinuous;
-    [self.trackBtn setImage:[UIImage systemImageNamed:@"route"] forState:UIControlStateNormal];
-    self.trackBtn.tintColor = SLAccent();
-    [self.trackBtn addTarget:self action:@selector(sl_track) forControlEvents:UIControlEventTouchUpInside];
-    [panel addSubview:self.trackBtn];
-
-    self.starCap = [self sl_capLabel:@"收藏"];
-    self.tuneCap = [self sl_capLabel:@"微调"];
-    self.trackCap = [self sl_capLabel:@"轨迹"];
-    [panel addSubview:self.starCap];
-    [panel addSubview:self.tuneCap];
-    [panel addSubview:self.trackCap];
-}
-
-- (void)sl_buildTrack {
-    UIView *sheet = [[UIView alloc] initWithFrame:CGRectZero];
-    sheet.backgroundColor = [UIColor whiteColor];
-    sheet.layer.cornerRadius = 26;
-    sheet.layer.cornerCurve = kCACornerCurveContinuous;
-    sheet.layer.borderWidth = 0.5;
-    sheet.layer.borderColor = SLHairline().CGColor;
-    sheet.layer.shadowColor = [UIColor blackColor].CGColor;
-    sheet.layer.shadowOpacity = 0.10;
-    sheet.layer.shadowRadius = 20;
-    sheet.layer.shadowOffset = CGSizeMake(0, 8);
-    sheet.hidden = YES;
-    self.trackSheet = sheet;
-    [self.view addSubview:sheet];
-
-    self.trackTitle = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.trackTitle.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightSemibold];
-    self.trackTitle.textColor = [UIColor labelColor];
-    self.trackTitle.text = @"轨迹模拟";
-    [sheet addSubview:self.trackTitle];
-
-    self.trackClose = [UIButton buttonWithType:UIButtonTypeCustom];
-    [self.trackClose setTitle:@"✕" forState:UIControlStateNormal];
-    [self.trackClose setTitleColor:[UIColor colorWithWhite:0.4 alpha:1] forState:UIControlStateNormal];
-    self.trackClose.titleLabel.font = [UIFont systemFontOfSize:16];
-    [self.trackClose addTarget:self action:@selector(sl_exitTrack) forControlEvents:UIControlEventTouchUpInside];
-    [sheet addSubview:self.trackClose];
-
-    self.startLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.startLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.5 weight:UIFontWeightRegular];
-    self.startLabel.textColor = [UIColor colorWithWhite:0.37 alpha:1];
-    self.startLabel.text = @"起点  未设置";
-    self.startLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [sheet addSubview:self.startLabel];
-
-    self.endLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.endLabel.font = [UIFont monospacedDigitSystemFontOfSize:12.5 weight:UIFontWeightRegular];
-    self.endLabel.textColor = [UIColor colorWithWhite:0.37 alpha:1];
-    self.endLabel.text = @"终点  未设置";
-    self.endLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [sheet addSubview:self.endLabel];
-
-    self.startSetBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [self.startSetBtn setTitle:@"设为起点" forState:UIControlStateNormal];
-    [self.startSetBtn setTitleColor:SLAccent() forState:UIControlStateNormal];
-    self.startSetBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
-    self.startSetBtn.backgroundColor = [UIColor colorWithRed:0.902 green:0.945 blue:0.984 alpha:1.0];
-    self.startSetBtn.layer.cornerRadius = 12;
-    self.startSetBtn.layer.cornerCurve = kCACornerCurveContinuous;
-    [self.startSetBtn addTarget:self action:@selector(sl_setStart) forControlEvents:UIControlEventTouchUpInside];
-    [sheet addSubview:self.startSetBtn];
-
-    self.endSetBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    [self.endSetBtn setTitle:@"设为终点" forState:UIControlStateNormal];
-    [self.endSetBtn setTitleColor:SLAccent() forState:UIControlStateNormal];
-    self.endSetBtn.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightMedium];
-    self.endSetBtn.backgroundColor = [UIColor colorWithRed:0.902 green:0.945 blue:0.984 alpha:1.0];
-    self.endSetBtn.layer.cornerRadius = 12;
-    self.endSetBtn.layer.cornerCurve = kCACornerCurveContinuous;
-    [self.endSetBtn addTarget:self action:@selector(sl_setEnd) forControlEvents:UIControlEventTouchUpInside];
-    [sheet addSubview:self.endSetBtn];
-
-    self.trackDistLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.trackDistLabel.font = [UIFont systemFontOfSize:13];
-    self.trackDistLabel.textColor = [UIColor secondaryLabelColor];
-    self.trackDistLabel.text = @"全程 — km";
-    [sheet addSubview:self.trackDistLabel];
-
-    self.speedSeg = [[UISegmentedControl alloc] initWithItems:@[@"步行 5", @"骑行 15", @"驾车 60"]];
-    self.speedSeg.selectedSegmentIndex = 0;
-    self.speedSeg.tintColor = SLAccent();
-    [self.speedSeg addTarget:self action:@selector(sl_speedChanged:) forControlEvents:UIControlEventValueChanged];
-    [sheet addSubview:self.speedSeg];
-
-    self.trackEtaLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.trackEtaLabel.font = [UIFont systemFontOfSize:12];
-    self.trackEtaLabel.textColor = [UIColor tertiaryLabelColor];
-    self.trackEtaLabel.text = @"设置起点和终点后显示时长";
-    self.trackEtaLabel.numberOfLines = 2;
-    [sheet addSubview:self.trackEtaLabel];
-
-    self.trackProgress = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-    self.trackProgress.progressTintColor = SLAccent();
-    self.trackProgress.trackTintColor = SLChipBg();
-    self.trackProgress.progress = 0;
-    [sheet addSubview:self.trackProgress];
-
-    self.trackProgLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.trackProgLabel.font = [UIFont systemFontOfSize:12];
-    self.trackProgLabel.textColor = [UIColor secondaryLabelColor];
-    self.trackProgLabel.text = @"已走 0.00 / 0.00 km";
-    [sheet addSubview:self.trackProgLabel];
-
-    self.playBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.playBtn.backgroundColor = SLAccent();
-    [self.playBtn setTitle:@"请先设起终点" forState:UIControlStateNormal];
-    [self.playBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.playBtn.titleLabel.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightMedium];
-    self.playBtn.layer.cornerRadius = 14;
-    self.playBtn.layer.cornerCurve = kCACornerCurveContinuous;
-    [self.playBtn addTarget:self action:@selector(sl_playToggle) forControlEvents:UIControlEventTouchUpInside];
-    [sheet addSubview:self.playBtn];
-}
-
-- (void)sl_layoutTrack {
-    CGFloat pw = self.trackSheet.bounds.size.width;
-    if (pw <= 0) return;
-    CGFloat pad = kSLPanelPad;
-    CGFloat rightW = 96;
-    CGFloat lineW = pw - pad * 2 - rightW - 10;
-
-    self.trackTitle.frame = CGRectMake(pad, 16, pw * 0.6, 22);
-    self.trackClose.frame = CGRectMake(pw - pad - 30, 12, 30, 30);
-
-    self.startLabel.frame = CGRectMake(pad, 56, lineW, 18);
-    self.startSetBtn.frame = CGRectMake(pw - pad - rightW, 50, rightW, 32);
-    self.endLabel.frame = CGRectMake(pad, 106, lineW, 18);
-    self.endSetBtn.frame = CGRectMake(pw - pad - rightW, 100, rightW, 32);
-
-    self.trackDistLabel.frame = CGRectMake(pad, 150, pw - pad * 2, 18);
-    self.speedSeg.frame = CGRectMake(pad, 178, pw - pad * 2, 32);
-    self.trackEtaLabel.frame = CGRectMake(pad, 218, pw - pad * 2, 34);
-    self.trackProgress.frame = CGRectMake(pad, 260, pw - pad * 2, 4);
-    self.trackProgLabel.frame = CGRectMake(pad, 270, pw - pad * 2, 16);
-    self.playBtn.frame = CGRectMake(pad, 300, pw - pad * 2, 44);
 }
 
 - (void)sl_buildResult {
@@ -771,9 +578,11 @@ static UIColor *SLHairline(void) {
     NSArray<SLFavoriteItem *> *all = [SLFavoriteStore items];
     NSMutableArray *valid = [NSMutableArray array];
     NSMutableArray *coords = [NSMutableArray array];
+    NSMutableArray *items = [NSMutableArray array];
     for (NSString *name in self.slSlotNames) {
         CLLocationCoordinate2D c = kCLLocationCoordinate2DInvalid;
         BOOL ok = NO;
+        NSMutableArray *hit = [NSMutableArray array];
         if ([name isEqualToString:@"最近"]) {
             if ([SLVirtualLocation hasCoordinate]) { c = [SLVirtualLocation coordinate]; ok = YES; }
         } else {
@@ -781,13 +590,16 @@ static UIColor *SLHairline(void) {
             for (SLFavoriteItem *it in all) {
                 NSString *fn = [it.name lowercaseString];
                 if (fn.length && ([fn containsString:low] || [low containsString:fn])) {
-                    c = it.coordinate; ok = YES; break;
+                    [hit addObject:it];
+                    if (!ok) { c = it.coordinate; ok = YES; }
                 }
             }
         }
+        [items addObject:hit];
         [valid addObject:@(ok)];
         [coords addObject:[NSValue valueWithMKCoordinate:ok ? c : kCLLocationCoordinate2DInvalid]];
     }
+    self.slSlotItems = items;
     self.slSlotValid = valid;
     self.slSlotCoords = coords;
 
@@ -805,6 +617,19 @@ static UIColor *SLHairline(void) {
                 forState:UIControlStateNormal];
         [b addTarget:self action:@selector(sl_quickSlotTap:) forControlEvents:UIControlEventTouchUpInside];
         [self.quickRow addSubview:b];
+        NSArray *hit = items[i];
+        if (hit.count > 1) {
+            UILabel *badge = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 16, 16)];
+            badge.backgroundColor = [UIColor colorWithRed:0.84 green:0.23 blue:0.23 alpha:1];
+            badge.textColor = [UIColor whiteColor];
+            badge.font = [UIFont systemFontOfSize:10 weight:UIFontWeightBold];
+            badge.textAlignment = NSTextAlignmentCenter;
+            badge.text = [NSString stringWithFormat:@"%lu", (unsigned long)hit.count];
+            badge.layer.cornerRadius = 8;
+            badge.layer.masksToBounds = YES;
+            badge.tag = 99;
+            [b addSubview:badge];
+        }
     }
     if (self.quickRow.bounds.size.width > 0) [self sl_layoutQuick];
     else [self.view setNeedsLayout];
@@ -820,7 +645,10 @@ static UIColor *SLHairline(void) {
     CGFloat bw = (rowW - gap * (n - 1)) / (CGFloat)n;
     CGFloat x = 0;
     for (NSInteger i = 0; i < n; i++) {
-        [btns[i] setFrame:CGRectMake(x, 0, bw, kSLQuickH)];
+        UIView *b = btns[i];
+        [b setFrame:CGRectMake(x, 0, bw, kSLQuickH)];
+        UILabel *badge = [b viewWithTag:99];
+        if (badge) badge.frame = CGRectMake(bw - 12, -6, 16, 16);
         x += bw + gap;
     }
     self.quickRow.contentSize = CGSizeMake(rowW, kSLQuickH);
@@ -829,18 +657,33 @@ static UIColor *SLHairline(void) {
 - (void)sl_quickSlotTap:(UIButton *)btn {
     NSInteger i = btn.tag;
     if (i < 0 || i >= (NSInteger)self.slSlotNames.count) return;
+    NSString *slot = self.slSlotNames[i];
     BOOL ok = (i < (NSInteger)self.slSlotValid.count) && [self.slSlotValid[i] boolValue];
     if (!ok) {
-        [self sl_toast:[NSString stringWithFormat:@"未收藏「%@」", self.slSlotNames[i]]];
+        [self sl_toast:[NSString stringWithFormat:@"未收藏「%@」", slot]];
         return;
     }
+    if ([slot isEqualToString:@"最近"]) {
+        CLLocationCoordinate2D c = [self.slSlotCoords[i] MKCoordinateValue];
+        if (!CLLocationCoordinate2DIsValid(c)) return;
+        [self sl_focusCoord:c meters:1200];
+        self.placeShort = @"最近使用";
+        [self sl_refreshCoordinate];
+        [self sl_reverseGeocode];
+        return;
+    }
+    NSArray *hit = (i < (NSInteger)self.slSlotItems.count) ? self.slSlotItems[i] : @[];
     CLLocationCoordinate2D c = [self.slSlotCoords[i] MKCoordinateValue];
     if (!CLLocationCoordinate2DIsValid(c)) return;
-    [self sl_focusCoord:c meters:1200];
-    self.placeShort = self.slSlotNames[i];
-    [self sl_refreshCoordinate];
-    [self sl_reverseGeocode];
-    SLLog(@"VLOC 快捷位置「%@」%.6f,%.6f", self.slSlotNames[i], c.latitude, c.longitude);
+    if (hit.count <= 1) {
+        [self sl_focusCoord:c meters:1200];
+        self.placeShort = slot;
+        [self sl_refreshCoordinate];
+        [self sl_reverseGeocode];
+        SLLog(@"VLOC 快捷位置「%@」%.6f,%.6f", slot, c.latitude, c.longitude);
+        return;
+    }
+    [self sl_showSlotSheet:slot items:hit];
 }
 
 #pragma mark - 地址
@@ -1182,6 +1025,29 @@ static UIColor *SLHairline(void) {
     [self.navigationController popViewControllerAnimated:YES];
 }
 
+- (void)sl_showSlotSheet:(NSString *)slot items:(NSArray<SLFavoriteItem *> *)items {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:[NSString stringWithFormat:@"选择「%@」", slot]
+                                                                message:nil
+                                                         preferredStyle:UIAlertControllerStyleActionSheet];
+    CLLocationCoordinate2D ref = [self sl_currentCoord];
+    CLLocation *a = [[CLLocation alloc] initWithLatitude:ref.latitude longitude:ref.longitude];
+    for (SLFavoriteItem *it in items) {
+        CLLocation *b = [[CLLocation alloc] initWithLatitude:it.coordinate.latitude longitude:it.coordinate.longitude];
+        double m = [b distanceFromLocation:a];
+        NSString *dist = m < 1000 ? [NSString stringWithFormat:@" %.0f 米", m] : [NSString stringWithFormat:@" %.1f 公里", m / 1000.0];
+        NSString *title = [NSString stringWithFormat:@"%@ ·%@", it.name, dist];
+        [ac addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *a2) {
+            [self sl_focusCoord:it.coordinate meters:1200];
+            self.placeShort = it.name;
+            [self sl_refreshCoordinate];
+            [self sl_reverseGeocode];
+            SLLog(@"VLOC 快捷位置「%@」选「%@」%.6f,%.6f", slot, it.name, it.coordinate.latitude, it.coordinate.longitude);
+        }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ac animated:YES completion:nil];
+}
+
 - (void)sl_toast:(NSString *)text {
     UILabel *l = [[UILabel alloc] initWithFrame:CGRectZero];
     l.text = text;
@@ -1239,243 +1105,6 @@ static UIColor *SLHairline(void) {
     l.textAlignment = NSTextAlignmentCenter;
     l.text = text;
     return l;
-}
-
-#pragma mark - 轨迹模拟
-
-- (void)sl_track {
-    self.slTracking = YES;
-    self.panel.hidden = YES;
-    self.trackSheet.hidden = NO;
-    self.slSpeedKmh = 5;
-    self.speedSeg.selectedSegmentIndex = 0;
-    // 起点默认取当前针尖坐标，方便立即开跑；终点留给用户拖地图后设
-    CLLocationCoordinate2D cur = [self sl_currentCoord];
-    self.slStart = cur;
-    self.slHasStart = CLLocationCoordinate2DIsValid(cur);
-    self.slHasEnd = NO;
-    self.slTrackAccum = 0;
-    self.slTrackTraveled = 0;
-    self.slPlaying = NO;
-    [self sl_updateTrackLabels];
-    [self.view setNeedsLayout];
-    [self sl_toast:@"拖动地图到终点，点「设为终点」"];
-    SLLog(@"VLOC 进入轨迹模拟 起点 %.6f,%.6f", cur.latitude, cur.longitude);
-}
-
-- (void)sl_exitTrack {
-    [self sl_stopTrackTimer];
-    [self sl_clearRoute];
-    self.pinView.hidden = NO;
-    self.slTracking = NO;
-    self.panel.hidden = NO;
-    self.trackSheet.hidden = YES;
-    [self.view setNeedsLayout];
-    SLLog(@"VLOC 退出轨迹模拟 末坐标 %.6f,%.6f", [SLVirtualLocation coordinate].latitude, [SLVirtualLocation coordinate].longitude);
-}
-
-- (void)sl_setStart {
-    CLLocationCoordinate2D c = [self sl_currentCoord];
-    if (!CLLocationCoordinate2DIsValid(c)) { [self sl_toast:@"坐标无效"]; return; }
-    self.slStart = c;
-    self.slHasStart = YES;
-    self.slTrackAccum = 0;
-    self.slTrackTraveled = 0;
-    [self sl_updateTrackLabels];
-    if (self.slHasEnd) [self sl_drawRoute];
-    SLLog(@"VLOC 轨迹起点 %.6f,%.6f", c.latitude, c.longitude);
-}
-
-- (void)sl_setEnd {
-    CLLocationCoordinate2D c = [self sl_currentCoord];
-    if (!CLLocationCoordinate2DIsValid(c)) { [self sl_toast:@"坐标无效"]; return; }
-    self.slEnd = c;
-    self.slHasEnd = YES;
-    self.slTrackAccum = 0;
-    self.slTrackTraveled = 0;
-    [self sl_updateTrackLabels];
-    [self sl_drawRoute];
-    SLLog(@"VLOC 轨迹终点 %.6f,%.6f", c.latitude, c.longitude);
-}
-
-- (void)sl_speedChanged:(UISegmentedControl *)seg {
-    NSArray<NSNumber *> *kmh = @[@5.0, @15.0, @60.0];
-    if (seg.selectedSegmentIndex >= 0 && seg.selectedSegmentIndex < (NSInteger)kmh.count) {
-        self.slSpeedKmh = [kmh[(NSUInteger)seg.selectedSegmentIndex] doubleValue];
-    }
-    [self sl_updateTrackLabels];
-}
-
-- (void)sl_updateTrackLabels {
-    self.startLabel.text = self.slHasStart
-        ? [NSString stringWithFormat:@"起点  %.6f, %.6f", self.slStart.latitude, self.slStart.longitude]
-        : @"起点  未设置";
-    self.endLabel.text = self.slHasEnd
-        ? [NSString stringWithFormat:@"终点  %.6f, %.6f", self.slEnd.latitude, self.slEnd.longitude]
-        : @"终点  未设置";
-    if (self.slHasStart && self.slHasEnd) {
-        CLLocation *a = [[CLLocation alloc] initWithLatitude:self.slStart.latitude longitude:self.slStart.longitude];
-        CLLocation *b = [[CLLocation alloc] initWithLatitude:self.slEnd.latitude longitude:self.slEnd.longitude];
-        double m = [b distanceFromLocation:a];
-        self.slTrackMeters = m;
-        self.slTrackBearing = [self sl_bearingFrom:self.slStart to:self.slEnd];
-        self.trackDistLabel.text = [NSString stringWithFormat:@"全程 %.2f km", m / 1000.0];
-        NSArray<NSNumber *> *kmh = @[@5.0, @15.0, @60.0];
-        NSArray<NSString *> *nm = @[@"步行", @"骑行", @"驾车"];
-        NSMutableArray<NSString *> *parts = [NSMutableArray array];
-        for (NSInteger i = 0; i < 3; i++) {
-            double t = (m / 1000.0) / [kmh[(NSUInteger)i] doubleValue] * 60.0;
-            [parts addObject:[NSString stringWithFormat:@"%@约%.0f分", nm[(NSUInteger)i], t]];
-        }
-        self.trackEtaLabel.text = [parts componentsJoinedByString:@" · "];
-    } else {
-        self.slTrackMeters = 0;
-        self.trackDistLabel.text = @"全程 — km";
-        self.trackEtaLabel.text = @"设置起点和终点后显示时长";
-    }
-    CGFloat frac = self.slTrackMeters > 0 ? (CGFloat)(self.slTrackTraveled / self.slTrackMeters) : 0;
-    self.trackProgress.progress = frac;
-    self.trackProgLabel.text = [NSString stringWithFormat:@"已走 %.2f / %.2f km",
-        self.slTrackTraveled / 1000.0, self.slTrackMeters / 1000.0];
-    [self.playBtn setTitle:(self.slPlaying ? @"暂停"
-                        : (self.slHasStart && self.slHasEnd ? @"开始模拟" : @"请先设起终点"))
-                   forState:UIControlStateNormal];
-}
-
-- (void)sl_playToggle {
-    if (!self.slHasStart || !self.slHasEnd) { [self sl_toast:@"请先设置起点和终点"]; return; }
-    if (self.slPlaying) [self sl_pauseTrack];
-    else [self sl_startTrack];
-}
-
-- (void)sl_startTrack {
-    self.slPlaying = YES;
-    if (![SLVirtualLocation isOn]) [SLVirtualLocation setOn:YES];
-    [SLVirtualLocation setCoordinate:self.slStart];
-    self.pinView.hidden = YES;
-    [self sl_drawRoute];
-    CLLocationCoordinate2D mid = [self sl_destinationFrom:self.slStart bearing:self.slTrackBearing meters:self.slTrackMeters / 2.0];
-    double span = self.slTrackMeters * 1.3 + 600;
-    [self.mapView setRegion:MKCoordinateRegionMakeWithDistance(mid, span, span) animated:YES];
-    if (!self.slMoveAnn) {
-        self.slMoveAnn = [[MKPointAnnotation alloc] init];
-        self.slMoveAnn.title = @"当前";
-    }
-    self.slMoveAnn.coordinate = self.slStart;
-    [self.mapView addAnnotation:self.slMoveAnn];
-    self.slTrackPlayStart = CFAbsoluteTimeGetCurrent();
-    [self sl_stopTrackTimer];
-    self.slTrackTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(sl_trackTick) userInfo:nil repeats:YES];
-    [self sl_updateTrackLabels];
-    SLLog(@"VLOC 轨迹开始 全程 %.0f 米 速度 %.0f km/h", self.slTrackMeters, self.slSpeedKmh);
-}
-
-- (void)sl_pauseTrack {
-    if (self.slPlaying) {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        self.slTrackAccum = self.slTrackAccum + (now - self.slTrackPlayStart);
-    }
-    self.slPlaying = NO;
-    [self sl_stopTrackTimer];
-    self.pinView.hidden = NO;
-    if (self.slMoveAnn) [self.mapView removeAnnotation:self.slMoveAnn];
-    [self sl_updateTrackLabels];
-    [self sl_toast:@"已暂停"];
-}
-
-- (void)sl_stopTrackTimer {
-    if (self.slTrackTimer) { [self.slTrackTimer invalidate]; self.slTrackTimer = nil; }
-}
-
-- (void)sl_trackTick {
-    if (!self.slPlaying) return;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    NSTimeInterval elapsed = self.slTrackAccum + (now - self.slTrackPlayStart);
-    double speed_mps = self.slSpeedKmh / 3.6;
-    double traveled = elapsed * speed_mps;
-    if (traveled >= self.slTrackMeters) {
-        traveled = self.slTrackMeters;
-        [SLVirtualLocation setCoordinate:self.slEnd];
-        if (self.slMoveAnn) self.slMoveAnn.coordinate = self.slEnd;
-        self.slTrackTraveled = traveled;
-        [self sl_updateTrackLabels];
-        [self sl_pauseTrack];
-        [self sl_toast:@"已到达终点"];
-        return;
-    }
-    CLLocationCoordinate2D cur = [self sl_destinationFrom:self.slStart bearing:self.slTrackBearing meters:traveled];
-    [SLVirtualLocation setCoordinate:cur];
-    if (self.slMoveAnn) self.slMoveAnn.coordinate = cur;
-    self.slTrackTraveled = traveled;
-    [self sl_updateTrackLabels];
-}
-
-- (void)sl_drawRoute {
-    [self sl_clearRoute];
-    if (!self.slHasStart || !self.slHasEnd) return;
-    CLLocationCoordinate2D pts[2] = { self.slStart, self.slEnd };
-    self.slRouteLine = [MKPolyline polylineWithCoordinates:pts count:2];
-    [self.mapView addOverlay:self.slRouteLine];
-    self.slStartAnn = [[MKPointAnnotation alloc] init];
-    self.slStartAnn.coordinate = self.slStart;
-    self.slStartAnn.title = @"起点";
-    self.slEndAnn = [[MKPointAnnotation alloc] init];
-    self.slEndAnn.coordinate = self.slEnd;
-    self.slEndAnn.title = @"终点";
-    [self.mapView addAnnotation:self.slStartAnn];
-    [self.mapView addAnnotation:self.slEndAnn];
-}
-
-- (void)sl_clearRoute {
-    if (self.slRouteLine) { [self.mapView removeOverlay:self.slRouteLine]; self.slRouteLine = nil; }
-    if (self.slStartAnn) { [self.mapView removeAnnotation:self.slStartAnn]; self.slStartAnn = nil; }
-    if (self.slEndAnn) { [self.mapView removeAnnotation:self.slEndAnn]; self.slEndAnn = nil; }
-    if (self.slMoveAnn) { [self.mapView removeAnnotation:self.slMoveAnn]; self.slMoveAnn = nil; }
-}
-
-- (double)sl_bearingFrom:(CLLocationCoordinate2D)a to:(CLLocationCoordinate2D)b {
-    double lat1 = a.latitude * M_PI / 180.0, lat2 = b.latitude * M_PI / 180.0;
-    double dLon = (b.longitude - a.longitude) * M_PI / 180.0;
-    double y = sin(dLon) * cos(lat2);
-    double x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon);
-    double br = atan2(y, x);
-    return fmod(br * 180.0 / M_PI + 360.0, 360.0);
-}
-
-- (CLLocationCoordinate2D)sl_destinationFrom:(CLLocationCoordinate2D)a bearing:(double)bearing meters:(double)meters {
-    double br = bearing * M_PI / 180.0;
-    double d = meters / 6371000.0;
-    double lat1 = a.latitude * M_PI / 180.0, lon1 = a.longitude * M_PI / 180.0;
-    double lat2 = asin(sin(lat1) * cos(d) + cos(lat1) * sin(d) * cos(br));
-    double lon2 = lon1 + atan2(sin(br) * sin(d) * cos(lat1), cos(d) - sin(lat1) * sin(lat2));
-    return CLLocationCoordinate2DMake(lat2 * 180.0 / M_PI, lon2 * 180.0 / M_PI);
-}
-
-#pragma mark - 地图代理（路线与标记）
-
-- (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {
-    if ([overlay isKindOfClass:[MKPolyline class]]) {
-        MKPolylineRenderer *r = [[MKPolylineRenderer alloc] initWithPolyline:(MKPolyline *)overlay];
-        r.strokeColor = SLAccent();
-        r.lineWidth = 4;
-        r.lineDashPattern = @[@8, @6];
-        return r;
-    }
-    return nil;
-}
-
-- (MKAnnotationView *)mapView:(MKMapView *)mapView viewForAnnotation:(id<MKAnnotation>)annotation {
-    if ([annotation isKindOfClass:[MKUserLocation class]]) return nil;
-    MKMarkerAnnotationView *v = (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:@"sltrk"];
-    if (!v) v = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:@"sltrk"];
-    v.annotation = annotation;
-    UIColor *tint = SLAccent();
-    NSString *title = annotation.title;
-    if ([title isEqualToString:@"起点"]) tint = [UIColor colorWithRed:0.20 green:0.70 blue:0.35 alpha:1];
-    else if ([title isEqualToString:@"终点"]) tint = [UIColor colorWithRed:0.84 green:0.23 blue:0.23 alpha:1];
-    v.markerTintColor = tint;
-    v.glyphTintColor = [UIColor whiteColor];
-    return v;
 }
 
 @end

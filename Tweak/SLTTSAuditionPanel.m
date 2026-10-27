@@ -21,8 +21,9 @@ static SLTTSAuditionViewController *sSLShownPanel = nil;
 static NSString *SLFmtTime(double t) {
     if (t < 0 || !isfinite(t)) t = 0;
     int m = (int)(t / 60.0);
-    double s = t - m * 60.0;
-    return [NSString stringWithFormat:@"%d:%04.1f", m, s];
+    int s = (int)(t + 0.5) - m * 60;
+    if (s >= 60) { s = 0; m++; }
+    return [NSString stringWithFormat:@"%d:%02d", m, s];
 }
 
 // 把裸 PCM（16k / mono / s16le，小端）封成 WAV。
@@ -72,6 +73,9 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 @property (nonatomic, weak) UILabel *totalLabel;
 @property (nonatomic, weak) UILabel *hintLabel;
 @property (nonatomic, weak) UIButton *playButton;
+@property (nonatomic, weak) UIView *waveView;
+@property (nonatomic, strong) CAShapeLayer *ringTrack;
+@property (nonatomic, strong) CAShapeLayer *ringFill;
 @property (nonatomic, weak) UIView *card;
 @property (nonatomic, assign) BOOL chosen;
 @property (nonatomic, assign) BOOL speakerOverridden;
@@ -124,11 +128,33 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     badge.layer.cornerCurve = kCACornerCurveContinuous;
     [card addSubview:badge];
 
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"waveform"]];
-    icon.translatesAutoresizingMaskIntoConstraints = NO;
-    icon.tintColor = tint;
-    icon.contentMode = UIViewContentModeScaleAspectFit;
-    [badge addSubview:icon];
+    UIView *wave = [[UIView alloc] init];
+    wave.translatesAutoresizingMaskIntoConstraints = NO;
+    [badge addSubview:wave];
+    self.waveView = wave;
+
+    // 按 PCM 振幅生成声波条（已播/未播统一蓝色，播放时由进度条体现进度）
+    NSArray<NSNumber *> *heights = [self sl_waveHeights:self.pcm16k bars:11];
+    CGFloat bw = 3.0, wgap = 2.0;
+    NSInteger n = (NSInteger)heights.count;
+    CGFloat totalW = n * bw + (n - 1) * wgap;
+    UIView *content = [[UIView alloc] initWithFrame:CGRectMake(0, 0, totalW, 26)];
+    for (NSInteger i = 0; i < n; i++) {
+        CGFloat h = MAX(3.0, [heights[i] doubleValue] * 26.0);
+        UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(i * (bw + wgap), (26 - h) / 2.0, bw, h)];
+        bar.backgroundColor = tint;
+        bar.layer.cornerRadius = bw / 2.0;
+        bar.layer.cornerCurve = kCACornerCurveContinuous;
+        [content addSubview:bar];
+    }
+    [wave addSubview:content];
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [wave.widthAnchor constraintEqualToConstant:totalW],
+        [wave.heightAnchor constraintEqualToConstant:26],
+        [content.centerXAnchor constraintEqualToAnchor:wave.centerXAnchor],
+        [content.centerYAnchor constraintEqualToAnchor:wave.centerYAnchor],
+    ]];
 
     UILabel *title = [[UILabel alloc] init];
     title.translatesAutoresizingMaskIntoConstraints = NO;
@@ -170,7 +196,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     cur.translatesAutoresizingMaskIntoConstraints = NO;
     cur.font = [UIFont monospacedDigitSystemFontOfSize:11.5 weight:UIFontWeightRegular];
     cur.textColor = [UIColor tertiaryLabelColor];
-    cur.text = @"0:00.0";
+    cur.text = @"0:00";
     [card addSubview:cur];
     self.curLabel = cur;
 
@@ -195,6 +221,27 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     [card addSubview:play];
     self.playButton = play;
 
+    // 进度环：外圈白色弧随播放推进（细进度条保留在下方）
+    UIBezierPath *ringPath = [UIBezierPath bezierPathWithArcCenter:CGPointMake(30, 30) radius:27
+                                   startAngle:-M_PI_2 endAngle:-M_PI_2 + M_PI * 2 clockwise:YES];
+    CAShapeLayer *rt = [CAShapeLayer layer];
+    rt.lineWidth = 3; rt.fillColor = nil;
+    rt.strokeColor = [[UIColor whiteColor] colorWithAlphaComponent:0.3].CGColor;
+    rt.lineCap = kCALineCapRound;
+    rt.path = ringPath.CGPath;
+    [play.layer addSublayer:rt];
+    self.ringTrack = rt;
+
+    CAShapeLayer *rf = [CAShapeLayer layer];
+    rf.lineWidth = 3; rf.fillColor = nil;
+    rf.strokeColor = [UIColor whiteColor].CGColor;
+    rf.lineCap = kCALineCapRound;
+    rf.path = ringPath.CGPath;
+    rf.strokeEnd = 0;
+    [play.layer addSublayer:rf];
+    self.ringFill = rf;
+    play.imageView.layer.zPosition = 2;
+
     UILabel *hint = [[UILabel alloc] init];
     hint.translatesAutoresizingMaskIntoConstraints = NO;
     hint.font = [UIFont systemFontOfSize:12];
@@ -212,25 +259,35 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     use.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
     use.backgroundColor = tint;
     [use setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    use.tintColor = [UIColor whiteColor];
     use.layer.cornerRadius = 14.0;
     use.layer.cornerCurve = kCACornerCurveContinuous;
+    [use setImage:[UIImage systemImageNamed:@"mic.fill"] forState:UIControlStateNormal];
+    use.imageEdgeInsets = UIEdgeInsetsMake(0, -6, 0, 6);
+    use.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     [use addTarget:self action:@selector(sl_useTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:use];
 
     // 次要按钮行
-    UIButton *retry = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *retry = [UIButton buttonWithType:UIButtonTypeCustom];
     retry.translatesAutoresizingMaskIntoConstraints = NO;
     [retry setTitle:@"重新合成" forState:UIControlStateNormal];
-    retry.titleLabel.font = [UIFont systemFontOfSize:14];
+    retry.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     [retry setTitleColor:tint forState:UIControlStateNormal];
+    retry.backgroundColor = [tint colorWithAlphaComponent:0.12];
+    retry.layer.cornerRadius = 12.0;
+    retry.layer.cornerCurve = kCACornerCurveContinuous;
     [retry addTarget:self action:@selector(sl_retryTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:retry];
 
-    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeCustom];
     cancel.translatesAutoresizingMaskIntoConstraints = NO;
     [cancel setTitle:@"取消" forState:UIControlStateNormal];
-    cancel.titleLabel.font = [UIFont systemFontOfSize:14];
+    cancel.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
     [cancel setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
+    cancel.backgroundColor = [UIColor tertiarySystemFillColor];
+    cancel.layer.cornerRadius = 12.0;
+    cancel.layer.cornerCurve = kCACornerCurveContinuous;
     [cancel addTarget:self action:@selector(sl_cancelTapped) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:cancel];
 
@@ -292,11 +349,13 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 
         [retry.topAnchor constraintEqualToAnchor:use.bottomAnchor constant:6.0],
         [retry.leadingAnchor constraintEqualToAnchor:g.leadingAnchor],
+        [retry.trailingAnchor constraintEqualToAnchor:cancel.leadingAnchor constant:-8.0],
         [retry.heightAnchor constraintEqualToConstant:42.0],
         [retry.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-14.0],
 
         [cancel.topAnchor constraintEqualToAnchor:retry.topAnchor],
         [cancel.trailingAnchor constraintEqualToAnchor:g.trailingAnchor],
+        [cancel.widthAnchor constraintEqualToAnchor:retry.widthAnchor],
         [cancel.heightAnchor constraintEqualToConstant:42.0],
     ]];
 }
@@ -505,6 +564,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     if (w > 1) self.fillWidth.constant = w * p;
     self.curLabel.text = SLFmtTime(c);
     self.totalLabel.text = SLFmtTime(d);
+    if (self.ringFill) self.ringFill.strokeEnd = p;
 
     // 看门狗：play 返回 YES 但进度钉死不动，别让界面永远停在播放中
     if (!self.failed && c < 0.001 && !self.player.isPlaying &&
@@ -516,7 +576,8 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 - (void)audioPlayerDidFinishPlaying:(AVAudioPlayer *)player successfully:(BOOL)flag {
     [self sl_stopTicker];
     self.fillWidth.constant = 0;
-    self.curLabel.text = @"0:00.0";
+    self.curLabel.text = @"0:00";
+    if (self.ringFill) self.ringFill.strokeEnd = 0;
     [self sl_setPlayingLook:NO];
 }
 
@@ -547,6 +608,32 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 - (void)sl_retryTapped {
     self.chosen = YES;
     [self sl_dismissWith:self.onRetry];
+}
+
+- (NSArray<NSNumber *> *)sl_waveHeights:(NSData *)pcm bars:(NSInteger)n {
+    if (pcm.length < 2 || n <= 0) return @[];
+    NSInteger total = pcm.length / 2;
+    if (total < n) n = total;
+    int16_t *buf = (int16_t *)pcm.bytes;
+    NSInteger step = total / n;
+    if (step < 1) step = 1;
+    double max = 1;
+    NSMutableArray *raw = [NSMutableArray array];
+    for (NSInteger i = 0; i < n; i++) {
+        NSInteger s = i * step, e = (i + 1) * step;
+        if (e <= s) e = s + 1;
+        double sum = 0;
+        for (NSInteger j = s; j < e; j++) {
+            double v = buf[j] / 32768.0;
+            sum += v * v;
+        }
+        double r = sqrt(sum / (e - s));
+        [raw addObject:@(r)];
+        if (r > max) max = r;
+    }
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSNumber *r in raw) [out addObject:@(MAX(0.12, r.doubleValue / max))];
+    return out;
 }
 
 @end
