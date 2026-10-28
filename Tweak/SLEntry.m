@@ -684,8 +684,11 @@ static UIImage *SLTransparentImage(void) {
     self.slState = state;
 
     UIColor *accent = nil;
+    // v0.4.52：四种状态各自一个颜色。原来「合成中」和「已装填」都是蓝，肉眼分不出
+    // 到底是在生成还是已经就绪 —— 就绪单独用绿。
     if (state == SLFloatStateRecording) accent = [UIColor systemRedColor];
-    else if (state == SLFloatStateSynthesizing || state == SLFloatStateReady) accent = [UIColor systemBlueColor];
+    else if (state == SLFloatStateSynthesizing) accent = [UIColor systemBlueColor];
+    else if (state == SLFloatStateReady) accent = [UIColor systemGreenColor];
 
     // v0.4.37：状态色加深到 26% 并铺满整条胶囊（见 layout 里的 _tint.frame），
     // 过渡用 0.26s 淡入淡出，避免蓝 → 白硬切。
@@ -722,7 +725,7 @@ static UIImage *SLTransparentImage(void) {
 
     // 发出去的那一刻：就绪→空闲，原地闪一下蓝光（不位移、不外扩）
     if (prev == SLFloatStateReady && state == SLFloatStateIdle) {
-        [self sl_playPulse:[UIColor systemBlueColor]];
+        [self sl_playPulse:[UIColor systemGreenColor]];
     }
     // v0.4.41：状态一变就重读名字。原来只改颜色不改文字，发完那一发胶囊还挂着
     // 刚才的包名 —— 用户以为没发出去，实际问题只是字没刷新。
