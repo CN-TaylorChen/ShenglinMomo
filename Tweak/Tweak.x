@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.56"
+#define SLVersion @"0.4.57"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 

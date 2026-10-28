@@ -71,7 +71,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
     self.navigationItem.rightBarButtonItem =
         SLPillIconBarItem(@"plus", @"添加", self,
-                          self.fishMode ? @selector(aweca_addMenu) : @selector(addCustomVoice));
+                          self.fishMode ? @selector(aweca_showAddPanel) : @selector(addCustomVoice));
 
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, self.fishMode ? 56 : 44)];
     UILabel *verLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 20)];
@@ -82,7 +82,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [footer addSubview:verLabel];
     if (self.fishMode) {
         UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(0, 22, self.view.bounds.size.width, 20)];
-        hint.text = @"左滑可收藏（收藏置顶） · 长按音色可换头像 · ＋ 可导入 Fish 音色";
+        hint.text = @"左滑收藏 · 右滑换头像 · 长按音色多选导出 · ＋ 添加";
         hint.textAlignment = NSTextAlignmentCenter;
         hint.font = [UIFont systemFontOfSize:11];
         hint.textColor = [UIColor tertiaryLabelColor];
@@ -105,6 +105,11 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     // 是在不同分支里赋的，统一在将要出现时按当前 title 重建一次最不容易漏。
     if (self.title.length) self.navigationItem.titleView = SLPillTitleView(self.title);
     SLInstallPillBack(self);   // v0.4.53：返回键胶囊（情绪分支在 viewDidLoad 里提前 return，所以放这）
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self aweca_dismissAddPanel];   // v0.4.57：离开页面时顺手收掉添加面板，免得挂在上一个界面
 }
 
 #pragma mark - 搜索框（自绘玻璃胶囊）
@@ -894,38 +899,143 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     return [UISwipeActionsConfiguration configurationWithActions:list];
 }
 
-- (void)aweca_addMenu {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil
-                                                                  message:@"添加 Fish 音色"
-                                                           preferredStyle:UIAlertControllerStyleActionSheet];
+#pragma mark - 添加面板（v0.4.57 玻璃小面板，仅两项）
+
+// v0.4.57：把原来 UIAlertAction 的 action sheet 换成锚定在 ＋ 按钮下方的小玻璃面板，
+// 只留两项——「从 Fish 导入」「手动添加」。点面板外即关，弹簧进场。
+- (void)aweca_showAddPanel {
+    [self aweca_dismissAddPanel];
+    UIView *host = self.navigationController.view ?: self.view;
     __weak typeof(self) ws = self;
-    [sheet addAction:[UIAlertAction actionWithTitle:@"从 Fish 导入（我的音色 / 搜公开库）"
-                                             style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *a) {
+
+    // 背景暗化，点按即关
+    UIView *dim = [[UIView alloc] initWithFrame:host.bounds];
+    dim.backgroundColor = [UIColor blackColor];
+    dim.alpha = 0;
+    dim.tag = 99218;
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [dim addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_dismissAddPanel)]];
+    [host addSubview:dim];
+    [UIView animateWithDuration:0.2 animations:^{ dim.alpha = 0.16; }];
+
+    // 面板载体
+    UIView *panel = [[UIView alloc] init];
+    panel.tag = 99217;
+    panel.layer.cornerRadius = 14;
+    panel.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+    panel.layer.borderColor = [SLGlassHairlineColor() CGColor];
+    panel.layer.shadowColor = [UIColor blackColor].CGColor;
+    panel.layer.shadowOpacity = 0.22;
+    panel.layer.shadowRadius = 18;
+    panel.layer.shadowOffset = CGSizeMake(0, 8);
+    UIVisualEffectView *blur = SLInstallGlassBackdrop(panel);
+    blur.layer.cornerRadius = 14;
+    blur.layer.masksToBounds = YES;
+    blur.userInteractionEnabled = NO;
+
+    CGFloat pw = 224, rowW = pw - 12, rowH = 52;
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, pw - 32, 20)];
+    title.text = @"添加音色";
+    title.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    title.textColor = [UIColor tertiaryLabelColor];
+    [panel addSubview:title];
+
+    UIView *fishRow = [self aweca_panelRowWithIcon:[UIImage systemImageNamed:@"icloud.and.arrow.down"]
+                                              width:rowW title:@"从 Fish 导入" subtitle:@"我的音色 / 搜公开库" tap:^{
         [ws aweca_pushImportWithMode:SLImportModeMine];
-    }]];
-    // v0.4.55：剪贴板导入已合并进导入页「粘贴 JSON」标签（顶部自动识别 + 一键导入），
-    // 这里不再单列；菜单精简为「从 Fish 导入 / 手动填写 ID / 多选导出 / 分享」。
-    [sheet addAction:[UIAlertAction actionWithTitle:@"手动填写音色 ID"
-                                             style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *a) {
+    }];
+    fishRow.frame = CGRectMake(6, 38, rowW, rowH);
+    [panel addSubview:fishRow];
+
+    UIView *manualRow = [self aweca_panelRowWithIcon:[UIImage systemImageNamed:@"plus"]
+                                                width:rowW title:@"手动添加" subtitle:@"填写音色 ID" tap:^{
         [ws addCustomVoice];
-    }]];
-    if (self.fishMode && self.customVoices.count) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"多选导出音色"
-                                                 style:UIAlertActionStyleDefault
-                                               handler:^(UIAlertAction *a) {
-            [ws sl_beginMultiSelect];
-        }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"分享我的音色（%lu 个）", (unsigned long)self.customVoices.count]
-                                                 style:UIAlertActionStyleDefault
-                                               handler:^(UIAlertAction *a) {
-            [ws sl_shareVoices:ws.customVoices fromView:nil];
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
-    [self presentViewController:sheet animated:YES completion:nil];
+    }];
+    manualRow.frame = CGRectMake(6, 38 + rowH + 2, rowW, rowH);
+    [panel addSubview:manualRow];
+
+    CGFloat ph = 38 + rowH * 2 + 2 + 10;
+    CGRect btnRect = [self aweca_addButtonRectInView:host];
+    CGFloat px = CGRectGetMaxX(btnRect) - pw;
+    if (px < 8) px = 8;
+    if (px + pw > host.bounds.size.width - 8) px = host.bounds.size.width - pw - 8;
+    CGFloat py = CGRectGetMaxY(btnRect) + 8;
+    if (py + ph > host.bounds.size.height - 8) py = CGRectGetMinY(btnRect) - ph - 8; // 下方不够翻到上方
+    panel.frame = CGRectMake(px, py, pw, ph);
+
+    panel.alpha = 0;
+    panel.transform = CGAffineTransformMakeScale(0.92);
+    [host addSubview:panel];
+    [UIView animateWithDuration:0.24 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.7 options:0 animations:^{
+        panel.alpha = 1;
+        panel.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)aweca_dismissAddPanel {
+    UIView *host = self.navigationController.view ?: self.view;
+    UIView *dim = [host viewWithTag:99218];
+    UIView *panel = [host viewWithTag:99217];
+    if (!dim && !panel) return;
+    [UIView animateWithDuration:0.18 animations:^{
+        dim.alpha = 0;
+        panel.alpha = 0;
+        panel.transform = CGAffineTransformMakeScale(0.94);
+    } completion:^(BOOL f){
+        [dim removeFromSuperview];
+        [panel removeFromSuperview];
+    }];
+}
+
+- (CGRect)aweca_addButtonRectInView:(UIView *)view {
+    UIBarButtonItem *bbi = self.navigationItem.rightBarButtonItem;
+    UIView *bbv = [bbi valueForKey:@"view"];
+    if (bbv) return [bbv convertRect:bbv.bounds toView:view];
+    return CGRectMake(view.bounds.size.width - 56, 8, 44, 44);
+}
+
+- (UIView *)aweca_panelRowWithIcon:(UIImage *)icon width:(CGFloat)rowW title:(NSString *)title subtitle:(NSString *)subtitle tap:(void(^)(void))tap {
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 52)];
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 11, 30, 30)];
+    iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
+    [row addSubview:iv];
+    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, 9, rowW - 60, 18)];
+    t1.text = title; t1.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
+    [row addSubview:t1];
+    UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
+    t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
+    [row addSubview:t2];
+    row.userInteractionEnabled = YES;
+    if (tap) objc_setAssociatedObject(row, "awecaPanelAction", tap, OBJC_ASSOCIATION_COPY);
+    [row addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_panelRowTapped:)]];
+    return row;
+}
+
+- (void)aweca_panelRowTapped:(UITapGestureRecognizer *)gr {
+    void(^act)(void) = objc_getAssociatedObject(gr.view, "awecaPanelAction");
+    [self aweca_dismissAddPanel];
+    if (act) act();
+}
+
+#pragma mark - 右滑换头像（v0.4.57：从头像长按迁移过来）
+
+// v0.4.57：长按手势改去驱动多选导出，头像更换就挪到右滑（leading）这一格，
+// 功能不丢、手势也不打架。
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (!self.fishMode) return nil;
+    if (self.multiSelect) return nil;
+    if (self.searchText.length > 0) return nil;
+    NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
+    NSString *vid = voice[@"voiceType"];
+    if (!vid.length) return nil;
+    UIContextualAction *avatar = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+        title:@"换头像" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+        self.pendingAvatarVoiceID = vid;
+        [self aweca_presentPhotoPicker];
+        completionHandler(YES);
+    }];
+    avatar.backgroundColor = [UIColor systemPurpleColor];
+    return [UISwipeActionsConfiguration configurationWithActions:@[avatar]];
 }
 
 #pragma mark - 分享 / 从剪贴板导入（v0.4.54）
@@ -1020,7 +1130,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         self.navigationItem.rightBarButtonItems = nil;
         self.navigationItem.rightBarButtonItem =
             SLPillIconBarItem(@"plus", @"添加", self,
-                              self.fishMode ? @selector(aweca_addMenu) : @selector(addCustomVoice));
+                              self.fishMode ? @selector(aweca_showAddPanel) : @selector(addCustomVoice));
     }
 }
 
@@ -1125,33 +1235,21 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 - (void)aweca_longPressCell:(UILongPressGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (self.multiSelect) return;            // 已在多选态，忽略
+    if (!self.fishMode) { [AWECAUtils showToast:@"只有 Fish 音色可以导出"]; return; }
     UITableViewCell *cell = (UITableViewCell *)gr.view;
     NSIndexPath *ip = [self.tableView indexPathForCell:cell];
-    if (!ip || ip.section != 0) return;
-    NSDictionary *voice = [self listForSection:0][ip.row];
+    if (!ip) return;
+    NSDictionary *voice = [self listForSection:ip.section][ip.row];
     NSString *vid = voice[@"voiceType"];
     if (!vid.length) return;
-
-    BOOL hasImg = [[AWECATTSManager shared] fishAvatarForVoiceID:vid] != nil;
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:voice[@"name"]
-        message:@"自定义头像图片" preferredStyle:UIAlertControllerStyleActionSheet];
-    [ac addAction:[UIAlertAction actionWithTitle:@"从相册选择" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        self.pendingAvatarVoiceID = vid;
-        [self aweca_presentPhotoPicker];
-    }]];
-    if (hasImg) {
-        [ac addAction:[UIAlertAction actionWithTitle:@"删除图片（恢复默认头像）" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *a) {
-            [[AWECATTSManager shared] deleteFishAvatarForVoiceID:vid];
-            [self.tableView reloadData];
-            [AWECAUtils showToast:@"已删除头像图片"];
-        }]];
-    }
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    if (ac.popoverPresentationController) {
-        ac.popoverPresentationController.sourceView = cell;
-        ac.popoverPresentationController.sourceRect = cell.bounds;
-    }
-    [self presentViewController:ac animated:YES completion:nil];
+    // v0.4.57：长按音色＝进入多选导出态，并预选长按的那一个
+    //（仅「我导入的音色」section 0 可导出；头像更换已移到右滑）。
+    self.multiSelect = YES;
+    [self.multiSel removeAllObjects];
+    if (ip.section == 0) [self.multiSel addObject:vid];
+    [self sl_updateMultiChrome];
+    [self.tableView reloadData];
 }
 
 - (void)aweca_presentPhotoPicker {

@@ -527,7 +527,7 @@ static UIImage *SLTransparentImage(void) {
 
         // 就绪小蓝点：状态常亮时一直在，提醒「这次说的是包里那条」
         _readyDot = [[UIView alloc] initWithFrame:CGRectZero];
-        _readyDot.backgroundColor = [UIColor systemBlueColor];
+        _readyDot.backgroundColor = [UIColor systemGreenColor];   // v0.4.57：就绪态是绿，亮点也跟着绿，别冒出一颗蓝点
         _readyDot.layer.borderWidth = 1.5;
         _readyDot.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.9].CGColor;
         _readyDot.layer.cornerRadius = 4.5;
@@ -650,7 +650,19 @@ static UIImage *SLTransparentImage(void) {
     for (int i = 0; i < 4; i++) {
         CALayer *l = _barCell[i].layer;
         [l removeAnimationForKey:@"slBar"];
+        [l removeAnimationForKey:@"slNeutral"];   // v0.4.57：清掉上一轮就绪的缓回动画，避免跨状态残留
         if (keyframe) {
+            // 就绪：先 0.16s 把四杠从上一状态的幅度缓回 1.0（fromValue 省略＝从当前
+            // 展示值起跳），抹掉「波/抖」直接跳成双跳的硬切；随后再起双跳 keyframe
+            // （beginTime 延后 0.16s，此刻 slNeutral 已结束，两段不会打架）。
+            CABasicAnimation *neutral = [CABasicAnimation animationWithKeyPath:@"transform.scale.y"];
+            neutral.toValue = @1.0;
+            neutral.duration = 0.16;
+            neutral.beginTime = now + stagger[i];
+            neutral.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+            neutral.fillMode = kCAFillModeBoth;
+            neutral.removedOnCompletion = NO;
+            [l addAnimation:neutral forKey:@"slNeutral"];
             // 就绪：上冲到 1.15 → 回落 → 再冲一次 → 轻微停在 1.02 → 归位。
             // 用 keyframe 才有「双跳」的手感，autoreverses 只会变成单次来回。
             CAKeyframeAnimation *k = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale.y"];
@@ -660,7 +672,7 @@ static UIImage *SLTransparentImage(void) {
             k.repeatCount = HUGE_VALF;
             k.fillMode = kCAFillModeBoth;
             k.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-            k.beginTime = now + stagger[i];
+            k.beginTime = now + stagger[i] + 0.16;
             [l addAnimation:k forKey:@"slBar"];
         } else {
             CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale.y"];
@@ -693,18 +705,28 @@ static UIImage *SLTransparentImage(void) {
     // v0.4.37：状态色加深到 26% 并铺满整条胶囊（见 layout 里的 _tint.frame），
     // 过渡用 0.26s 淡入淡出，避免蓝 → 白硬切。
     UIColor *fill = accent ? [accent colorWithAlphaComponent:0.26] : [UIColor clearColor];
+    // v0.4.57：所有着色元素（胶囊底、分隔线、字形 tint、四杠、名字）一起做 0.26s 交叉淡入淡出。
+    // 原来只有 _tint 在动画块里，四杠/字形/名字是瞬间换色，蓝→绿会「啪」地硬切（录屏确认一帧跳变）。
+    // 现在把颜色改动全收进同一个动画块，整颗球颜色平滑过渡；光环描边是 CAShapeLayer 属性，
+    // UIView 块管不到，单独用 CATransaction 在 sl_startBreath 之后交叉淡出（见下）。
     [UIView animateWithDuration:0.26 delay:0
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
                      animations:^{
         self->_tint.backgroundColor = fill;
         self->_tint.alpha = accent ? 1.0 : 0.0;
+        self->_sep.backgroundColor = accent ? [accent colorWithAlphaComponent:0.35]
+                                            : [UIColor colorWithWhite:0.5 alpha:0.28];
+        self->_glyph.tintColor = accent ?: [UIColor labelColor];
+        self->_name.textColor = accent ?: [UIColor labelColor];
+        // 四杠跟着换色：几何不变，只有背景色随动画块交叉淡入淡出（as[i] 透明度恒定）
+        [self sl_layoutBars];
     } completion:nil];
-    _sep.backgroundColor = accent ? [accent colorWithAlphaComponent:0.35]
-                                  : [UIColor colorWithWhite:0.5 alpha:0.28];
-    _glyph.tintColor = accent ?: [UIColor labelColor];
-    // v0.4.49：颜色变了，四杠跟着换色；并按当前状态重挂对应动画
-    [self sl_layoutBars];
     [self sl_updateBarMotion];
+    // v0.4.57：合成完成→就绪，整颗胶囊轻轻「落定」一下（缩放回弹），
+    // 给一个完成的确认感，让蓝→绿是「稳稳完成」而不是「硬切」。只在这一个方向触发。
+    if (prev == SLFloatStateSynthesizing && state == SLFloatStateReady) {
+        [self sl_playCompletionSettle];
+    }
     // v0.4.50：四套节奏的幅度差得远（0.30 / 0.55 / 0.86 / 1.15），硬切会「跳一下」。
     // 状态真变了就让四杠做一次 0.18s 淡入，把新节奏揉进去，不至于突兀。
     if (prev != state && _bars && !_bars.hidden) {
@@ -715,12 +737,17 @@ static UIImage *SLTransparentImage(void) {
         fade.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
         [_bars.layer addAnimation:fade forKey:@"slFade"];
     }
-    _name.textColor = accent ?: [UIColor labelColor];
     _readyDot.hidden = (state != SLFloatStateReady);
 
+    // v0.4.57：光环描边是 CAShapeLayer 属性，UIView 动画块管不到，单独用 CATransaction 交叉淡出。
+    // 必须放在 sl_startBreath 之后：后者会 removeAllAnimations，提前加的描边动画会被清掉。
     UIColor *halo = accent ?: [UIColor colorWithWhite:0.55 alpha:1.0];
+    [CATransaction begin];
+    [CATransaction setAnimationDuration:0.26];
+    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
     _haloIn.strokeColor = halo.CGColor;
     _haloOut.strokeColor = halo.CGColor;
+    [CATransaction commit];
     [self sl_startBreath:state];
 
     // 发出去的那一刻：就绪→空闲，原地闪一下蓝光（不位移、不外扩）
@@ -795,6 +822,19 @@ static UIImage *SLTransparentImage(void) {
     op.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
     op.removedOnCompletion = YES;
     [_pulse addAnimation:op forKey:@"pulse"];
+}
+
+// v0.4.57：合成完成→就绪的「落定」反馈。整颗胶囊 0.5s 微涨后回弹
+//（1.0 → 1.07 → 1.0），像被轻轻按了一下「好了」，配合绿色淡入，过渡不再硬切。
+// 只动 layer.transform.scale，不动 frame，不影响点击区域与布局。
+- (void)sl_playCompletionSettle {
+    CAKeyframeAnimation *b = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+    b.values = @[@1.0, @1.07, @1.0];
+    b.keyTimes = @[@0.0, @0.35, @1.0];
+    b.duration = 0.5;
+    b.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    b.removedOnCompletion = YES;
+    [self.layer addAnimation:b forKey:@"slSettle"];
 }
 
 #pragma mark 展开 / 收起
