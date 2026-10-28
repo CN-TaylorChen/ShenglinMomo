@@ -756,7 +756,9 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
             SLRaiseFloatButton();
             // v0.4.55：试听时音频已装载、等录音替换，球应显示「就绪」绿而非空闲灰
             // （此刻 isOneShotPending 还是 NO）。关闭时再按真实状态还原。
-            SLFloatSetState(SLFloatStateReady);
+            // v0.4.60：面板路径不放「落定」回弹（卡片自己在弹入，两下缩放会撞车），
+            // 所以走 Quiet 版；设置里关掉试听那条 else 分支仍然保留回弹。
+            SLFloatSetStateQuiet(SLFloatStateReady);
         }];
         SLLog(@"AUDITION 弹出试听 %@ dur=%.2f pcm=%lu",
               path.lastPathComponent, duration, (unsigned long)pcm16k.length);

@@ -144,6 +144,11 @@ static CGPoint SLClampFloatPos(CGPoint c, CGSize size);
 static void SLStoreFloatPos(CGPoint c, CGSize size);
 static CGPoint SLLoadFloatPos(CGSize size);
 
+// v0.4.60：合成完成「落定」回弹的静音开关。
+// 试听面板那条路本身有卡片弹入动画，「完成」的信号已经给足了，球再缩一下就撞车；
+// 所以在面板路径上临时静音，只有「无面板直接就绪」才保留回弹。
+static BOOL sSLFloatSettleMuted = NO;
+
 // ===================== 浮动入口 =====================
 
 #define SLBtnTag 20931
@@ -722,9 +727,10 @@ static UIImage *SLTransparentImage(void) {
         [self sl_layoutBars];
     } completion:nil];
     [self sl_updateBarMotion];
-    // v0.4.57：合成完成→就绪，整颗胶囊轻轻「落定」一下（缩放回弹），
-    // 给一个完成的确认感，让蓝→绿是「稳稳完成」而不是「硬切」。只在这一个方向触发。
-    if (prev == SLFloatStateSynthesizing && state == SLFloatStateReady) {
+    // v0.4.57：合成完成→就绪，整颗胶囊轻轻「落定」一下（缩放回弹）。
+    // v0.4.60：只在「没有试听面板」时才弹 —— 面板自己有 0.94→1.0 的弹入，
+    // 两下缩放同帧叠加会像「球被按了一下」，所以面板路径改走 SLFloatSetStateQuiet 静音。
+    if (!sSLFloatSettleMuted && prev == SLFloatStateSynthesizing && state == SLFloatStateReady) {
         [self sl_playCompletionSettle];
     }
     // v0.4.50：四套节奏的幅度差得远（0.30 / 0.55 / 0.86 / 1.15），硬切会「跳一下」。
@@ -1884,6 +1890,22 @@ void SLFloatSetState(SLFloatState state) {
     // v0.4.36：就绪不再 1.6 秒后自己退回空闲 —— 它要一直亮着，
     // 直到语音真正发出去（发送完成那一刻会走 Ready → Idle，顺带外扩一圈涟漪）。
     [b sl_applyState:state];
+}
+
+// v0.4.60：同 SLFloatSetState，但不触发「落定」缩放回弹。
+// 用途只有一个：试听面板弹出后把球点成 Ready 绿 —— 那一刻面板自己在弹入，
+// 球再缩一下就成了两个动画撞车。静音范围严格限定在这次 apply 之内。
+void SLFloatSetStateQuiet(SLFloatState state) {
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ SLFloatSetStateQuiet(state); });
+        return;
+    }
+    SLFloatButton *b = sSLFloatBtn;
+    if (!b) return;
+    BOOL prevMuted = sSLFloatSettleMuted;
+    sSLFloatSettleMuted = YES;
+    [b sl_applyState:state];
+    sSLFloatSettleMuted = prevMuted;
 }
 
 // 浮窗内部是子控制器，点「完成」时先向上找真正的呈现者

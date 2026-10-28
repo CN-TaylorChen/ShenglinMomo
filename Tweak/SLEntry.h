@@ -29,6 +29,10 @@ typedef NS_ENUM(NSInteger, SLFloatState) {
 };
 void SLFloatSetState(SLFloatState state);
 
+// v0.4.60：同上，但不触发「合成完成」的缩放回弹。
+// 试听面板呈现时用这个：面板自己有弹入动画，球再缩一下会撞车。
+void SLFloatSetStateQuiet(SLFloatState state);
+
 // v0.4.34：设置 / 语音包都装在浮窗里，内部是子控制器，
 // 点「完成」要先向上找到真正的呈现者，否则 dismiss 自己什么也不会发生。
 void SLCloseHostingPanel(UIViewController *vc);
