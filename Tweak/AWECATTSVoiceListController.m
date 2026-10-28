@@ -964,7 +964,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     panel.frame = CGRectMake(px, py, pw, ph);
 
     panel.alpha = 0;
-    panel.transform = CGAffineTransformMakeScale(0.92);
+    panel.transform = CGAffineTransformMakeScale(0.92, 0.92);
     [host addSubview:panel];
     [UIView animateWithDuration:0.24 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.7 options:0 animations:^{
         panel.alpha = 1;
@@ -980,7 +980,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [UIView animateWithDuration:0.18 animations:^{
         dim.alpha = 0;
         panel.alpha = 0;
-        panel.transform = CGAffineTransformMakeScale(0.94);
+        panel.transform = CGAffineTransformMakeScale(0.94, 0.94);
     } completion:^(BOOL f){
         [dim removeFromSuperview];
         [panel removeFromSuperview];
