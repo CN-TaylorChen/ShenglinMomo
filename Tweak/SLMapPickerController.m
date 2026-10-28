@@ -390,29 +390,32 @@ static UIColor *SLHairline(void) {
 }
 
 - (void)sl_buildSearch {
+    // v0.4.51：统一到设置页那套材质 —— 超薄毛玻璃 + 0.8pt 发丝高光边 + 全圆角。
+    // 原来这里是 SystemMaterial（偏实，像块白板）+ 0.5pt 常量白边，跟设置页的玻璃卡
+    // 不是一套语言；边框也挪到 blur 层上，跟 SLGlass 里胶囊外壳的写法一致。
     UIView *cap = [[UIView alloc] initWithFrame:CGRectZero];
     cap.backgroundColor = [UIColor clearColor];
-    cap.layer.cornerRadius = 20;
+    cap.layer.cornerRadius = 20;                 // = 高 40 的一半，四角真圆
     cap.layer.cornerCurve = kCACornerCurveContinuous;
-    cap.layer.borderWidth = 0.5;
-    cap.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.55].CGColor;
     cap.layer.shadowColor = [UIColor blackColor].CGColor;
     cap.layer.shadowOpacity = 0.10;
     cap.layer.shadowRadius = 10;
     cap.layer.shadowOffset = CGSizeMake(0, 3);
     self.searchCapsule = cap;   // v0.4.36：作为 navigationItem.titleView，不再加到 view 上
 
-    // 毛玻璃底板：半透明磨砂，浮在地图上像原生搜索栏
-    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     blur.layer.cornerRadius = 20;
     blur.layer.cornerCurve = kCACornerCurveContinuous;
     blur.layer.masksToBounds = YES;
+    blur.layer.borderWidth = 0.8;
+    blur.layer.borderColor = SLGlassHairlineColor().CGColor;
     blur.frame = cap.bounds;
     blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [cap addSubview:blur];
 
+    // 图标改中性色（原来是品牌强调色），玻璃底上用语义色更接近设置页。
     self.searchIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
-    self.searchIcon.tintColor = SLAccent();
+    self.searchIcon.tintColor = [UIColor secondaryLabelColor];
     self.searchIcon.contentMode = UIViewContentModeScaleAspectFit;
     [cap addSubview:self.searchIcon];
 
@@ -427,20 +430,28 @@ static UIColor *SLHairline(void) {
                forControlEvents:UIControlEventEditingChanged];
     [cap addSubview:self.searchField];
 
+    // 两个小圆按钮：原来一个是金底、一个是半透明白底，各走各的；现在统一成
+    // 「玻璃片小圆 + 发丝边 + 语义色图标」，跟设置页单元格是同一个色值体系。
     self.bookmarkBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.bookmarkBtn.backgroundColor = SLGoldBg();
-    self.bookmarkBtn.layer.cornerRadius = 15;
+    self.bookmarkBtn.backgroundColor = SLGlassCellColor();
+    self.bookmarkBtn.layer.cornerRadius = 14;
+    self.bookmarkBtn.layer.cornerCurve = kCACornerCurveContinuous;
+    self.bookmarkBtn.layer.borderWidth = 0.8;
+    self.bookmarkBtn.layer.borderColor = SLGlassHairlineColor().CGColor;
     [self.bookmarkBtn setImage:[UIImage systemImageNamed:@"bookmark"] forState:UIControlStateNormal];
-    self.bookmarkBtn.tintColor = SLGold();
+    self.bookmarkBtn.tintColor = [UIColor labelColor];
     self.bookmarkBtn.imageView.contentMode = UIViewContentModeScaleAspectFit;
     [self.bookmarkBtn addTarget:self action:@selector(sl_openFavorites) forControlEvents:UIControlEventTouchUpInside];
     [cap addSubview:self.bookmarkBtn];
 
     self.locateBtn = [UIButton buttonWithType:UIButtonTypeCustom];
-    self.locateBtn.backgroundColor = [UIColor colorWithWhite:1 alpha:0.7];
-    self.locateBtn.layer.cornerRadius = 15;
+    self.locateBtn.backgroundColor = SLGlassCellColor();
+    self.locateBtn.layer.cornerRadius = 14;
+    self.locateBtn.layer.cornerCurve = kCACornerCurveContinuous;
+    self.locateBtn.layer.borderWidth = 0.8;
+    self.locateBtn.layer.borderColor = SLGlassHairlineColor().CGColor;
     [self.locateBtn setImage:[UIImage systemImageNamed:@"location"] forState:UIControlStateNormal];
-    self.locateBtn.tintColor = [UIColor colorWithWhite:0.37 alpha:1];
+    self.locateBtn.tintColor = [UIColor labelColor];
     self.locateBtn.imageView.contentMode = UIViewContentModeScaleAspectFit;
     [self.locateBtn addTarget:self action:@selector(sl_locate) forControlEvents:UIControlEventTouchUpInside];
     [cap addSubview:self.locateBtn];
@@ -462,7 +473,9 @@ static UIColor *SLHairline(void) {
 
     // 毛玻璃底（v0.4.32）：放最底层，后面所有子视图都盖在它上面。
     // 面板本身是 clear 色，阴影靠 viewDidLayoutSubviews 里设的 shadowPath 撑起来。
-    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
+    // v0.4.51：SystemMaterial → SystemUltraThinMaterial，与搜索栏、设置页浮窗同一档，
+    // 否则同一屏上「搜索框很透、面板偏实」，看着像两个 App 拼起来的。
+    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     glass.frame = panel.bounds;
     glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     glass.layer.cornerRadius = 26;

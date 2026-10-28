@@ -15,6 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 玻璃片单元格底色（深色 6% 白 / 浅色 34% 白）。设置页、语音包页、全站二级页共用同一个数。
 UIColor *SLGlassCellColor(void);
 
+/// 发丝高光边（深色 16% 白 / 浅色 55% 白），0.8pt。玻璃的「厚度」全靠这一圈。
+UIColor *SLGlassHairlineColor(void);
+
 /// 给表格铺玻璃：table 本身透明 + backgroundView 换成超薄毛玻璃（设置页那张）。
 void SLApplyGlassTable(UITableView *tv);
 

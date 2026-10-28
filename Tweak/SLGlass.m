@@ -18,7 +18,7 @@ UIColor *SLGlassCellColor(void) {
 }
 
 // 发丝高光边：玻璃的「厚度」全靠这一圈，0.8pt 以上就成画框了。
-static UIColor *SLGlassHairline(void) {
+UIColor *SLGlassHairlineColor(void) {
     return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
         return tc.userInterfaceStyle == UIUserInterfaceStyleDark
             ? [UIColor colorWithWhite:1.0 alpha:0.16]
@@ -34,7 +34,7 @@ static UIVisualEffectView *SLMakePillShell(CGRect frame) {
     v.layer.cornerCurve = kCACornerCurveContinuous;
     v.layer.masksToBounds = YES;
     v.layer.borderWidth = 0.8;
-    v.layer.borderColor = SLGlassHairline().CGColor;
+    v.layer.borderColor = SLGlassHairlineColor().CGColor;
     v.userInteractionEnabled = NO;   // 触摸要落到外壳底下的按钮上
     return v;
 }
@@ -62,22 +62,41 @@ UIVisualEffectView *SLInstallGlassBackdrop(UIView *host) {
 
 #pragma mark - 胶囊控件
 
+// v0.4.51：这一层原来直接是 UIButton + setTitle:forState: / setImage:forState:。
+// 装进导航栏后文字和图标一起消失，只剩一颗空胶囊（语音包页的「＋」也是空的）。
+// 原因是 iOS 15 起按钮一旦带 UIButtonConfiguration，老 API 会被整体忽略，
+// 于是只有我们 insertSubview 插进去的毛玻璃外壳还在、titleLabel / imageView 都不画。
+// 现在改成「容器 + UILabel / UIImageView + 透明 UIControl 收点击」，完全不走
+// UIButton 的文字图片渲染路径，configuration 那套就绕开了。
+static UIControl *SLMakePillHit(CGRect bounds, id target, SEL action) {
+    UIControl *hit = [[UIControl alloc] initWithFrame:bounds];
+    hit.backgroundColor = [UIColor clearColor];
+    if (target && action) {
+        [hit addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    }
+    return hit;
+}
+
 UIBarButtonItem *SLPillBarItem(NSString *title, id target, SEL action) {
     UIFont *font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     CGSize ts = [title sizeWithAttributes:@{NSFontAttributeName: font}];
     CGFloat h = 32.0;
     CGFloat w = ceil(ts.width) + 26.0;   // 左右各 13pt
 
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.frame = CGRectMake(0, 0, w, h);
-    [btn setTitle:title forState:UIControlStateNormal];
-    // 用 setTitle + titleLabel.font 而不是 attributedTitle：动态色只有走这条路才会
-    // 随深 / 浅色切换自动重解，attributed 里的 labelColor 是赋值那一刻的颜色。
-    btn.titleLabel.font = font;
-    [btn setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
-    [btn addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
-    [btn insertSubview:SLMakePillShell(btn.bounds) atIndex:0];
-    return [[UIBarButtonItem alloc] initWithCustomView:btn];
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h)];
+    UIVisualEffectView *shell = SLMakePillShell(box.bounds);
+    [box addSubview:shell];
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:shell.bounds];
+    lab.text = title;
+    lab.font = font;
+    lab.textColor = [UIColor labelColor];
+    lab.textAlignment = NSTextAlignmentCenter;
+    [shell.contentView addSubview:lab];
+
+    // 点击层最后加，压在最上面：透明但对触摸有效，文字跟着一起可点。
+    [box addSubview:SLMakePillHit(box.bounds, target, action)];
+    return [[UIBarButtonItem alloc] initWithCustomView:box];
 }
 
 UIBarButtonItem *SLPillIconBarItem(NSString *systemName, NSString *fallbackTitle, id target, SEL action) {
@@ -85,13 +104,19 @@ UIBarButtonItem *SLPillIconBarItem(NSString *systemName, NSString *fallbackTitle
 
     CGFloat h = 32.0;
     CGFloat w = 40.0;
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.frame = CGRectMake(0, 0, w, h);
-    [btn setImage:[UIImage systemImageNamed:systemName] forState:UIControlStateNormal];
-    btn.tintColor = [UIColor labelColor];
-    [btn addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
-    [btn insertSubview:SLMakePillShell(btn.bounds) atIndex:0];
-    return [[UIBarButtonItem alloc] initWithCustomView:btn];
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, h)];
+    UIVisualEffectView *shell = SLMakePillShell(box.bounds);
+    [box addSubview:shell];
+
+    CGFloat side = 17.0;
+    UIImageView *iv = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:systemName]];
+    iv.tintColor = [UIColor labelColor];    // 显式给色，避免被导航栏 tint 冲掉
+    iv.contentMode = UIViewContentModeScaleAspectFit;
+    iv.frame = CGRectMake((w - side) / 2.0, (h - side) / 2.0, side, side);
+    [shell.contentView addSubview:iv];
+
+    [box addSubview:SLMakePillHit(box.bounds, target, action)];
+    return [[UIBarButtonItem alloc] initWithCustomView:box];
 }
 
 UIView *SLPillTitleView(NSString *text) {
