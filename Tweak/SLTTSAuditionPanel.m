@@ -220,7 +220,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     // 播放键单独占一行、两边全空。现在 300×300：播放键并进播放条左侧，
     // 右边接满波形和时间；标题组跟图标同一条垂直中线，文字统一左对齐。
     CGFloat cardW = MIN(300.0, self.view.bounds.size.width - 40.0);
-    CGFloat cardH = 300.0;
+    CGFloat cardH = 284.0;   // v0.4.59：删掉底部说明行后收 16pt，按钮随之上移
     UIView *card = [[UIView alloc] initWithFrame:CGRectMake((self.view.bounds.size.width - cardW) / 2.0,
                                                           (self.view.bounds.size.height - cardH) / 2.0,
                                                           cardW, cardH)];
@@ -357,18 +357,21 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     [player addSubview:total];
     self.totalLabel = total;
 
-    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(ix, 154, cw, 15)];
+    // v0.4.59：默认不显示那句说明，这个 label 只留作「播放失败」提示槽 ——
+    // 平时空着并隐藏，sl_markFailed 时才亮出来，所以不会占视觉，也不会顶住按钮。
+    UILabel *hint = [[UILabel alloc] initWithFrame:CGRectMake(ix, 150, cw, 14)];
     hint.font = [UIFont systemFontOfSize:11.5];
     hint.textColor = [UIColor tertiaryLabelColor];
     hint.textAlignment = NSTextAlignmentLeft;
-    hint.text = @"觉得可以就去录音，录音会被替换成这条";
+    hint.text = @"";
     hint.numberOfLines = 1;
+    hint.hidden = YES;
     [card addSubview:hint];
     self.hintLabel = hint;
 
     // 主按钮：自定义图文按钮，图标与文字之间留 7pt，不再挤成一坨
     SLIconTextButton *use = [SLIconTextButton buttonWithType:UIButtonTypeCustom];
-    use.frame = CGRectMake(ix, 181, cw, 46);
+    use.frame = CGRectMake(ix, 165, cw, 46);
     [use setTitle:@"用这条，去录音" forState:UIControlStateNormal];
     use.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     use.backgroundColor = tint;
@@ -385,7 +388,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     // 次要按钮行：两个等宽胶囊
     CGFloat halfW = (cw - 10.0) / 2.0;
     UIButton *retry = [UIButton buttonWithType:UIButtonTypeCustom];
-    retry.frame = CGRectMake(ix, 237, halfW, 42);
+    retry.frame = CGRectMake(ix, 221, halfW, 42);
     [retry setTitle:@"重新合成" forState:UIControlStateNormal];
     retry.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
     [retry setTitleColor:tint forState:UIControlStateNormal];
@@ -396,7 +399,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     [card addSubview:retry];
 
     UIButton *cancel = [UIButton buttonWithType:UIButtonTypeCustom];
-    cancel.frame = CGRectMake(ix + halfW + 10.0, 237, halfW, 42);
+    cancel.frame = CGRectMake(ix + halfW + 10.0, 221, halfW, 42);
     [cancel setTitle:@"取消" forState:UIControlStateNormal];
     cancel.titleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
     [cancel setTitleColor:[UIColor secondaryLabelColor] forState:UIControlStateNormal];
@@ -521,6 +524,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     [self sl_setPlayingLook:NO];
     self.hintLabel.text = why.length ? why : @"播放失败，点 ▶ 重试";
     self.hintLabel.textColor = [UIColor systemOrangeColor];
+    self.hintLabel.hidden = NO;   // v0.4.59：平时隐藏，出错才亮出来
     SLLog(@"AUDITION 播放失败：%@", why ?: @"");
 }
 
@@ -531,7 +535,8 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     }
     self.failed = NO;
     self.hintLabel.textColor = [UIColor tertiaryLabelColor];
-    self.hintLabel.text = @"觉得可以就去录音，录音会被替换成这条";
+    self.hintLabel.text = @"";
+    self.hintLabel.hidden = YES;   // v0.4.59：不再显示说明，只留错误槽
 
     BOOL sessionOK = [self sl_activateSession];
     NSString *file = [self sl_preparePlaybackFile];

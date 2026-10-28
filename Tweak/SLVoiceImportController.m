@@ -20,7 +20,8 @@
 @property (nonatomic, strong) SLSearchPill *searchPill;
 @property (nonatomic, assign) CGFloat searchHeaderWidth;
 @property (nonatomic, strong) UITextField *searchField;
-@property (nonatomic, strong) UIView *clipboardBanner;
+@property (nonatomic, strong) UIView *bannerPill;    // v0.4.59：与搜索胶囊同槽同尺寸的剪贴板横幅
+@property (nonatomic, strong) UILabel *bannerLabel;
 @property (nonatomic, assign) NSInteger clipboardCount;
 @property (nonatomic, copy) NSString *searchText;
 @property (nonatomic, assign) BOOL loading;
@@ -56,7 +57,7 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     if (self.mode == SLImportModeSearch) [self.searchField becomeFirstResponder];
-    else if (self.mode == SLImportModePaste) [self sl_syncClipboardBanner];
+    else if (self.mode == SLImportModePaste) [self sl_syncSearchBar];
 }
 
 #pragma mark - 搜索栏
@@ -66,69 +67,96 @@
 // 而且桌面上看着偏大（38pt + 15 号字）。
 // v0.4.55：搜索栏在「我的音色」和「搜公开库」两个列表模式都常驻，切标签不再忽隐忽现；
 // 只有「粘贴 JSON」模式才换成剪贴板一键导入横幅。
+// v0.4.59：顶部改成一个「固定 44pt 单槽」—— 不管列表还是粘贴模式，表头永远是同一个容器，
+// 搜索胶囊和剪贴板横幅同尺寸同位置，只靠 alpha 切换。
+// 这样「我的音色 ←→ 粘贴 JSON」切换时表头高度恒为 44，不会再把下面整块顶一下（原来 44↔52 会跳）。
 - (void)sl_syncSearchBar {
-    if (self.mode == SLImportModePaste) {
-        [self sl_syncClipboardBanner];
-        return;
-    }
-    self.tableView.tableHeaderView = nil;
-    if (self.mode == SLImportModeSearch || self.mode == SLImportModeMine) {
-        if (!self.searchHeader) {
-            UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
-            SLSearchPill *p = [SLSearchPill pillWithPlaceholder:@"搜公开音色"];
-            p.field.delegate = self;
-            [p.field addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
-            [head addSubview:p];
-            self.searchHeader = head;
-            self.searchPill = p;
-            self.searchField = p.field;
-            self.searchHeaderWidth = 0;
+    if (!self.searchHeader) [self sl_buildTopSlot];
+    BOOL paste = (self.mode == SLImportModePaste);
+
+    NSInteger n = 0;
+    if (paste) {
+        NSString *text = [UIPasteboard generalPasteboard].string;
+        if (text.length) {
+            NSInteger skipped = 0;
+            n = [AWECATTSManager sl_parseVoiceJSONText:text skipped:&skipped].count;
         }
+        self.clipboardCount = n;
+        self.bannerLabel.text = [NSString stringWithFormat:@"剪贴板检测到 %ld 个音色，点此导入", (long)n];
+    }
+
+    self.searchPill.alpha = paste ? 0.0 : 1.0;
+    self.searchPill.userInteractionEnabled = !paste;
+    self.bannerPill.alpha = (paste && n > 0) ? 1.0 : 0.0;
+    self.bannerPill.userInteractionEnabled = (paste && n > 0);
+    if (!paste) {
         self.searchPill.field.placeholder = (self.mode == SLImportModeMine)
             ? @"搜索我的音色" : @"搜公开音色";
-        [self sl_layoutSearchHeader];
-        self.tableView.tableHeaderView = self.searchHeader;
     }
+
+    [self sl_layoutTopSlot];
+    self.tableView.tableHeaderView = self.searchHeader;
 }
 
-// v0.4.55：粘贴 JSON 模式下，若剪贴板已有音色分享文本，顶部给一键导入横幅，
-// 这样「从剪贴板导入」不必单独占菜单项，且复用已验证的导入流程（分享↔导入闭环）。
-- (void)sl_syncClipboardBanner {
-    if (self.mode != SLImportModePaste) { self.tableView.tableHeaderView = nil; return; }
-    NSString *text = [UIPasteboard generalPasteboard].string;
-    NSInteger n = 0;
-    if (text.length) {
-        NSInteger skipped = 0;
-        n = [AWECATTSManager sl_parseVoiceJSONText:text skipped:&skipped].count;
-    }
-    if (n <= 0) { self.tableView.tableHeaderView = nil; return; }
-    self.clipboardCount = n;
-    if (!self.clipboardBanner) self.clipboardBanner = [self sl_buildClipboardBanner];
-    self.tableView.tableHeaderView = self.clipboardBanner;
-}
+// v0.4.59：单槽容器。搜索胶囊与剪贴板横幅同尺寸、同位置，靠 alpha 切换，表头高度恒 44。
+- (void)sl_buildTopSlot {
+    CGFloat W = self.view.bounds.size.width;
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, W, 44)];
 
-- (UIView *)sl_buildClipboardBanner {
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 52)];
-    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(16, 6, self.view.bounds.size.width - 32, 40)];
+    SLSearchPill *p = [SLSearchPill pillWithPlaceholder:@"搜公开音色"];
+    p.field.delegate = self;
+    [p.field addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
+    [head addSubview:p];
+    self.searchPill = p;
+    self.searchField = p.field;
+
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectZero];
     pill.backgroundColor = SLGlassPillFillColor();
     pill.layer.cornerRadius = 14;
     pill.layer.cornerCurve = kCACornerCurveContinuous;
     pill.layer.borderWidth = 0.8;
     pill.layer.borderColor = SLGlassHairlineColor().CGColor;
-    [head addSubview:pill];
-
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, pill.bounds.size.width - 28, 40)];
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectZero];
     lab.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
     lab.textColor = [UIColor labelColor];
     lab.numberOfLines = 1;
     lab.lineBreakMode = NSLineBreakByTruncatingTail;
-    lab.text = [NSString stringWithFormat:@"剪贴板检测到 %ld 个音色，点此导入", (long)self.clipboardCount];
     [pill addSubview:lab];
-
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sl_importClipboard)];
     [pill addGestureRecognizer:tap];
     pill.userInteractionEnabled = YES;
-    return head;
+    [head addSubview:pill];
+    self.bannerPill = pill;
+    self.bannerLabel = lab;
+
+    self.searchHeader = head;
+    self.searchHeaderWidth = 0;
+}
+
+// v0.4.59：表头内容统一对齐到「单元格内容区 + 16」，跟分段控件、粘贴框、列表行同一条左基线。
+// 原来搜索胶囊/横幅按整屏宽算 16，单元格内容却在 groupInset 之后，两者差 20pt，就是「间隔不齐」的来源。
+- (CGFloat)sl_contentInsetX {
+    CGFloat W = self.tableView.bounds.size.width;
+    CGRect r = [self.tableView rectForSection:0];
+    if (r.size.width > 1 && W > r.size.width) return r.origin.x;
+    return 20.0;
+}
+
+- (void)sl_layoutTopSlot {
+    UIView *head = self.searchHeader;
+    if (!head) return;
+    CGFloat W = self.tableView.bounds.size.width;
+    if (W <= 0) W = self.view.bounds.size.width;
+    CGFloat x = [self sl_contentInsetX] + 16.0;
+    CGFloat w = MAX(0.0, W - 2.0 * x);
+    head.frame = CGRectMake(0, 0, W, 44);
+    self.searchPill.frame = CGRectMake(x, 4.0, w, 36.0);
+    self.bannerPill.frame = CGRectMake(x, 4.0, w, 36.0);
+    self.bannerLabel.frame = CGRectMake(14.0, 0, MAX(0.0, w - 28.0), 36.0);
+    if (fabs(W - self.searchHeaderWidth) > 0.5) {
+        self.searchHeaderWidth = W;
+        self.tableView.tableHeaderView = head;
+    }
 }
 
 - (void)sl_importClipboard {
@@ -156,24 +184,10 @@
     return self.items;
 }
 
-- (void)sl_layoutSearchHeader {
-    UIView *head = self.searchHeader;
-    if (!head) return;
-    CGFloat w = self.tableView.bounds.size.width;
-    if (w <= 0) w = self.view.bounds.size.width;
-    CGFloat h = [SLSearchPill pillHeight];
-    head.frame = CGRectMake(0, 0, w, h + 8.0);
-    self.searchPill.frame = CGRectMake(16.0, 4.0, MAX(0.0, w - 32.0), h);
-    // 只有宽度真变了才重新赋值，避免在 viewDidLayoutSubviews 里反复触发表格重算
-    if (fabs(w - self.searchHeaderWidth) > 0.5) {
-        self.searchHeaderWidth = w;
-        self.tableView.tableHeaderView = head;
-    }
-}
-
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    if (self.mode == SLImportModeSearch) [self sl_layoutSearchHeader];
+    // v0.4.59：单槽在三种模式下都存在，宽度变化都要重排（原来只给 Search 模式排）
+    [self sl_layoutTopSlot];
 }
 
 - (void)sl_searchChanged {
@@ -216,9 +230,8 @@
 // 原来这行只是文字，而且默认全选，用户想只导一个得先逐个点掉，很别扭。
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    if (section != 1) return nil;   // 0 区卡片里只有一个分段控件，小标题多余
-    if (self.mode == SLImportModePaste) return @"粘贴音色列表 JSON";
-    return nil;                     // 列表模式走 viewForHeaderInSection
+    // v0.4.59：所有小标题统一走 viewForHeaderInSection（同高 40、同基线），不再用系统标题
+    return nil;
 }
 
 static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
@@ -239,11 +252,22 @@ static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
-    if (section != 1 || self.mode == SLImportModePaste) return nil;
+    if (section != 1) return nil;
     CGFloat w = tv.bounds.size.width;
+    CGFloat x = [self sl_contentInsetX] + 16.0;   // v0.4.59：与表头/框同一左基线
     UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 40)];
 
-    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(32, 0, w - 200, 40)];
+    // v0.4.59：粘贴模式的标题也放进这 40pt 头里，跟列表头同高，切标签不再 40↔28 跳一下。
+    if (self.mode == SLImportModePaste) {
+        UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 0, MAX(0.0, w - 2.0 * x), 40)];
+        lab.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        lab.textColor = [UIColor secondaryLabelColor];
+        lab.text = @"粘贴音色列表 JSON";
+        [head addSubview:lab];
+        return head;
+    }
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(x, 0, MAX(0.0, w - x - 200.0), 40)];
     lab.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     lab.textColor = [UIColor secondaryLabelColor];
     lab.text = [NSString stringWithFormat:@"已选 %lu / %lu",
@@ -252,7 +276,7 @@ static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
 
     UIButton *all = SLMiniPill(@"全选", self, @selector(sl_selectAll));
     UIButton *none = SLMiniPill(@"全取消", self, @selector(sl_clearSelection));
-    CGFloat right = w - 32;
+    CGFloat right = w - x;
     all.frame = CGRectMake(right - all.frame.size.width, 7, all.frame.size.width, 26);
     none.frame = CGRectMake(CGRectGetMinX(all.frame) - 8 - none.frame.size.width, 7,
                             none.frame.size.width, 26);
@@ -263,7 +287,7 @@ static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
 
 - (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
     (void)tv;
-    if (section == 1) return (self.mode == SLImportModePaste) ? 28 : 40;
+    if (section == 1) return 40;   // v0.4.59：两种模式同高
     return 0.01;
 }
 
@@ -293,7 +317,7 @@ static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
 
 - (CGFloat)tableView:(UITableView *)tv heightForRowAtIndexPath:(NSIndexPath *)ip {
     if (ip.section == 0) return 52;   // 分段控件 32 + 上下各 10，不贴边
-    if (ip.section == 1 && self.mode == SLImportModePaste) return 240;
+    if (ip.section == 1 && self.mode == SLImportModePaste) return 168;   // v0.4.59：240 → 168，框不再又宽又长
     return 44;
 }
 
@@ -350,7 +374,10 @@ static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"text"];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"text"];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        self.pasteView.frame = CGRectMake(12, 8, tv.bounds.size.width - 64, 220);
+        // v0.4.59：按 cell 内容区算宽（原来用整屏 tv.bounds，会越界且左右不齐）。
+        // 左右各 16，与上面分段控件、表头同一条基线；高度收到 152（行高 168 − 上下各 8）。
+        CGFloat cvw = tv.bounds.size.width - 2.0 * [self sl_contentInsetX];
+        self.pasteView.frame = CGRectMake(16, 8, MAX(0.0, cvw - 32.0), 152.0);
         if (self.pasteView.superview != cell.contentView) [cell.contentView addSubview:self.pasteView];
         return cell;
     }
@@ -411,8 +438,18 @@ static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
     self.status = nil;
     self.searchText = @"";
     [self.selected removeAllObjects];
-    [self sl_syncSearchBar];
-    [self.tableView reloadData];
+    // 离开搜索模式先收键盘，否则粘贴模式下搜索框 alpha=0 了键盘还挂着
+    if (self.mode != SLImportModeSearch && self.searchField.isFirstResponder) {
+        [self.searchField resignFirstResponder];
+    }
+    // v0.4.59：切标签用交叉淡入，不再整表硬切；表头高度恒定 44，下面内容也就不再被顶一下
+    [UIView transitionWithView:self.tableView
+                      duration:0.22
+                       options:UIViewAnimationOptionTransitionCrossDissolve
+                    animations:^{
+        [self sl_syncSearchBar];
+        [self.tableView reloadData];
+    } completion:nil];
     if (self.mode == SLImportModeMine) {
         [self sl_fetchMine];
     } else if (self.mode == SLImportModeSearch) {

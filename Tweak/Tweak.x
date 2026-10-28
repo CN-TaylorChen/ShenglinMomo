@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.58"
+#define SLVersion @"0.4.59"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -1118,9 +1118,10 @@ static void SLArmTTS(id handler,
             [SLVoicePack setOneShotPending:YES];
             [SLVoicePack setArmedSource:SLArmedSourceAI];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
-            // v0.4.52：合成完不再直接点亮「就绪蓝」。这时候试听面板还开着，
-            // 用户可能取消或重来 —— 球先落回灰，只有点了「用这条」才算真的就绪。
-            SLFloatSetState(SLFloatStateIdle);
+            // v0.4.59：这里不再先落灰。原来先设 Idle（灰），紧接着同步解码 PCM（约 0.2–0.4s），
+            // 等试听面板弹出后才设 Ready（绿）—— 录屏里就是「蓝 → 灰 → 绿」闪一下，看着像顿住。
+            // 现在保持蓝：开着试听就走下面 present 完成时转绿，关掉试听走 else 分支转绿；只有取消才回灰。
+
 
             // —— v0.4.52：不再自己造 Opus 文件 ——
             // v0.4.52 直接调陌陌的 MDAudioStreamBus 构造器会闪退（它在 init 里就用到
