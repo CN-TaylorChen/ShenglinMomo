@@ -199,6 +199,9 @@ static UIImage *SLTransparentImage(void) {
 @property (nonatomic, assign) SLFloatState slState;
 - (void)sl_loadIcon;
 - (void)sl_applyState:(SLFloatState)state;
+/// v0.4.49：四杠逐根动画（A 均衡器 / C 呼吸，绕中心缩放）
+- (void)sl_layoutBars;
+- (void)sl_updateBarMotion;
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated;
 /// v0.4.45：回到前台重挂呼吸光晕（后台期间动画会被系统整条移除）
 - (void)sl_restartHalo;
@@ -362,6 +365,9 @@ static UIImage *SLTransparentImage(void) {
     CAShapeLayer *_glassMask;
     UIView *_tint;
     UIImageView *_glyph;
+    // v0.4.49：四杠改成 4 个可独立动画的条视图（原来是一张静态图，无法逐根错相位跳动）
+    UIView *_bars;
+    UIView *_barCell[4];
     UIImageView *_thumb;
     UILabel *_emoji;
     UIView *_sep;
@@ -441,6 +447,18 @@ static UIImage *SLTransparentImage(void) {
         _glyph.contentMode = UIViewContentModeScaleAspectFit;
         _glyph.userInteractionEnabled = NO;
         [self addSubview:_glyph];
+
+        // v0.4.49：四杠容器。放在 _glyph 之上、_thumb/_emoji 之下，
+        // 位置/显隐跟随 _glyph；自定义头像或 emoji 时整组隐藏。
+        _bars = [[UIView alloc] initWithFrame:CGRectZero];
+        _bars.userInteractionEnabled = NO;
+        [self addSubview:_bars];
+        for (int i = 0; i < 4; i++) {
+            UIView *bar = [[UIView alloc] initWithFrame:CGRectZero];
+            bar.userInteractionEnabled = NO;
+            [_bars addSubview:bar];
+            _barCell[i] = bar;
+        }
 
         _thumb = [[UIImageView alloc] initWithFrame:CGRectZero];
         _thumb.contentMode = UIViewContentModeScaleAspectFill;
@@ -567,9 +585,61 @@ static UIImage *SLTransparentImage(void) {
         _glyph.image = [SLBrandGlyphCompact(44, [UIColor blackColor]) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
         _glyph.tintColor = [UIColor labelColor];
         _glyph.hidden = NO;
+        _glyph.alpha = 0.0;   // v0.4.49：静态图不显示，实际由 _bars 逐根绘制 + 动画
     }
     _name.text = SLFloatPackName();
     [self setNeedsLayout];
+}
+
+// v0.4.49：把四根条摆到 _bars 里。几何沿用 SLBrandGlyphCompact：
+// 单位 u = 宽度/100，xs 定位置、hs 定高度（短长长短），左两淡=原声、右两实=合成声。
+// 用 bounds + center 摆放，锚点天然在正中，缩放就是「绕中心」，不会贴底。
+- (void)sl_layoutBars {
+    CGFloat side = CGRectGetWidth(_bars.bounds);
+    if (side <= 0.0) return;
+    CGFloat u = side / 100.0;
+    static const CGFloat xs[4] = {12, 34, 56, 78};
+    static const CGFloat hs[4] = {24, 46, 40, 28};
+    static const CGFloat as[4] = {0.30, 0.30, 1.0, 1.0};
+    UIColor *c = _glyph.tintColor ?: [UIColor labelColor];
+    for (int i = 0; i < 4; i++) {
+        CGFloat w = 10.0 * u;
+        CGFloat hh = hs[i] * u;
+        UIView *bar = _barCell[i];
+        bar.bounds = CGRectMake(0, 0, w, hh);
+        bar.center = CGPointMake((xs[i] * u) + w / 2.0, side / 2.0);
+        bar.layer.cornerRadius = w / 2.0;
+        bar.layer.cornerCurve = kCACornerCurveContinuous;
+        bar.backgroundColor = [c colorWithAlphaComponent:as[i]];
+    }
+}
+
+// v0.4.49：A / C 联动。
+//   活跃（录音 / 合成）→ A 均衡器：四根错相位上下缩放（0.9s，逐根 +0.12s）
+//   其余（空闲 / 就绪）→ C 呼吸：四根同步轻微起伏（1.6s）
+// 只动 transform.scale.y，锚点在中心，几何与点击区域都不变。
+- (void)sl_updateBarMotion {
+    if (!_bars) return;
+    BOOL active = (self.slState == SLFloatStateRecording || self.slState == SLFloatStateSynthesizing);
+    if (_bars.hidden) {
+        for (int i = 0; i < 4; i++) [_barCell[i].layer removeAnimationForKey:@"slBar"];
+        return;
+    }
+    CFTimeInterval now = CACurrentMediaTime();
+    for (int i = 0; i < 4; i++) {
+        UIView *bar = _barCell[i];
+        [bar.layer removeAnimationForKey:@"slBar"];
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale.y"];
+        a.fromValue = @(active ? 0.45 : 0.82);
+        a.toValue = @(1.0);
+        a.duration = active ? 0.9 : 1.6;
+        a.autoreverses = YES;
+        a.repeatCount = HUGE_VALF;
+        a.fillMode = kCAFillModeBoth;
+        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        a.beginTime = now + (active ? i * 0.12 : 0.0);
+        [bar.layer addAnimation:a forKey:@"slBar"];
+    }
 }
 
 #pragma mark 状态
@@ -594,6 +664,9 @@ static UIImage *SLTransparentImage(void) {
     _sep.backgroundColor = accent ? [accent colorWithAlphaComponent:0.35]
                                   : [UIColor colorWithWhite:0.5 alpha:0.28];
     _glyph.tintColor = accent ?: [UIColor labelColor];
+    // v0.4.49：颜色变了，四杠跟着换色；并按当前状态重挂 A / C 动画
+    [self sl_layoutBars];
+    [self sl_updateBarMotion];
     _name.textColor = accent ?: [UIColor labelColor];
     _readyDot.hidden = (state != SLFloatStateReady);
 
@@ -656,6 +729,8 @@ static UIImage *SLTransparentImage(void) {
     [self setNeedsLayout];
     [self layoutIfNeeded];
     [self sl_startBreath:self.slState];
+    // v0.4.49：四杠循环动画同样会被系统在后台移除，回前台一并重挂
+    [self sl_updateBarMotion];
 }
 
 - (void)dealloc {
@@ -934,6 +1009,10 @@ static UIImage *SLTransparentImage(void) {
     _glyph.frame = exp ? CGRectMake(SLMX(13.0, 22.0), (h - 22.0) / 2.0, 22.0, 22.0)
                        : CGRectMake((w - 22.0) / 2.0, (h - 22.0) / 2.0, 22.0, 22.0);
     _glyph.hidden = (_thumb.hidden == NO) || (_emoji.hidden == NO);
+    // v0.4.49：四杠容器跟随 _glyph 的位置与显隐；自定义头像 / emoji 时自动让位
+    _bars.frame = _glyph.frame;
+    _bars.hidden = _glyph.hidden;
+    [self sl_layoutBars];
     // v0.4.44：自定义图标在球态是铺满 48 的，展开态原来缩到 42，切胶囊时明显小一圈。
     // 改成两种形态都用满 48（左端留出一整块圆形），球和胶囊的图标视觉尺寸就一致了。
     CGFloat iconS = SLBallSide;
