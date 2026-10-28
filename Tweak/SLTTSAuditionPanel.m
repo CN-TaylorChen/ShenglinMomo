@@ -13,6 +13,7 @@
 #import "SLEntry.h"
 #import "SLLog.h"
 #import <AVFoundation/AVFoundation.h>
+#import <QuartzCore/QuartzCore.h>
 #import <math.h>
 
 static NSString *const kSLTTSPreviewKey = @"SLTTSPreview";
@@ -198,6 +199,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 @property (nonatomic, assign) BOOL failed;
 @property (nonatomic, assign) BOOL enterAnimated;   // v0.4.61：入场动画 / 首播只做一次
 
+- (void)sl_playEntrance;
 - (NSArray<NSNumber *> *)sl_waveHeights:(NSData *)pcm bars:(NSInteger)n;
 - (NSArray<NSNumber *> *)sl_fakeHeights:(NSInteger)n;
 @end
@@ -236,6 +238,12 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:card.bounds cornerRadius:24.0].CGPath;
     [self.view addSubview:card];
     self.card = card;
+    // v0.4.62：present(animated:NO) 是「直接贴到屏幕上」，没有系统转场帮我们藏住起始帧。
+    // 卡片一上屏就是 alpha=1 全尺寸，而 viewDidAppear 实测要等键盘收起 / 转场协调结束
+    // 才回调（约 0.4s）—— 那 0.4s 里用户看到的是「完整卡片静置一下」，然后才被压回 0
+    // 重新弹出，也就是录屏里的「弹了两次」。初始态必须在视图上屏之前就设好。
+    card.alpha = 0.0;
+    card.transform = CGAffineTransformMakeScale(0.94, 0.94);
 
     // 卡片本体毛玻璃，不再是死白底
     UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
@@ -413,16 +421,20 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    // v0.4.61：系统会重复回调 viewDidAppear（键盘收起、呈现环境变化都会转发一次）。
-    // 原来无条件把 alpha 归零再跑一遍弹簧 —— 录屏里就是「卡片完整 → 一闪缩回 → 又弹回来」，
-    // 看着像弹了两次。入场动画和首播都只做一次，后来的回调直接忽略。
+    SLLog(@"AUDITION t=%.3f viewDidAppear（入场已播=%d）",
+          CACurrentMediaTime(), self.enterAnimated ? 1 : 0);
+    [self sl_playEntrance];   // 兜底：present 那边没触发成也能弹
+}
+
+// v0.4.62：入场动画独立成方法。present 之后主动触发一次，不用干等 viewDidAppear
+// （实测它会拖到 0.4s 之后，那段时间卡片已经在屏幕上了）。once 保证只跑一次。
+- (void)sl_playEntrance {
     if (self.enterAnimated) {
-        SLLog(@"AUDITION viewDidAppear 重复回调，忽略");
+        SLLog(@"AUDITION 入场已播过，忽略重复触发");
         return;
     }
     self.enterAnimated = YES;
-    SLLog(@"AUDITION viewDidAppear 首次，播入场动画");
-    // 卡片弹入
+    SLLog(@"AUDITION t=%.3f 播入场动画", CACurrentMediaTime());
     self.card.alpha = 0.0;
     self.card.transform = CGAffineTransformMakeScale(0.94, 0.94);
     [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.86 initialSpringVelocity:0.4
@@ -761,7 +773,9 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
         vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
         vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
         sSLShownPanel = vc;
+        SLLog(@"AUDITION t=%.3f present 开始", CACurrentMediaTime());
         [top presentViewController:vc animated:NO completion:^{
+            SLLog(@"AUDITION t=%.3f present completion", CACurrentMediaTime());
             // v0.4.54：卡片出现后把球抬到最上层，别被试听卡片压住
             SLRaiseFloatButton();
             // v0.4.55：试听时音频已装载、等录音替换，球应显示「就绪」绿而非空闲灰
@@ -770,6 +784,11 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
             // 所以走 Quiet 版；设置里关掉试听那条 else 分支仍然保留回弹。
             SLFloatSetStateQuiet(SLFloatStateReady);
         }];
+        // v0.4.62：不等 completion / viewDidAppear，下一个 runloop 就把入场动画推起来，
+        // 让「卡片上屏」和「开始弹」同帧，中间不再出现那段完整的静置。
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [vc sl_playEntrance];
+        });
         SLLog(@"AUDITION 弹出试听 %@ dur=%.2f pcm=%lu",
               path.lastPathComponent, duration, (unsigned long)pcm16k.length);
     });
