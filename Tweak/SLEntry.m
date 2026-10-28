@@ -94,7 +94,8 @@ static UIImage *SLBrandGlyphCompact(CGFloat side, UIColor *color) {
         (void)ctx;
         CGFloat u = side / 100.0;
         CGFloat xs[4] = {12, 34, 56, 78};   // 12..88，整体居中
-        CGFloat hs[4] = {24, 40, 28, 46};
+        // v0.4.47：条高改 短长长短（原 短长短长）。左两淡=原声，右两实=合成声，分组不变。
+        CGFloat hs[4] = {24, 46, 40, 28};
         CGFloat as[4] = {0.30, 0.30, 1.0, 1.0};
         for (int i = 0; i < 4; i++) {
             CGFloat w = 10.0 * u;
@@ -860,7 +861,7 @@ static UIImage *SLTransparentImage(void) {
 
 - (void)sl_tap {
     // 长按刚结束时个别机型还会补一次 touchUpInside，这里挡掉，免得胶囊一展开就被收回
-    if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.5) return;
+    if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.7) return;
     // v0.4.45：展开态点中间不做任何事 —— 用户要的是「点名字毫无反应，只有按住能拖」。
     // 收回成球只认图标那一端（_homeBtn → sl_homeTap）。
     if (self.slExpanded) return;
@@ -880,7 +881,7 @@ static UIImage *SLTransparentImage(void) {
 
 - (void)sl_homeTap {
     _homeHit.backgroundColor = [UIColor clearColor];
-    if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.5) return;
+    if (CFAbsoluteTimeGetCurrent() - _longPressAt < 0.7) return;
     [self sl_expand:NO animated:YES];
 }
 
@@ -897,10 +898,17 @@ static UIImage *SLTransparentImage(void) {
 - (void)sl_longPress:(UILongPressGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     _longPressAt = CFAbsoluteTimeGetCurrent();
-    if (self.slExpanded) return;   // 胶囊上长按不做事
+    // v0.4.47：球态长按任意处进设置；胶囊态仅 logo 端（图标那一端）长按进设置，
+    // 中段长按留给拖动——「长按 logo 进设置」与「长按中段拖动」互不冲突。
+    if (self.slExpanded) {
+        CGPoint p = [g locationInView:self];
+        if (!CGRectContainsPoint(_homeBtn.frame, p)) return;
+    }
     UIViewController *top = [AWECAUtils topViewController];
     if (!top) return;
     [SLFloatPanelController presentSettingsFrom:top];
+    // 重新打时间戳：松手时的 touchUpInside 不会再误触发「展开 / 收起」
+    _longPressAt = CFAbsoluteTimeGetCurrent();
 }
 
 #pragma mark 布局
