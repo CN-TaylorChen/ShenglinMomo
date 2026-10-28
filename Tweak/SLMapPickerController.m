@@ -29,7 +29,7 @@ static const CLLocationCoordinate2D kSLDefaultCenter = {39.90870, 116.39750};
 // 卡片版式（v0.4.26 起高度按内容算，不再写死）
 static const CGFloat kSLPanelInset = 8;      // 卡片左右内缩
 static const CGFloat kSLPanelPad = 16;       // 卡片内容左右内边距
-static const CGFloat kSLQuickTop = 112;      // 快捷位置行（坐标芯片下沿 102 + 10）
+static const CGFloat kSLQuickTop = 122;      // v0.4.48：搜索胶囊占顶部后，快捷行整体下移到胶囊下方
 static const CGFloat kSLQuickH = 34;
 static const CGFloat kSLPinTipOffset = 23;   // 水滴尖端相对 pinView 中心的 y 偏移（58 - 35）
 static const CGFloat kSLPanelFloat = 16;     // 卡片整体上浮的间距，不再沉到屏幕最底
@@ -137,6 +137,10 @@ static UIColor *SLHairline(void) {
 - (void)sl_runSearch;
 - (void)sl_searchTextChanged;
 - (void)sl_showResults:(BOOL)show;
+- (void)sl_searchDidFocus;
+- (void)sl_searchDidBlur;
+- (void)sl_updateSearchHint;
+- (void)sl_setQuickVisible:(BOOL)visible animated:(BOOL)animated;
 - (void)sl_confirm;
 - (void)sl_starTap;
 - (void)sl_openFavorites;
@@ -190,9 +194,7 @@ static UIColor *SLHairline(void) {
     if (!nb) return;
     nb.tintColor = [UIColor labelColor];
     self.navigationItem.title = @"";
-    // v0.4.36：搜索栏并进导航栏，顶部不再有「虚拟定位」那行药丸，
-    // 省掉 50pt 以上的竖向占用，针尖和结果卡跟着上移。
-    self.navigationItem.titleView = self.searchCapsule;
+    // v0.4.48：搜索胶囊已移入底部面板（见 sl_buildPanel），导航栏留空让地图整屏铺开。
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
@@ -202,7 +204,6 @@ static UIColor *SLHairline(void) {
     if (!nb) return;
     nb.tintColor = nil;
     self.navigationItem.title = @"";
-    self.navigationItem.titleView = nil;
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -245,13 +246,10 @@ static UIColor *SLHairline(void) {
     CGFloat mainW = pw - pad * 2 - side * 2 - gap * 2;
 
     self.grabber.frame = CGRectMake(pw / 2 - 18, 10, 36, 5);
-    self.iconBadge.frame = CGRectMake(pad, 24, 40, 40);
-    self.iconGlyph.frame = CGRectMake(9, 9, 22, 22);
-    self.nameLabel.frame = CGRectMake(68, 22, pw - 68 - pad, 21);
-    self.subLabel.frame = CGRectMake(68, 45, pw - 68 - pad, 17);
+    // v0.4.48：图标徽标 / 名称 / 副标题不再常驻显示，地址名改由搜索框占位符展示，给搜索胶囊腾顶部空间
 
     CGFloat chipW = pw - pad * 2;              // 经纬度整行铺满，右侧放「复制」
-    self.coordChip.frame = CGRectMake(pad, 70, chipW, 32);
+    self.coordChip.frame = CGRectMake(pad, 82, chipW, 32);   // v0.4.48：下移到搜索胶囊下方
     self.coordLabel.frame = CGRectMake(10, 0, chipW - 10 - 46, 32);
     self.coordCopyBtn.frame = CGRectMake(chipW - 46, 0, 42, 32);
 
@@ -262,7 +260,7 @@ static UIColor *SLHairline(void) {
     self.starBtn.frame = CGRectMake(pad + mainW + gap, btnY, side, 50);
     self.tuneBtn.frame = CGRectMake(pad + mainW + gap * 2 + side, btnY, side, 50);
 
-    // 3) 搜索栏跑在导航栏里：高度 40，左右各留出返回箭头 / 右边距
+    // 3) 搜索结果卡定位（搜索胶囊已在面板内，见下方 v0.4.48 重定位）
     CGFloat capH = 40.0;
     CGFloat capW = w - 108.0;          // 44 返回键 + 安全边距，剩下都给搜索框
     if (capW < 170.0) capW = MAX(140.0, w - 88.0);
@@ -295,6 +293,14 @@ static UIColor *SLHairline(void) {
     CGFloat visBottom = panelY - 12;
     CGFloat tipY = (visTop + visBottom) / 2.0;
     self.pinView.center = CGPointMake(w / 2.0, tipY - kSLPinTipOffset);
+
+    // v0.4.48：搜索胶囊已从导航栏移入面板，这里按面板内坐标重新定位（覆盖前面按导航栏算的 0,0 布局）
+    CGFloat capW2 = pw - pad * 2;
+    self.searchCapsule.frame = CGRectMake(pad, 28, capW2, 44);
+    self.searchIcon.frame = CGRectMake(12, 13, 18, 18);
+    self.locateBtn.frame = CGRectMake(capW2 - 4 - 28, 8, 28, 28);
+    self.bookmarkBtn.frame = CGRectMake(CGRectGetMinX(self.locateBtn.frame) - 6 - 28, 8, 28, 28);
+    self.searchField.frame = CGRectMake(38, 0, CGRectGetMinX(self.bookmarkBtn.frame) - 8 - 38, 44);
 
     BOOL hadPin = self.pinLayoutReady;
     self.pinLayoutReady = YES;
@@ -368,7 +374,7 @@ static UIColor *SLHairline(void) {
     cap.layer.shadowOpacity = 0.10;
     cap.layer.shadowRadius = 10;
     cap.layer.shadowOffset = CGSizeMake(0, 3);
-    self.searchCapsule = cap;   // v0.4.36：作为 navigationItem.titleView，不再加到 view 上
+    self.searchCapsule = cap;   // v0.4.48：不再做 titleView，改为加到面板顶部（见 sl_buildPanel）
 
     // 毛玻璃底板：半透明磨砂，浮在地图上像原生搜索栏
     UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterial]];
@@ -448,7 +454,7 @@ static UIColor *SLHairline(void) {
     self.iconBadge.backgroundColor = [UIColor colorWithRed:0.902 green:0.945 blue:0.984 alpha:1.0];
     self.iconBadge.layer.cornerRadius = 12;
     self.iconBadge.layer.cornerCurve = kCACornerCurveContinuous;
-    [panel addSubview:self.iconBadge];
+    // v0.4.48：图标徽标移除以给搜索胶囊腾出顶部空间
 
     self.iconGlyph = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"mappin.circle.fill"]];
     self.iconGlyph.tintColor = SLAccent();
@@ -460,13 +466,13 @@ static UIColor *SLHairline(void) {
     self.nameLabel.textColor = [UIColor labelColor];
     self.nameLabel.text = @"拖动地图选择位置";
     self.nameLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [panel addSubview:self.nameLabel];
+    // v0.4.48：名称标签改为搜索框占位符，不再常驻
 
     self.subLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     self.subLabel.font = [UIFont systemFontOfSize:12.5];
     self.subLabel.textColor = [UIColor secondaryLabelColor];
     self.subLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    [panel addSubview:self.subLabel];
+    // v0.4.48：副标题不再常驻
 
     self.coordChip = [[UIView alloc] initWithFrame:CGRectZero];
     self.coordChip.backgroundColor = SLChipBg();
@@ -515,6 +521,11 @@ static UIColor *SLHairline(void) {
     self.tuneBtn.tintColor = [UIColor colorWithWhite:0.37 alpha:1];
     [self.tuneBtn addTarget:self action:@selector(sl_tune) forControlEvents:UIControlEventTouchUpInside];
     [panel addSubview:self.tuneBtn];
+
+    // v0.4.48：搜索胶囊移入面板顶部（原本在导航栏 titleView），并去掉它在浮层里的投影，避免双重阴影
+    [panel addSubview:self.searchCapsule];
+    self.searchCapsule.layer.shadowOpacity = 0.0;
+    self.searchCapsule.layer.shadowRadius = 0.0;
 
 }
 
@@ -592,7 +603,7 @@ static UIColor *SLHairline(void) {
     sv.showsHorizontalScrollIndicator = NO;
     sv.showsVerticalScrollIndicator = NO;
     sv.alwaysBounceHorizontal = NO;
-    sv.hidden = NO;          // v0.4.28 起常驻：家/公司/学校/最近 四个等宽槽铺满整行
+    sv.hidden = YES;         // v0.4.48：默认隐藏，聚焦搜索才临时展开，避免常驻撑高面板
     self.quickRow = sv;
     [self.panel addSubview:sv];
     self.slSlotNames = @[@"家", @"公司", @"学校", @"最近"];
@@ -756,7 +767,7 @@ static UIColor *SLHairline(void) {
 - (void)sl_refreshCoordinate {
     CLLocationCoordinate2D c = [self sl_currentCoord];
     self.coordLabel.text = [NSString stringWithFormat:@"%.6f, %.6f", c.latitude, c.longitude];
-    self.subLabel.text = [self sl_subtitleText];
+    [self sl_updateSearchHint];
     [self sl_refreshStar];
 }
 
@@ -808,9 +819,7 @@ static UIColor *SLHairline(void) {
         NSString *shortName = [self sl_shortOfPlacemark:p];
         self.placeName = name;
         self.placeShort = shortName;
-        self.nameLabel.text = name.length ? name : @"已选位置";
-        self.iconGlyph.image = [UIImage systemImageNamed:@"mappin.circle.fill"];
-        self.subLabel.text = [self sl_subtitleText];
+        [self sl_updateSearchHint];
     }];
 }
 
@@ -899,6 +908,54 @@ static UIColor *SLHairline(void) {
     // 候选字永远上不了屏。收键盘只由用户动作触发（点结果、按搜索键、返回），不由搜索结果触发。
 }
 
+#pragma mark - 搜索框与底部面板合并（v0.4.48）
+
+// 空闲（非编辑且无输入）时，把当前选中的地址名作为搜索框占位符展示；
+// 一旦聚焦或已输入，恢复成搜索提示。这样面板顶部不用常驻一行地址名，省高度。
+- (void)sl_updateSearchHint {
+    BOOL editing = self.searchField.isFirstResponder || self.searchField.text.length > 0;
+    NSString *hint = @"搜索地点、街道或地标";
+    if (!editing) {
+        NSString *nm = self.placeName ?: self.placeShort;
+        if (nm.length) hint = nm;
+    }
+    self.searchField.placeholder = hint;
+}
+
+// 快捷位置行默认隐藏；聚焦搜索时展开（面板随之长高并动画），失焦且无输入时收起。
+- (void)sl_setQuickVisible:(BOOL)visible animated:(BOOL)animated {
+    self.quickRow.hidden = !visible;
+    [self sl_reloadQuick];
+    if (animated) {
+        [UIView animateWithDuration:0.25 delay:0 options:UIViewAnimationOptionCurveEaseOut
+                         animations:^{ [self.view setNeedsLayout]; [self.view layoutIfNeeded]; }
+                         completion:nil];
+    } else {
+        [self.view setNeedsLayout];
+    }
+}
+
+- (void)sl_searchDidFocus {
+    [self sl_setQuickVisible:YES animated:YES];
+    [self sl_updateSearchHint];
+}
+
+- (void)sl_searchDidBlur {
+    [self sl_updateSearchHint];
+    if (self.searchField.text.length == 0) {
+        [self sl_setQuickVisible:NO animated:YES];
+        if (!self.results.count) [self sl_showResults:NO];
+    }
+}
+
+- (void)textFieldDidBeginEditing:(UITextField *)textField {
+    if (textField == self.searchField) [self sl_searchDidFocus];
+}
+
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    if (textField == self.searchField) [self sl_searchDidBlur];
+}
+
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     return self.emptyHint ? 1 : self.results.count;
 }
@@ -964,8 +1021,7 @@ static UIColor *SLHairline(void) {
     [self sl_focusCoord:it.placemark.coordinate meters:1500];
     self.placeName = [self sl_nameOfPlacemark:it.placemark];
     self.placeShort = [self sl_shortOfPlacemark:it.placemark];
-    self.nameLabel.text = self.placeName.length ? self.placeName : @"已选位置";
-    self.subLabel.text = [self sl_subtitleText];
+    [self sl_updateSearchHint];
     [self sl_showResults:NO];
     [self.searchField resignFirstResponder];
 }
@@ -1015,7 +1071,7 @@ static UIColor *SLHairline(void) {
         [self sl_focusCoord:coord meters:1200];
         if (name.length) {
             self.placeShort = name;
-            self.nameLabel.text = name;
+            [self sl_updateSearchHint];
         }
         [self sl_refreshCoordinate];
         [self sl_reverseGeocode];
