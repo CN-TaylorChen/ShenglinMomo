@@ -9,6 +9,7 @@
 #import "SLFavoriteController.h"
 #import "SLVirtualLocation.h"
 #import "SLLog.h"
+#import "SLGlass.h"
 
 static UIColor *SLFavGold(void) {
     return [UIColor colorWithRed:0.729 green:0.459 blue:0.090 alpha:1.0];
@@ -17,7 +18,9 @@ static UIColor *SLFavGoldBg(void) {
     return [UIColor colorWithRed:0.980 green:0.933 blue:0.855 alpha:1.0];
 }
 static UIColor *SLFavPageBg(void) {
-    return [UIColor colorWithRed:0.961 green:0.957 blue:0.937 alpha:1.0];
+    // v0.4.50：原来是米色实底，进页面就把浮窗的毛玻璃整个盖住。改成透明，
+    // 底色统一交给 SLInstallGlassBackdrop 铺的超薄毛玻璃。
+    return [UIColor clearColor];
 }
 static UIColor *SLFavChipBg(void) {
     return [UIColor colorWithRed:0.945 green:0.937 blue:0.910 alpha:1.0];
@@ -79,7 +82,7 @@ static UIColor *SLFavAccent(void) {
     _pills = [NSMutableArray array];
 
     _card = [[UIView alloc] initWithFrame:CGRectZero];
-    _card.backgroundColor = [UIColor whiteColor];
+    _card.backgroundColor = SLGlassCellColor();   // v0.4.50：白卡 → 玻璃片，深色下不再一块白
     _card.layer.cornerRadius = 22;
     _card.layer.cornerCurve = kCACornerCurveContinuous;
     _card.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -332,7 +335,7 @@ static UIColor *SLFavAccent(void) {
     self.selectionStyle = UITableViewCellSelectionStyleNone;
 
     _card = [[UIView alloc] initWithFrame:CGRectZero];
-    _card.backgroundColor = [UIColor whiteColor];
+    _card.backgroundColor = SLGlassCellColor();   // v0.4.50：白卡 → 玻璃片，深色下不再一块白
     _card.layer.cornerRadius = 18;
     _card.layer.cornerCurve = kCACornerCurveContinuous;
     _card.layer.borderWidth = 1;
@@ -437,7 +440,7 @@ static UIColor *SLFavAccent(void) {
 - (void)setHighlighted:(BOOL)highlighted animated:(BOOL)animated {
     [super setHighlighted:highlighted animated:animated];
     [UIView animateWithDuration:0.12 animations:^{
-        self.card.backgroundColor = highlighted ? [UIColor colorWithWhite:0.96 alpha:1] : [UIColor whiteColor];
+        self.card.backgroundColor = highlighted ? [UIColor colorWithWhite:0.96 alpha:1] : SLGlassCellColor();
     }];
 }
 
@@ -448,6 +451,8 @@ static UIColor *SLFavAccent(void) {
 @interface SLFavoriteController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *table;
 @property (nonatomic, copy) NSArray<SLFavoriteItem *> *items;
+// v0.4.50：定义在 viewDidLoad 之后，先声明免得 -Werror 因「方法未找到」中断构建
+- (void)sl_toggleEdit;
 @end
 
 @implementation SLFavoriteController
@@ -455,8 +460,11 @@ static UIColor *SLFavAccent(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"收藏的位置";
+    // v0.4.50：跟设置页统一 —— 毛玻璃底 + 胶囊标题 + 胶囊「编辑 / 完成」
+    self.navigationItem.titleView = SLPillTitleView(@"收藏的位置");
+    SLInstallGlassBackdrop(self.view);
     self.view.backgroundColor = SLFavPageBg();
-    self.navigationItem.rightBarButtonItem = self.editButtonItem;
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(@"编辑", self, @selector(sl_toggleEdit));
 
     _table = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
     _table.dataSource = self;
@@ -492,7 +500,19 @@ static UIColor *SLFavAccent(void) {
     self.items = [SLFavoriteStore items];
     [self.table reloadData];
     [self sl_updateEmpty];
-    self.navigationItem.rightBarButtonItem.enabled = self.items.count > 0;
+    // v0.4.50：胶囊按钮是 customView，barButtonItem.enabled 管不到它，得直接控按钮本身
+    BOOL has = self.items.count > 0;
+    UIView *right = self.navigationItem.rightBarButtonItem.customView;
+    right.userInteractionEnabled = has;
+    right.alpha = has ? 1.0 : 0.45;
+}
+
+// v0.4.50：替换系统的 editButtonItem —— 系统那颗是蓝字，跟胶囊按钮不搭，
+// 自己维护「编辑 / 完成」两态，点完重建一次按钮。
+- (void)sl_toggleEdit {
+    BOOL on = !self.table.editing;
+    [self.table setEditing:on animated:YES];
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(on ? @"完成" : @"编辑", self, @selector(sl_toggleEdit));
 }
 
 - (void)sl_updateEmpty {

@@ -4,6 +4,7 @@
 #import "SLVoicePack.h"
 #import "AWECAUtils.h"
 #import "SLLog.h"
+#import "SLGlass.h"
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
 
@@ -614,31 +615,65 @@ static UIImage *SLTransparentImage(void) {
     }
 }
 
-// v0.4.49：A / C 联动。
-//   活跃（录音 / 合成）→ A 均衡器：四根错相位上下缩放（0.9s，逐根 +0.12s）
-//   其余（空闲 / 就绪）→ C 呼吸：四根同步轻微起伏（1.6s）
-// 只动 transform.scale.y，锚点在中心，几何与点击区域都不变。
+// v0.4.50：四个状态四套节奏，不再两两共用。
+//   空闲  → 同步呼吸（一轮 2.4s / 0.86，几乎不动，不抢注意力）
+//   录音  → 交叉急抖（一轮 0.64s / 0.30，1·3·2·4 错拍，像电平表）
+//   合成  → 波从左向右推（一轮 1.2s / 0.55，0→3 递进，有「正在生成」的方向感）
+//   就绪  → 上冲 + 二次回弹（1.1s，唯一超过原高到 1.15，像举起来等你按发送）
+// 只动 transform.scale.y，锚点在中心：几何、点击区域、胶囊形状都不变。
 - (void)sl_updateBarMotion {
     if (!_bars) return;
-    BOOL active = (self.slState == SLFloatStateRecording || self.slState == SLFloatStateSynthesizing);
     if (_bars.hidden) {
         for (int i = 0; i < 4; i++) [_barCell[i].layer removeAnimationForKey:@"slBar"];
         return;
     }
+
+    static const CGFloat kStagNone[4] = {0.00, 0.00, 0.00, 0.00};
+    static const CGFloat kStagRec[4]  = {0.00, 0.26, 0.13, 0.39};   // 1·3·2·4 交叉
+    static const CGFloat kStagSyn[4]  = {0.00, 0.15, 0.30, 0.45};   // 左 → 右递进
+    static const CGFloat kStagRdy[4]  = {0.00, 0.04, 0.08, 0.12};   // 几乎同相
+
+    SLFloatState st = self.slState;
+    const CGFloat *stagger = kStagNone;
+    CGFloat half = 1.2;      // 空闲一轮 2.4s
+    CGFloat lo = 0.86;
+    BOOL keyframe = NO;
+    if (st == SLFloatStateRecording) {
+        half = 0.32; lo = 0.30; stagger = kStagRec;         // 一轮 0.64s
+    } else if (st == SLFloatStateSynthesizing) {
+        half = 0.60; lo = 0.55; stagger = kStagSyn;         // 一轮 1.2s
+    } else if (st == SLFloatStateReady) {
+        keyframe = YES; stagger = kStagRdy;                 // 1.1s 双跳
+    }
+
     CFTimeInterval now = CACurrentMediaTime();
     for (int i = 0; i < 4; i++) {
-        UIView *bar = _barCell[i];
-        [bar.layer removeAnimationForKey:@"slBar"];
-        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale.y"];
-        a.fromValue = @(active ? 0.45 : 0.82);
-        a.toValue = @(1.0);
-        a.duration = active ? 0.9 : 1.6;
-        a.autoreverses = YES;
-        a.repeatCount = HUGE_VALF;
-        a.fillMode = kCAFillModeBoth;
-        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-        a.beginTime = now + (active ? i * 0.12 : 0.0);
-        [bar.layer addAnimation:a forKey:@"slBar"];
+        CALayer *l = _barCell[i].layer;
+        [l removeAnimationForKey:@"slBar"];
+        if (keyframe) {
+            // 就绪：上冲到 1.15 → 回落 → 再冲一次 → 轻微停在 1.02 → 归位。
+            // 用 keyframe 才有「双跳」的手感，autoreverses 只会变成单次来回。
+            CAKeyframeAnimation *k = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale.y"];
+            k.values = @[@1.0, @1.15, @1.0, @1.15, @1.02, @1.0];
+            k.keyTimes = @[@0.0, @0.18, @0.38, @0.56, @0.78, @1.0];
+            k.duration = 1.1;
+            k.repeatCount = HUGE_VALF;
+            k.fillMode = kCAFillModeBoth;
+            k.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            k.beginTime = now + stagger[i];
+            [l addAnimation:k forKey:@"slBar"];
+        } else {
+            CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale.y"];
+            a.fromValue = @(lo);
+            a.toValue = @(1.0);
+            a.duration = half;
+            a.autoreverses = YES;
+            a.repeatCount = HUGE_VALF;
+            a.fillMode = kCAFillModeBoth;
+            a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+            a.beginTime = now + stagger[i];
+            [l addAnimation:a forKey:@"slBar"];
+        }
     }
 }
 
@@ -664,9 +699,19 @@ static UIImage *SLTransparentImage(void) {
     _sep.backgroundColor = accent ? [accent colorWithAlphaComponent:0.35]
                                   : [UIColor colorWithWhite:0.5 alpha:0.28];
     _glyph.tintColor = accent ?: [UIColor labelColor];
-    // v0.4.49：颜色变了，四杠跟着换色；并按当前状态重挂 A / C 动画
+    // v0.4.49：颜色变了，四杠跟着换色；并按当前状态重挂对应动画
     [self sl_layoutBars];
     [self sl_updateBarMotion];
+    // v0.4.50：四套节奏的幅度差得远（0.30 / 0.55 / 0.86 / 1.15），硬切会「跳一下」。
+    // 状态真变了就让四杠做一次 0.18s 淡入，把新节奏揉进去，不至于突兀。
+    if (prev != state && _bars && !_bars.hidden) {
+        CABasicAnimation *fade = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        fade.fromValue = @(0.45);
+        fade.toValue = @(1.0);
+        fade.duration = 0.18;
+        fade.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        [_bars.layer addAnimation:fade forKey:@"slFade"];
+    }
     _name.textColor = accent ?: [UIColor labelColor];
     _readyDot.hidden = (state != SLFloatStateReady);
 
@@ -2007,10 +2052,10 @@ void SLStartEntryWatcher(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"悬浮球图标";
-    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
-                                                                                          target:self
-                                                                                          action:@selector(sl_done)];
+    // v0.4.50：跟设置页统一 —— 毛玻璃底 + 胶囊标题 + 胶囊「完成」
+    self.navigationItem.titleView = SLPillTitleView(@"悬浮球图标");
+    SLApplyGlassTable(self.tableView);
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(@"完成", self, @selector(sl_done));
 }
 
 - (void)sl_done {
@@ -2040,6 +2085,12 @@ void SLStartEntryWatcher(void) {
     (void)tv;
     (void)section;
     return @"自定义图标";
+}
+
+// v0.4.50：单元格底色统一刷玻璃片（表格透明后不刷就是纯灰行）
+- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
+    (void)tv; (void)ip;
+    cell.backgroundColor = SLGlassCellColor();
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {

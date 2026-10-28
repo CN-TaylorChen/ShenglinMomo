@@ -3,6 +3,7 @@
 #import "SLVoiceImportController.h"
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
+#import "SLGlass.h"
 
 #define kSLFishModelURL @"https://api.fish.audio/model"
 
@@ -28,15 +29,14 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"导入 Fish 音色";
-    self.tableView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    // v0.4.50：跟设置页统一 —— 毛玻璃底 + 胶囊标题 + 胶囊「导入」
+    self.navigationItem.titleView = SLPillTitleView(@"导入音色");
+    SLApplyGlassTable(self.tableView);
     self.selected = [NSMutableSet set];
     self.items = @[];
     self.mode = self.initialMode;
 
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"导入"
-                                                                              style:UIBarButtonItemStyleDone
-                                                                             target:self
-                                                                             action:@selector(sl_doImport)];
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(@"导入", self, @selector(sl_doImport));
 
     if (self.mode == SLImportModeMine) [self sl_fetchMine];
     [self sl_syncSearchBar];
@@ -128,10 +128,16 @@
         _pasteView.autocapitalizationType = UITextAutocapitalizationTypeNone;
         _pasteView.autocorrectionType = UITextAutocorrectionTypeNo;
         _pasteView.delegate = self;
-        _pasteView.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        _pasteView.backgroundColor = SLGlassCellColor();   // v0.4.50：玻璃片
         _pasteView.textContainerInset = UIEdgeInsetsMake(8, 6, 8, 6);
     }
     return _pasteView;
+}
+
+// v0.4.50：表格透明后统一刷玻璃片底色（本页 cell 有 seg / text / empty / row 多个来源）
+- (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
+    (void)tv; (void)ip;
+    cell.backgroundColor = SLGlassCellColor();
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {

@@ -1,5 +1,6 @@
 #import "SLLogViewController.h"
 #import "SLLog.h"
+#import "SLGlass.h"
 
 @interface SLLogViewController ()
 @property (nonatomic, strong) UITextView *tv;
@@ -11,38 +12,71 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"运行日志";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
 
+    // v0.4.50：跟设置页统一材质。原来这里是实心 systemBackground 的纯白页，
+    // 从毛玻璃设置页点进来像跳到了另一个 App；现在铺超薄毛玻璃 + 胶囊标题 + 胶囊按钮。
+    SLInstallGlassBackdrop(self.view);
+    self.navigationItem.titleView = SLPillTitleView(@"运行日志");
     self.navigationItem.rightBarButtonItems = @[
-        [[UIBarButtonItem alloc] initWithTitle:@"刷新" style:UIBarButtonItemStylePlain target:self action:@selector(sl_reload)],
-        [[UIBarButtonItem alloc] initWithTitle:@"复制" style:UIBarButtonItemStylePlain target:self action:@selector(sl_copy)],
-        [[UIBarButtonItem alloc] initWithTitle:@"清空" style:UIBarButtonItemStylePlain target:self action:@selector(sl_clear)]
+        SLPillBarItem(@"刷新", self, @selector(sl_reload)),
+        SLPillBarItem(@"复制", self, @selector(sl_copy)),
+        SLPillBarItem(@"清空", self, @selector(sl_clear))
     ];
 
     self.status = [[UILabel alloc] initWithFrame:CGRectZero];
+    self.status.translatesAutoresizingMaskIntoConstraints = NO;
     self.status.numberOfLines = 0;
     self.status.font = [UIFont systemFontOfSize:11];
     self.status.textColor = [UIColor secondaryLabelColor];
 
+    // 状态卡：钩子摘要 + 日志文件路径。玻璃片垫底，压在模糊背景上才读得清。
+    UIView *statusCard = [[UIView alloc] initWithFrame:CGRectZero];
+    statusCard.translatesAutoresizingMaskIntoConstraints = NO;
+    statusCard.backgroundColor = SLGlassCellColor();
+    statusCard.layer.cornerRadius = 12.0;
+    statusCard.layer.cornerCurve = kCACornerCurveContinuous;
+    [self.view addSubview:statusCard];
+    [statusCard addSubview:self.status];
+
     self.tv = [[UITextView alloc] initWithFrame:CGRectZero];
+    self.tv.translatesAutoresizingMaskIntoConstraints = NO;
     self.tv.editable = NO;
     self.tv.font = [UIFont fontWithName:@"Menlo" size:10] ?: [UIFont systemFontOfSize:11];
     self.tv.textColor = [UIColor labelColor];
-    self.tv.backgroundColor = [UIColor systemBackgroundColor];
+    self.tv.backgroundColor = [UIColor clearColor];
     self.tv.alwaysBounceVertical = YES;
 
-    UIStackView *sv = [[UIStackView alloc] initWithArrangedSubviews:@[self.status, self.tv]];
-    sv.axis = UILayoutConstraintAxisVertical;
-    sv.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:sv];
+    // 日志本体同样贴一块玻璃片，否则一片字直接浮在模糊上，深色下几乎糊成一片。
+    UIView *logCard = [[UIView alloc] initWithFrame:CGRectZero];
+    logCard.translatesAutoresizingMaskIntoConstraints = NO;
+    logCard.backgroundColor = SLGlassCellColor();
+    logCard.layer.cornerRadius = 12.0;
+    logCard.layer.cornerCurve = kCACornerCurveContinuous;
+    [self.view addSubview:logCard];
+    [logCard addSubview:self.tv];
 
-    CGFloat top = 8;
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
     [NSLayoutConstraint activateConstraints:@[
-        [sv.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
-        [sv.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
-        [sv.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:top],
-        [sv.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-8]
+        [statusCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [statusCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [statusCard.topAnchor constraintEqualToAnchor:safe.topAnchor constant:8],
+
+        [self.status.leadingAnchor constraintEqualToAnchor:statusCard.leadingAnchor constant:12],
+        [self.status.trailingAnchor constraintEqualToAnchor:statusCard.trailingAnchor constant:-12],
+        [self.status.topAnchor constraintEqualToAnchor:statusCard.topAnchor constant:10],
+        [self.status.bottomAnchor constraintEqualToAnchor:statusCard.bottomAnchor constant:-10],
+
+        [logCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [logCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [logCard.topAnchor constraintEqualToAnchor:statusCard.bottomAnchor constant:10],
+        [logCard.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor constant:-12],
+
+        [self.tv.leadingAnchor constraintEqualToAnchor:logCard.leadingAnchor constant:8],
+        [self.tv.trailingAnchor constraintEqualToAnchor:logCard.trailingAnchor constant:-8],
+        [self.tv.topAnchor constraintEqualToAnchor:logCard.topAnchor constant:8],
+        [self.tv.bottomAnchor constraintEqualToAnchor:logCard.bottomAnchor constant:-8]
     ]];
+
     [self sl_reload];
 }
 

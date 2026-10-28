@@ -1,11 +1,11 @@
 // 声临·陌陌版 设置面板
 // 复用声临的 TTS 引擎设置（火山/Fish）、音色库、情绪标签、API 凭证页
 //
-// v0.4.49 排版规则（解决长文案被截断）：
+// v0.4.50 排版规则（解决长文案被截断）：
 //   R1 单元格右侧只放状态词（≤8 字），解释性长句一律下沉到分组 footer
 //   R2 footer 全部用自定义视图（UILabel numberOfLines = 0），不再用系统 titleForFooterInSection
 //   R3 折叠/跳转统一用系统 chevron，箭头不写进标题文字
-// v0.4.49 顺带删除「语音格式 AMR / 原始音频」开关（已是死代码）
+// v0.4.50 顺带删除「语音格式 AMR / 原始音频」开关（已是死代码）
 
 #import "SLSettingsPanel.h"
 #import "AWECATTSManager.h"
@@ -21,30 +21,21 @@
 #import "SLVirtualLocation.h"
 #import "SLMapPickerController.h"
 #import "SLTTSAuditionPanel.h"
+#import "SLGlass.h"
 
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.49"
+#define SLVersion @"0.4.50"
 
-// v0.4.49：设置页浮窗化后，单元格改成半透明玻璃片，背后的陌陌界面能透上来一点。
-// 深色下用 8% 白提亮，浅色下用 62% 白压住，两边都能保证文字对比度。
-static UIColor *SLGlassCellColor(void) {
-    // v0.4.49：0.62 → 0.34。单元格底色原本几乎是一层实心白，把下面的超薄玻璃整个盖住，
-    // 卡片看着还是「一块白板」。降下来之后才能透出毛玻璃和背后的聊天界面。
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
-        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-            ? [UIColor colorWithWhite:1.0 alpha:0.06]
-            : [UIColor colorWithWhite:1.0 alpha:0.34];
-    }];
-}
+// v0.4.50：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
 #pragma mark - 分组标题 / 多行 footer：统一左基线
 
-// v0.4.49.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
+// v0.4.50.6：以前 header 贴白卡片左缘、footer 固定 16pt、单元格文字又是第三个数，
 // 三者永远差几像素。现在只认一个基准：单元格文字的真实左边缘（表格坐标系）。
 // 首帧 cell 还没生成时用卡片左缘 + 内边距兜底，值恒定，不再逐帧校正。
-// v0.4.49.7：只读已存在的 cell，不再调 rectForRowAtIndexPath。
+// v0.4.50.7：只读已存在的 cell，不再调 rectForRowAtIndexPath。
 // 那个 API 内部要算分区总高 → 回调 heightForFooterInSection → 又要这个值，会无限递归。
 static CGFloat SLMeasureLeading(UITableView *tv) {
     for (UITableViewCell *c in tv.visibleCells) {
@@ -63,8 +54,8 @@ static UIView *SLMakeFooter(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignFooter(text, x, width);
 }
 
-// v0.4.49.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
-// v0.4.49.9：不再把「表格坐标系的 x」当盒子内偏移用，改由 SLAlignBox 按盒子真实位置反推。
+// v0.4.50.2：系统分区头（titleForHeaderInSection）自带大留白，且会把英文强制全大写。
+// v0.4.50.9：不再把「表格坐标系的 x」当盒子内偏移用，改由 SLAlignBox 按盒子真实位置反推。
 static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return SLAlignHeader(text, x, width);
 }
@@ -82,14 +73,14 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 @implementation SLSettingsPanel
 
-// v0.4.49：改成 insetGrouped —— UITableViewController 默认走 Plain，行直通屏幕两边、方角，
+// v0.4.50：改成 insetGrouped —— UITableViewController 默认走 Plain，行直通屏幕两边、方角，
 // 看着像草稿。insetGrouped 自带 16pt 边距 + 每组首尾行圆角，等于系统原生「设置卡片」。
 - (instancetype)init {
     self = [super initWithStyle:UITableViewStyleInsetGrouped];
     return self;
 }
 
-// v0.4.49：标题栏 = 品牌图标 + 「声临 · 陌陌版」+ 缩小版版本号。
+// v0.4.50：标题栏 = 品牌图标 + 「声临 · 陌陌版」+ 缩小版版本号。
 // 版本号不再跟名字挤在同一句里，改成 11pt 灰字贴在名字右下角，只做标注不抢视线。
 - (UIView *)sl_titleView {
     CGFloat H = 24.0;
@@ -112,7 +103,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     ver.textColor = [UIColor secondaryLabelColor];
     [ver sizeToFit];
 
-    // v0.4.49：标题文字套毛玻璃胶囊（超薄材质 + 发丝高光），和浮窗 / 下拉列表统一语言
+    // v0.4.50：标题文字套毛玻璃胶囊（超薄材质 + 发丝高光），和浮窗 / 下拉列表统一语言
     CGFloat padX = 10.0, gap = 5.0;
     CGFloat innerW = name.frame.size.width + gap + ver.frame.size.width;
     CGFloat pillW = innerW + padX * 2.0;
@@ -140,16 +131,12 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     // title 只给返回按钮用（子页左上角显示「设置」），标题栏本身走 titleView
     self.title = @"设置";
     self.navigationItem.titleView = [self sl_titleView];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
-                                                                                           target:self
-                                                                                           action:@selector(sl_close)];
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(@"完成", self, @selector(sl_close));
     // 表格自身透明，让浮窗底层的毛玻璃透上来
-    self.tableView.backgroundColor = [UIColor clearColor];
-    UIVisualEffectView *veil = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-    self.tableView.backgroundView = veil;
+    SLApplyGlassTable(self.tableView);
     self.tableView.estimatedSectionFooterHeight = 28;
     self.tableView.estimatedSectionHeaderHeight = 26;
-    // v0.4.49.2：删掉顶部说明（tableHeaderView），首个分组直接跟标题栏
+    // v0.4.50.2：删掉顶部说明（tableHeaderView），首个分组直接跟标题栏
 }
 
 - (NSString *)sl_command {
@@ -162,10 +149,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     return self.slLeading;
 }
 
-// v0.4.49.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
+// v0.4.50.7：删掉布局回调里的 reloadData（布局中重建表格会反复触发自身布局）
 
 - (void)sl_close {
-    // v0.4.49：设置页跑在浮窗里（子控制器），直接 dismiss 自己不会关窗
+    // v0.4.50：设置页跑在浮窗里（子控制器），直接 dismiss 自己不会关窗
     SLCloseHostingPanel(self);
 }
 
@@ -185,7 +172,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     (void)tv;
     if (section == 0) return 4;   // 开关 + 引擎 + 语音包 + 悬浮球图标
     if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
-    if (section == 2) return 3;   // 合成口令 + 短录音补全 + 合成后先试听（v0.4.49 删掉语音包口令与直发）
+    if (section == 2) return 3;   // 合成口令 + 短录音补全 + 合成后先试听（v0.4.50 删掉语音包口令与直发）
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
     return 1;                     // 运行日志
@@ -212,7 +199,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 }
 
 // footer 文案集中在一处，view 和高度用同一份，保证不压字
-// v0.4.49：一条都不留了（连「凭证」那句也删）。这些开关的语义一看就懂，
+// v0.4.50：一条都不留了（连「凭证」那句也删）。这些开关的语义一看就懂，
 // 旁白纯占地方；分组间距改由固定的 footer 高度撑开。
 - (NSString *)sl_footerForSection:(NSInteger)section {
     (void)section;
@@ -276,10 +263,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.accessoryView = seg;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else if (ip.row == 2) {
-            // v0.4.49：恢复成正常的「语音包」入口（上一版把它删了，用户要求加回来）。
+            // v0.4.50：恢复成正常的「语音包」入口（上一版把它删了，用户要求加回来）。
             // 右侧只显示状态词，「直发」那个开关搬到「发送方式」里。
             cell.textLabel.text = @"语音包";
-            // v0.4.49：显示「这一发装的是谁」。没装填就是原声（默认状态）。
+            // v0.4.50：显示「这一发装的是谁」。没装填就是原声（默认状态）。
             if (![SLVoicePack isOneShotPending]) {
                 cell.detailTextLabel.text = @"原声";
             } else {
@@ -327,7 +314,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.detailTextLabel.text = [self sl_command];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (ip.row == 1) {
-            // v0.4.49：语音包口令与「直发」开关都删了 ——
+            // v0.4.50：语音包口令与「直发」开关都删了 ——
             // 现在点一条包就装好一发，发完自动回原声，不需要任何开关或口令。
             cell.textLabel.text = @"短录音补全";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];

@@ -4,6 +4,7 @@
 #import "SLVoicePack.h"
 #import "SLAMREncoder.h"
 #import "AWECAUtils.h"
+#import "SLGlass.h"
 #import <AVFoundation/AVFoundation.h>
 
 #define kSLTrimMinLen 0.3
@@ -25,7 +26,7 @@
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+        self.backgroundColor = SLGlassCellColor();   // v0.4.50：波形底也走玻璃片
         self.layer.cornerRadius = 10;
         self.clipsToBounds = YES;
         self.startRatio = 0;
@@ -138,11 +139,10 @@
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"裁剪";
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"保存"
-                                                                              style:UIBarButtonItemStyleDone
-                                                                             target:self
-                                                                             action:@selector(sl_save)];
+    // v0.4.50：跟设置页统一 —— 毛玻璃底 + 胶囊标题 + 胶囊「保存」
+    self.navigationItem.titleView = SLPillTitleView(@"裁剪");
+    SLInstallGlassBackdrop(self.view);
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(@"保存", self, @selector(sl_save));
 
     NSString *path = [SLVoicePack pathOfPack:self.pack];
     self.duration = path.length ? [AWECAUtils audioDurationAtPath:path] : 0;
@@ -167,7 +167,7 @@
 
     self.playBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     self.playBtn.frame = CGRectMake(pad, 158, w - pad * 2, 44);
-    self.playBtn.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    self.playBtn.backgroundColor = SLGlassCellColor();
     self.playBtn.layer.cornerRadius = 10;
     self.playBtn.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
     [self.playBtn setTitle:@"循环试听选区" forState:UIControlStateNormal];

@@ -5,6 +5,7 @@
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
 #import "SLVoiceImportController.h"
+#import "SLGlass.h"
 #import <objc/runtime.h>
 #import <PhotosUI/PhotosUI.h>
 
@@ -38,12 +39,16 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 @implementation AWECATTSVoiceListController
 
 - (instancetype)init {
-    self = [super initWithStyle:UITableViewStylePlain];
+    // v0.4.50：Plain → insetGrouped。Plain 下行是满宽直通的方角条，跟设置页的玻璃卡片
+    // 完全是两种东西；换成 insetGrouped 才有分组圆角和左右 16pt 边距。
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
     return self;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    // v0.4.50：材质先铺，再判断模式 —— 情绪标签分支会提前 return，晚了就漏。
+    SLApplyGlassTable(self.tableView);
     if (self.emotionMode) { [self aweca_setupEmotionMode]; return; }
     [self buildVoiceData];
     [self loadCustomVoices];
@@ -53,10 +58,9 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     self.title = [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];   // 两个引擎统一叫「音色」
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
-    UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
-                                                                          target:self
-                                                                          action:(self.fishMode ? @selector(aweca_addMenu) : @selector(addCustomVoice))];
-    self.navigationItem.rightBarButtonItem = addBtn;
+    self.navigationItem.rightBarButtonItem =
+        SLPillIconBarItem(@"plus", @"添加", self,
+                          self.fishMode ? @selector(aweca_addMenu) : @selector(addCustomVoice));
 
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, self.fishMode ? 56 : 44)];
     UILabel *verLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 20)];
@@ -78,6 +82,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     UISearchBar *sb = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
     sb.placeholder = @"搜索音色...";
     sb.delegate = self;
+    // v0.4.50：表格透明之后，搜索栏默认那层灰底会变成一块突兀的色块，改成最简样式。
+    sb.searchBarStyle = UISearchBarStyleMinimal;
     self.tableView.tableHeaderView = sb;
     self.searchBar = sb;
 
@@ -90,6 +96,9 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self.navigationController setNavigationBarHidden:NO animated:animated];
+    // v0.4.50：标题改胶囊。放在这里是因为「音色 / 情绪 / 收藏」几个模式的 title
+    // 是在不同分支里赋的，统一在将要出现时按当前 title 重建一次最不容易漏。
+    if (self.title.length) self.navigationItem.titleView = SLPillTitleView(self.title);
 }
 
 #pragma mark - 情绪标签管理模式
@@ -98,8 +107,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     self.title = [NSString stringWithFormat:@"%@ · 情绪", AWECAProductName];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
 
-    UIBarButtonItem *addBtn = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd target:self action:@selector(aweca_addEmotionTag)];
-    self.navigationItem.rightBarButtonItem = addBtn;
+    self.navigationItem.rightBarButtonItem = SLPillIconBarItem(@"plus", @"新增", self, @selector(aweca_addEmotionTag));
 
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
     UILabel *hint = [[UILabel alloc] initWithFrame:footer.bounds];
@@ -867,6 +875,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 #pragma mark - 头像自定义（长按音色 → 相册选图）
 
 - (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    // v0.4.50：表格透明后统一刷玻璃片底色（两种模式都走这里，不用逐分支追）
+    cell.backgroundColor = SLGlassCellColor();
     if (!self.fishMode) return;
     if (![cell.gestureRecognizers count]) {
         UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_longPressCell:)];

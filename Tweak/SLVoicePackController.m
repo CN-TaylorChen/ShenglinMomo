@@ -10,6 +10,7 @@
 #import "AWECAUtils.h"
 #import "SLLog.h"
 #import "SLAlignBox.h"
+#import "SLGlass.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -52,12 +53,9 @@ static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
 //   · 右侧试听键改矢量三角 —— 原来用字体里的 ▶ 字符，12pt 下就是一个歪的实心方块；
 //   · 行本身改成半透明玻璃片，跟设置页、浮窗同材质。
 static UIColor *SLPackGlassColor(void) {
-    // v0.4.46：跟设置页同一个数（0.34 / 0.06），两级页面透出来的浓度要一致。
-    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
-        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
-            ? [UIColor colorWithWhite:1.0 alpha:0.06]
-            : [UIColor colorWithWhite:1.0 alpha:0.34];
-    }];
+    // v0.4.50：具体数值收进 SLGlass，全站只留一份定义（深 6% 白 / 浅 34% 白）。
+    // 保留这个名字是因为本页多处调用，改名只会制造无谓 diff。
+    return SLGlassCellColor();
 }
 
 static UIImage *SLPlayGlyph(void) {
@@ -243,15 +241,10 @@ static UIImage *SLPauseGlyph(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = self.isRoot ? @"语音包" : self.folder;
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
-                                                      target:self
-                                                      action:@selector(sl_addTapped)];
+    self.navigationItem.rightBarButtonItem = SLPillIconBarItem(@"plus", @"新建", self, @selector(sl_addTapped));
     // v0.4.34：这一页现在装在浮窗里，表格必须透明 + 叠一层同款毛玻璃，
     // 否则会出现「浮窗里贴了一张不透明的灰纸」。
-    self.tableView.backgroundColor = [UIColor clearColor];
-    UIVisualEffectView *veil = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-    self.tableView.backgroundView = veil;
+    SLApplyGlassTable(self.tableView);
     // 留痕：万一还有问题，日志能区分「页面没建完」和「表格结构算错」
     SLLog(@"PACK-PAGE open root=%d folder=%@", (int)self.isRoot, self.folder ?: @"-");
     [self sl_reload];
@@ -264,10 +257,7 @@ static UIImage *SLPauseGlyph(void) {
     BOOL navRoot = self.navigationController.viewControllers.firstObject == self;
     if (navRoot) {
         if (!self.navigationItem.leftBarButtonItem) {
-            self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"完成"
-                                                                                     style:UIBarButtonItemStyleDone
-                                                                                    target:self
-                                                                                    action:@selector(sl_closeModal)];
+            self.navigationItem.leftBarButtonItem = SLPillBarItem(@"完成", self, @selector(sl_closeModal));
         }
     } else {
         self.navigationItem.leftBarButtonItem = nil;

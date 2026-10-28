@@ -9,6 +9,7 @@
 #import "AWECATOSUploader.h"
 #import "AWECAUtils.h"
 #import "SLAlignBox.h"
+#import "SLGlass.h"
 #import "SLAPIBackup.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -129,13 +130,14 @@ static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     [super viewDidLoad];
     _mgr = [AWECATTSManager shared];
     self.title = @"API 凭证";
-    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    // v0.4.50：跟设置页统一 —— 透明表格 + 超薄毛玻璃底，标题与「完成」都走胶囊
+    self.navigationItem.titleView = SLPillTitleView(@"API 凭证");
+    SLApplyGlassTable(self.tableView);
     self.tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 0);
     self.tableView.estimatedSectionFooterHeight = 28;
     self.tableView.estimatedSectionHeaderHeight = 26;
     [self.tableView registerClass:[AWECAAPIFieldCell class] forCellReuseIdentifier:@"field"];
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
-        target:self action:@selector(aweca_saveAll)];
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(@"完成", self, @selector(aweca_saveAll));
     _advancedExpanded = NO;
 }
 
@@ -304,6 +306,13 @@ static NSString *AWECATrimStr(NSString *s) {
                                attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12]}
                                   context:nil];
     return ceil(r.size.height) + 14;
+}
+
+// v0.4.50：单元格底色统一在 willDisplay 里刷，不用逐分支去改 ——
+// 本页 cell 有 field / backup / fold 三种来源，逐个设色迟早漏一个。
+- (void)tableView:(UITableView *)tableView willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)indexPath {
+    (void)tableView; (void)indexPath;
+    cell.backgroundColor = SLGlassCellColor();
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {

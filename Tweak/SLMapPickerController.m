@@ -13,13 +13,16 @@
 //  为什么用 frame 而不是自动布局：陌陌的导航控制器会改写 additionalSafeAreaInsets，
 //  自动布局在这里算出来的底部高度会随键盘弹出抖动；frame 一次算准，省掉一类问题。
 //
-//  导航栏：本页把导航栏设成透明，让地图整屏铺开，返回按钮仍然用系统的（不自己造）。
+//  导航栏：本页把导航栏设成透明，让地图整屏铺开。
+//  v0.4.50：返回键改成毛玻璃胶囊（跟设置页的「完成」同一套控件）——
+//  自绘 leftBarButtonItem 会顶掉系统返回键、连带禁掉侧滑，所以把手势代理接回来（见 viewWillAppear）。
 //  必须在 viewWillDisappear 里恢复默认外观，否则 push 进来的收藏页会跟着变透明。
 //
 
 #import "SLMapPickerController.h"
 #import "SLFavoriteController.h"
 #import "SLVirtualLocation.h"
+#import "SLGlass.h"
 #import <MapKit/MapKit.h>
 #import "SLLog.h"
 
@@ -51,7 +54,10 @@ static UIColor *SLHairline(void) {
 }
 
 @interface SLMapPickerController () <MKMapViewDelegate, UITextFieldDelegate,
-                                    UITableViewDataSource, UITableViewDelegate>
+                                    UITableViewDataSource, UITableViewDelegate,
+                                    UIGestureRecognizerDelegate>
+// v0.4.50：定义在 viewWillAppear 之后，先声明免得 -Werror 因「方法未找到」中断构建
+- (void)sl_backTap;
 
 @property (nonatomic, strong) MKMapView *mapView;
 @property (nonatomic, strong) UIView *pinView;
@@ -61,10 +67,6 @@ static UIColor *SLHairline(void) {
 @property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, strong) UIButton *bookmarkBtn;
 @property (nonatomic, strong) UIButton *locateBtn;
-
-// v0.4.49：系统返回键隐藏，箭头改到胶囊内部；这样 titleView 可铺满整宽，
-// 胶囊左右各 8pt，与底部浮窗的边缘真正对齐（上下同一条竖线）。
-@property (nonatomic, strong) UIButton *backBtn;
 
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UIView *grabber;
@@ -147,7 +149,6 @@ static UIColor *SLHairline(void) {
 - (void)sl_locate;
 - (void)sl_tune;
 - (void)sl_copyCoord;
-- (void)sl_backTap;
 - (void)sl_toast:(NSString *)text;
 
 @end
@@ -167,9 +168,6 @@ static UIColor *SLHairline(void) {
     [super viewDidLoad];
     self.title = @"";
     self.results = @[];
-    // v0.4.49：隐藏系统返回键，返回箭头改到胶囊内部（见 sl_buildSearch）。
-    // 系统返回键会占住导航栏左侧，titleView 被顶右、右边缘贴边；去掉后才能整宽对齐浮窗。
-    self.navigationItem.hidesBackButton = YES;
 
     [self sl_buildMap];
     [self sl_buildPin];
@@ -201,10 +199,36 @@ static UIColor *SLHairline(void) {
     // v0.4.36：搜索栏并进导航栏，顶部不再有「虚拟定位」那行药丸，
     // 省掉 50pt 以上的竖向占用，针尖和结果卡跟着上移。
     self.navigationItem.titleView = self.searchCapsule;
+    // v0.4.50：返回键换成毛玻璃胶囊（跟设置页的「完成」同一套控件）。
+    // 自绘 leftBarButtonItem 会顶掉系统返回键，iOS 也就顺手禁掉侧滑，所以下面把手势代理接回来。
+    self.navigationItem.leftBarButtonItem = SLPillIconBarItem(@"chevron.left", @"返回", self, @selector(sl_backTap));
+    UIGestureRecognizer *pop = self.navigationController.interactivePopGestureRecognizer;
+    if (pop) pop.delegate = self;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
+    // 只有栈里还有上一页才允许侧滑，否则在根页一划就把整个导航栈弹空
+    if (g == self.navigationController.interactivePopGestureRecognizer) {
+        return self.navigationController.viewControllers.count > 1;
+    }
+    return YES;
+}
+
+- (void)sl_backTap {
+    if (self.navigationController.viewControllers.firstObject != self) {
+        [self.navigationController popViewControllerAnimated:YES];
+    } else {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    // v0.4.50：胶囊返回键和侧滑代理都是本页自己挂的，离开时收回，
+    // 不然会跟着带进收藏页（那边应该是系统返回键 + 默认手势代理）。
+    self.navigationItem.leftBarButtonItem = nil;
+    UIGestureRecognizer *pop = self.navigationController.interactivePopGestureRecognizer;
+    if (pop && pop.delegate == (id)self) pop.delegate = nil;
     // 只收自己的 titleView / tintColor，不碰 appearance（那是容器的职责）
     UINavigationBar *nb = self.navigationController.navigationBar;
     if (!nb) return;
@@ -270,20 +294,16 @@ static UIColor *SLHairline(void) {
     self.starBtn.frame = CGRectMake(pad + mainW + gap, btnY, side, 50);
     self.tuneBtn.frame = CGRectMake(pad + mainW + gap * 2 + side, btnY, side, 50);
 
-    // 3) 搜索栏：宽度 = 屏幕宽 - 两侧 8pt（kSLPanelInset），与底部浮窗同宽、同左右边距。
-    //    v0.4.49：系统返回键已隐藏、箭头放进胶囊内，titleView 才能铺满整宽真正对齐。
+    // 3) 搜索栏跑在导航栏里：高度 40，左右各留出返回箭头 / 右边距
     CGFloat capH = 40.0;
-    CGFloat capW = w - kSLPanelInset * 2.0;
-    if (capW < 170.0) capW = MAX(140.0, w - 16.0);
+    CGFloat capW = w - 108.0;          // 44 返回键 + 安全边距，剩下都给搜索框
+    if (capW < 170.0) capW = MAX(140.0, w - 88.0);
     self.searchCapsule.frame = CGRectMake(0, 0, capW, capH);
-    CGFloat backW = 40.0;
-    self.backBtn.frame = CGRectMake(8, 0, backW, capH);
-    CGFloat iconX = 8 + backW;
-    self.searchIcon.frame = CGRectMake(iconX, 10, 18, 18);
+    self.searchIcon.frame = CGRectMake(12, 10, 18, 18);
     self.locateBtn.frame = CGRectMake(capW - 4 - 28, (capH - 28) / 2.0, 28, 28);
     self.bookmarkBtn.frame = CGRectMake(CGRectGetMinX(self.locateBtn.frame) - 6 - 28,
                                         (capH - 28) / 2.0, 28, 28);
-    CGFloat fieldX = iconX + 26;
+    CGFloat fieldX = 38;
     self.searchField.frame = CGRectMake(fieldX, 0,
                                         CGRectGetMinX(self.bookmarkBtn.frame) - 8 - fieldX, capH);
     // v0.4.37：直接读导航栏实际下沿（换算到本视图坐标），不再用 safeTop + 44 猜 ——
@@ -424,25 +444,6 @@ static UIColor *SLHairline(void) {
     self.locateBtn.imageView.contentMode = UIViewContentModeScaleAspectFit;
     [self.locateBtn addTarget:self action:@selector(sl_locate) forControlEvents:UIControlEventTouchUpInside];
     [cap addSubview:self.locateBtn];
-
-    // v0.4.49：返回箭头放进胶囊最左端（替代被隐藏的系统返回键）。
-    // 这样胶囊能铺满屏幕宽度 - 两侧 8pt，与底部浮窗左右边缘对齐，视觉上是一条完整的边。
-    UIButton *back = [UIButton buttonWithType:UIButtonTypeSystem];
-    [back setImage:[UIImage systemImageNamed:@"chevron.left"] forState:UIControlStateNormal];
-    back.tintColor = [UIColor labelColor];
-    back.imageView.contentMode = UIViewContentModeScaleAspectFit;
-    [back addTarget:self action:@selector(sl_backTap) forControlEvents:UIControlEventTouchUpInside];
-    [cap addSubview:back];
-    self.backBtn = back;
-}
-
-- (void)sl_backTap {
-    UINavigationController *nav = self.navigationController;
-    if (nav.viewControllers.count > 1) {
-        [nav popViewControllerAnimated:YES];
-    } else {
-        [nav dismissViewControllerAnimated:YES completion:nil];
-    }
 }
 
 - (void)sl_buildPanel {
