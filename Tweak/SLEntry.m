@@ -1988,16 +1988,25 @@ void SLRaiseFloatButton(void) {
         if (!btn) return;
 
         UIWindow *top = SLKeyWindow();
-        UIWindow *host = btn.window;
-        if (top && host && top != host && top.windowLevel >= host.windowLevel) {
+        UIWindow *cur = btn.window;
+        if (top && cur && top != cur && top.windowLevel >= cur.windowLevel) {
             [btn removeFromSuperview];
             [top addSubview:btn];
-            host = top;
         }
-        [host bringSubviewToFront:btn];
+        // v0.4.61：present 的呈现容器是在球之后才加到 window 上的，对 window 自己
+        // bringSubviewToFront 抬不动球 —— 以前真正生效的是那次 0.4s 补抬，
+        // 录屏里就是「卡片先出来、球被压在下层，0.4s 后才窜上去」。改成对球自己的
+        // superview 提，并把补抬从 0.4s 提前到 0.05 / 0.18s（仍在系统重排之后）。
+        [btn.superview bringSubviewToFront:btn];
 
         __weak SLFloatButton *weakBtn = btn;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            SLFloatButton *b = weakBtn;
+            if (!b || !b.superview) return;
+            [b.superview bringSubviewToFront:b];
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             SLFloatButton *b = weakBtn;
             if (!b || !b.superview) return;

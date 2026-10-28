@@ -196,6 +196,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 @property (nonatomic, assign) AVAudioSessionCategoryOptions savedOptions;
 @property (nonatomic, assign) double tickStart;
 @property (nonatomic, assign) BOOL failed;
+@property (nonatomic, assign) BOOL enterAnimated;   // v0.4.61：入场动画 / 首播只做一次
 
 - (NSArray<NSNumber *> *)sl_waveHeights:(NSData *)pcm bars:(NSInteger)n;
 - (NSArray<NSNumber *> *)sl_fakeHeights:(NSInteger)n;
@@ -412,6 +413,15 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    // v0.4.61：系统会重复回调 viewDidAppear（键盘收起、呈现环境变化都会转发一次）。
+    // 原来无条件把 alpha 归零再跑一遍弹簧 —— 录屏里就是「卡片完整 → 一闪缩回 → 又弹回来」，
+    // 看着像弹了两次。入场动画和首播都只做一次，后来的回调直接忽略。
+    if (self.enterAnimated) {
+        SLLog(@"AUDITION viewDidAppear 重复回调，忽略");
+        return;
+    }
+    self.enterAnimated = YES;
+    SLLog(@"AUDITION viewDidAppear 首次，播入场动画");
     // 卡片弹入
     self.card.alpha = 0.0;
     self.card.transform = CGAffineTransformMakeScale(0.94, 0.94);
