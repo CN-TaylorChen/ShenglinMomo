@@ -17,7 +17,7 @@
 // v0.4.54：胶囊本身改用 SLGlass 的 SLSearchPill（图标/文字在 layoutSubviews 里硬排），
 // 这里只留一层表头容器负责 16pt 边距和高度。
 @property (nonatomic, strong) UIView *searchHeader;
-@property (nonatomic, strong) UIView *searchPill;
+@property (nonatomic, strong) SLSearchPill *searchPill;
 @property (nonatomic, assign) CGFloat searchHeaderWidth;
 @property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, strong) UIView *clipboardBanner;
