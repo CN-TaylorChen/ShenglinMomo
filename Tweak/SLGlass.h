@@ -53,4 +53,18 @@ void SLInstallPillBack(UIViewController *vc);
 /// 同上，可指定高度（地图页要 40pt，跟搜索框等高）。
 void SLInstallPillBackSized(UIViewController *vc, CGFloat height);
 
+#pragma mark - 搜索胶囊
+
+/// 玻璃搜索胶囊（超薄毛玻璃 + 发丝边 + 全圆角 + 放大镜 + 输入框）。
+///
+/// v0.4.54：原来两页各自在「创建时算一次 frame」，宽度一变（表头被重设、旋转、分屏）
+/// 就会失配 —— 表现为放大镜压在占位文字上。这里把所有排布收进 layoutSubviews，
+/// 图标固定 13pt 起、文字固定接在图标后 7pt，任何宽度都不会重叠。
+@interface SLSearchPill : UIView
+/// 胶囊固定高度（36pt）。表头高度 = 高度 + 上下各 4pt。
++ (CGFloat)pillHeight;
++ (instancetype)pillWithPlaceholder:(NSString *)placeholder;
+@property (nonatomic, strong, readonly) UITextField *field;
+@end
+
 NS_ASSUME_NONNULL_END

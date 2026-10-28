@@ -7,6 +7,7 @@
 #import "SLVoiceImportController.h"
 #import "SLGlass.h"
 #import <objc/runtime.h>
+#import <math.h>
 #import <PhotosUI/PhotosUI.h>
 
 #define kAWECARecommendedVoices @"AWECARecommendedVoices"
@@ -26,7 +27,9 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 // v0.4.53：UISearchBar 换成自绘玻璃胶囊 + UITextField。
 // UISearchBar 就算设 Minimal，它那层背景图仍然是系统画的浅灰/白块，压在透明表格上是一块白板；
 // 而且它自带上下留白，永远贴不紧导航栏。
+@property (nonatomic, strong) UIView *searchHeader;
 @property (nonatomic, strong) UIView *searchPill;
+@property (nonatomic, assign) CGFloat searchHeaderWidth;
 @property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *customVoices;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *recommendedVoices;
@@ -38,6 +41,9 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 @property (nonatomic, strong) NSMutableArray<NSString *> *favorites;        // 收藏的 voiceType（顺序即置顶顺序）
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *filteredFavorites;
 @property (nonatomic, copy) NSString *pendingAvatarVoiceID;   // 正在为哪个音色选图
+// v0.4.54：多选导出。只作用于「我导入的音色」这一分区 —— 那些才是自己的东西。
+@property (nonatomic, assign) BOOL multiSelect;
+@property (nonatomic, strong) NSMutableSet<NSString *> *multiSel;
 @end
 
 @implementation AWECATTSVoiceListController
@@ -58,6 +64,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [self loadCustomVoices];
     [self loadRecommended];
     [self loadFavorites];
+    self.multiSel = [NSMutableSet set];
 
     self.title = [NSString stringWithFormat:@"%@ · 音色", AWECAProductName];   // 两个引擎统一叫「音色」
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"vc"];
@@ -83,7 +90,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     }
     self.tableView.tableFooterView = footer;
 
-    self.tableView.tableHeaderView = [self sl_makeSearchHeader];
+    [self sl_rebuildSearchHeader];
 
     self.filteredCustom = [self.customVoices mutableCopy];
     self.filteredRecommended = [self.recommendedVoices mutableCopy];
@@ -102,49 +109,43 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 #pragma mark - 搜索框（自绘玻璃胶囊）
 
-- (UIView *)sl_makeSearchHeader {
-    CGFloat w = self.view.bounds.size.width;
-    // 表头高 48、胶囊高 40、上边距 4 —— 尽量贴紧导航栏，不再留系统那圈 8pt 内嵌
-    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 48)];
+// v0.4.54：胶囊改用 SLGlass 的 SLSearchPill。
+// 原来图标和文字是「建的时候按 self.view.bounds.width 算死坐标」，而表格真实宽度
+// 未必等于它（浮窗里 358 vs 374），宽度一改文字就跑到放大镜底下去 —— 用户看到的就是
+// 「搜索栏图标和文字重叠」。现在排布全在 layoutSubviews 里，怎么变都不会压。
+- (void)sl_rebuildSearchHeader {
+    if (!self.searchHeader) {
+        UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
+        SLSearchPill *p = [SLSearchPill pillWithPlaceholder:@"搜索音色"];
+        p.field.delegate = self;
+        [p.field addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
+        [head addSubview:p];
+        self.searchHeader = head;
+        self.searchPill = p;
+        self.searchField = p.field;
+        self.searchHeaderWidth = 0;
+    }
+    [self sl_layoutSearchHeader];
+    self.tableView.tableHeaderView = self.searchHeader;
+}
 
-    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(16, 4, w - 32, 40)];
-    pill.backgroundColor = [UIColor clearColor];
-    pill.layer.cornerRadius = 20;
-    pill.layer.cornerCurve = kCACornerCurveContinuous;
-    pill.layer.borderWidth = 0.8;
-    pill.layer.borderColor = SLGlassHairlineColor().CGColor;
-    pill.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+- (void)sl_layoutSearchHeader {
+    UIView *head = self.searchHeader;
+    if (!head) return;
+    CGFloat w = self.tableView.bounds.size.width;
+    if (w <= 0) w = self.view.bounds.size.width;
+    CGFloat h = [SLSearchPill pillHeight];
+    head.frame = CGRectMake(0, 0, w, h + 8.0);
+    self.searchPill.frame = CGRectMake(16.0, 4.0, MAX(0.0, w - 32.0), h);
+    if (fabs(w - self.searchHeaderWidth) > 0.5) {
+        self.searchHeaderWidth = w;
+        self.tableView.tableHeaderView = head;
+    }
+}
 
-    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-    blur.frame = pill.bounds;
-    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    blur.layer.cornerRadius = 20;
-    blur.layer.cornerCurve = kCACornerCurveContinuous;
-    blur.layer.masksToBounds = YES;
-    blur.userInteractionEnabled = NO;
-    [pill addSubview:blur];
-
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
-    icon.tintColor = [UIColor secondaryLabelColor];
-    icon.contentMode = UIViewContentModeScaleAspectFit;
-    icon.frame = CGRectMake(14, 12, 16, 16);
-    [pill addSubview:icon];
-
-    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(38, 0, pill.bounds.size.width - 52, 40)];
-    tf.font = [UIFont systemFontOfSize:15];
-    tf.placeholder = @"搜索音色...";
-    tf.delegate = self;
-    tf.returnKeyType = UIReturnKeySearch;
-    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    tf.textColor = [UIColor labelColor];
-    tf.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [tf addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
-    [pill addSubview:tf];
-    self.searchField = tf;
-    self.searchPill = pill;
-
-    [head addSubview:pill];
-    return head;
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.searchHeader && !self.emotionMode) [self sl_layoutSearchHeader];
 }
 
 - (void)sl_searchChanged {
@@ -216,12 +217,15 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         if (!tag.length) { [AWECAUtils showToast:@"标签不能为空"]; return; }
         NSMutableArray *all = [mgr.fishEmotionAll mutableCopy];
         if ([all containsObject:tag]) { [AWECAUtils showToast:@"该标签已存在"]; return; }
-        [all addObject:tag];
+        // v0.4.54：新加的插到第 0 位（原来追加到末尾，内置标签一长串，新加的根本找不到）
+        [all insertObject:tag atIndex:0];
         mgr.fishEmotionAll = all;
-        // 备注平行数组同步插入
+        // 备注平行数组同步插到第 0 位；先把历史上可能错位的长度补齐/截齐
         NSMutableArray *notes = [mgr.fishEmotionNotes mutableCopy] ?: [NSMutableArray array];
         while (notes.count < all.count - 1) [notes addObject:@""];
-        [notes addObject:([alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"")];
+        while (notes.count > all.count - 1) [notes removeLastObject];
+        [notes insertObject:([alert.textFields[0].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"")
+                    atIndex:0];
         mgr.fishEmotionNotes = notes;
         [mgr saveConfig];
         [self.tableView reloadData];
@@ -491,7 +495,11 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
                 ? [NSString stringWithFormat:@"收藏 (%lu)", (unsigned long)self.filteredFavorites.count]
                 : nil;
         }
-        return [NSString stringWithFormat:@"我导入的音色 (%lu)", (unsigned long)self.filteredCustom.count];
+        NSString *base = [NSString stringWithFormat:@"我导入的音色 (%lu)", (unsigned long)self.filteredCustom.count];
+        // v0.4.54：多选态把已选数量挂在分区标题上，省一个表头按钮
+        return self.multiSelect
+            ? [NSString stringWithFormat:@"%@ · 已选 %lu", base, (unsigned long)self.multiSel.count]
+            : base;
     }
     switch (section) {
         case AWECAVoiceSectionCustom: return [NSString stringWithFormat:@"我的音色 (%lu)", (unsigned long)self.filteredCustom.count];
@@ -576,6 +584,23 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         return cell;
     }
 
+    // v0.4.54：多选导出态 —— 自建音色行只留勾选，播放键让位
+    if (self.multiSelect) {
+        NSInteger customSec = self.fishMode ? 1 : AWECAVoiceSectionCustom;
+        if (indexPath.section == customSec) {
+            NSDictionary *mv = [self listForSection:indexPath.section][indexPath.row];
+            NSString *mt = mv[@"voiceType"];
+            cell.imageView.image = [self aweca_avatarImageForVoice:mv size:40];
+            cell.imageView.layer.cornerRadius = 20;
+            cell.imageView.layer.masksToBounds = YES;
+            cell.textLabel.text = mv[@"name"] ?: mt;
+            cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+            cell.accessoryType = [self.multiSel containsObject:mt]
+                ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+            return cell;
+        }
+    }
+
     NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
     NSString *name = voice[@"name"];
     NSString *type = voice[@"voiceType"];
@@ -631,6 +656,20 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
         return;
     }
 
+    // v0.4.54：多选态点行＝勾选/取消勾选，不切音色
+    if (self.multiSelect) {
+        NSInteger customSec = self.fishMode ? 1 : AWECAVoiceSectionCustom;
+        if (indexPath.section != customSec) return;
+        NSArray *rows = [self listForSection:indexPath.section];
+        if (indexPath.row >= (NSInteger)rows.count) return;
+        NSString *t = rows[indexPath.row][@"voiceType"];
+        if (!t.length) return;
+        if ([self.multiSel containsObject:t]) [self.multiSel removeObject:t];
+        else [self.multiSel addObject:t];
+        [tableView reloadData];   // 分区标题里的「已选 N」也要跟着变
+        return;
+    }
+
     NSDictionary *voice = [self listForSection:indexPath.section][indexPath.row];
 
     if (self.fishMode) {
@@ -652,12 +691,14 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 - (BOOL)tableView:(UITableView *)tableView canEditRowAtIndexPath:(NSIndexPath *)indexPath {
     if (self.emotionMode) return YES;
+    if (self.multiSelect) return NO;   // v0.4.54：多选态不允许左滑，免得勾选和滑动动作打架
     if (self.searchText.length > 0) return NO;
     return YES;
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
     if (self.searchText.length > 0) return nil;
+    if (self.multiSelect) return nil;   // v0.4.54：多选态左滑关掉
 
     // 情绪标签模式：左滑编辑 / 删除
     if (self.emotionMode) {
@@ -781,7 +822,18 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
             [AWECAUtils showToast:[NSString stringWithFormat:@"已删除: %@", name]];
             completionHandler(YES);
         }];
-        return [self aweca_configActions:@[removeAction, editAction] forIndexPath:indexPath];
+        // v0.4.54：自建音色可以分享出去（只有 Fish 音色的 ID 是跨账号可用的）
+        NSMutableArray *acts = [NSMutableArray arrayWithObjects:removeAction, editAction, nil];
+        if (self.fishMode) {
+            UIContextualAction *shareAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                title:@"分享" handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+                [self sl_shareVoices:@[@{ @"name": name ?: vid, @"voiceType": vid }] fromView:sourceView];
+                completionHandler(YES);
+            }];
+            shareAction.backgroundColor = [UIColor systemTealColor];
+            [acts addObject:shareAction];
+        }
+        return [self aweca_configActions:acts forIndexPath:indexPath];
 
     } else if (indexPath.section == AWECAVoiceSectionRecommended) {
         UIContextualAction *removeAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
@@ -852,6 +904,12 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
                                            handler:^(UIAlertAction *a) {
         [ws aweca_pushImportWithMode:SLImportModeMine];
     }]];
+    // v0.4.54：别人分享过来的是「标题 + JSON」纯文本，复制之后这里一步就能收下
+    [sheet addAction:[UIAlertAction actionWithTitle:@"从剪贴板导入"
+                                             style:UIAlertActionStyleDefault
+                                           handler:^(UIAlertAction *a) {
+        [ws sl_importFromPasteboard];
+    }]];
     [sheet addAction:[UIAlertAction actionWithTitle:@"粘贴 JSON 导入"
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *a) {
@@ -862,9 +920,139 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
                                            handler:^(UIAlertAction *a) {
         [ws addCustomVoice];
     }]];
+    if (self.fishMode && self.customVoices.count) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"多选导出音色"
+                                                 style:UIAlertActionStyleDefault
+                                               handler:^(UIAlertAction *a) {
+            [ws sl_beginMultiSelect];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"分享我的音色（%lu 个）", (unsigned long)self.customVoices.count]
+                                                 style:UIAlertActionStyleDefault
+                                               handler:^(UIAlertAction *a) {
+            [ws sl_shareVoices:ws.customVoices fromView:nil];
+        }]];
+    }
     [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
     sheet.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
     [self presentViewController:sheet animated:YES completion:nil];
+}
+
+#pragma mark - 分享 / 从剪贴板导入（v0.4.54）
+
+// 分享格式＝一行标题 + 标准音色 JSON 数组。
+// 解析器（sl_parseVoiceJSONText:）会自己找第一个 [ ，所以对方无论走
+// 「从剪贴板导入」还是「粘贴 JSON 导入」都能直接吃下来，不用删标题行。
+- (NSString *)sl_shareTextForVoices:(NSArray<NSDictionary *> *)voices {
+    NSMutableArray *arr = [NSMutableArray array];
+    for (NSDictionary *v in voices) {
+        if (![v isKindOfClass:[NSDictionary class]]) continue;
+        NSString *vid = v[@"voiceType"];
+        if (!vid.length) continue;
+        [arr addObject:@{ @"name": (v[@"name"] ?: vid), @"voiceType": vid }];
+    }
+    if (!arr.count) return nil;
+    NSData *d = [NSJSONSerialization dataWithJSONObject:arr options:0 error:nil];
+    NSString *json = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
+    if (!json.length) return nil;
+    return [NSString stringWithFormat:@"声临 · 音色分享（%lu 个）\n%@", (unsigned long)arr.count, json];
+}
+
+- (void)sl_shareVoices:(NSArray<NSDictionary *> *)voices fromView:(UIView *)anchor {
+    if (!self.fishMode) {
+        // 火山引擎的音色 ID 只在自己账号下有效，分享出去别人也用不了
+        [AWECAUtils showToast:@"只有 Fish 音色可以分享" duration:2.0];
+        return;
+    }
+    NSString *text = [self sl_shareTextForVoices:voices];
+    if (!text.length) { [AWECAUtils showToast:@"没有可分享的音色"]; return; }
+
+    UIActivityViewController *av = [[UIActivityViewController alloc] initWithActivityItems:@[text] applicationActivities:nil];
+    if (av.popoverPresentationController) {
+        UIView *src = anchor ?: self.view;
+        av.popoverPresentationController.sourceView = src;
+        av.popoverPresentationController.sourceRect =
+            anchor ? anchor.bounds : CGRectMake(src.bounds.size.width / 2.0, src.bounds.size.height / 2.0, 1, 1);
+    }
+    [self presentViewController:av animated:YES completion:nil];
+}
+
+- (void)sl_importFromPasteboard {
+    NSString *text = [UIPasteboard generalPasteboard].string;
+    if (!text.length) {
+        [AWECAUtils showToast:@"剪贴板是空的" duration:1.5];
+        return;
+    }
+    NSInteger skipped = 0;
+    NSArray<NSDictionary *> *items = [AWECATTSManager sl_parseVoiceJSONText:text skipped:&skipped];
+    if (!items.count) {
+        [AWECAUtils showToast:@"剪贴板里没找到音色 JSON" duration:2.0];
+        return;
+    }
+    NSDictionary *r = [AWECATTSManager sl_importFishVoices:items];
+    [self loadCustomVoices];
+    [self filterVoices];
+    [self.tableView reloadData];
+    [AWECAUtils showToast:[NSString stringWithFormat:@"导入 %ld 个，更新 %ld 个",
+                           (long)[r[@"added"] integerValue], (long)[r[@"updated"] integerValue]]
+                 duration:2.0];
+}
+
+#pragma mark - 多选导出（v0.4.54）
+
+// 多选只作用于「我导入的音色」：勾一堆 → 导出成同一段分享文本。
+// 进口这一侧本来就能多选（导入页的勾选 + 全选 / 全取消），所以两端都齐了。
+- (void)sl_beginMultiSelect {
+    if (!self.fishMode) { [AWECAUtils showToast:@"只有 Fish 音色可以导出" duration:1.8]; return; }
+    if (!self.customVoices.count) { [AWECAUtils showToast:@"还没有自建音色" duration:1.5]; return; }
+    self.multiSelect = YES;
+    [self.multiSel removeAllObjects];
+    [self sl_updateMultiChrome];
+    [self.tableView reloadData];
+}
+
+- (void)sl_endMultiSelect {
+    self.multiSelect = NO;
+    [self.multiSel removeAllObjects];
+    [self sl_updateMultiChrome];
+    [self.tableView reloadData];
+}
+
+- (void)sl_updateMultiChrome {
+    if (self.multiSelect) {
+        // rightBarButtonItems[0] 在最右边：导出 / 全选 / 取消
+        self.navigationItem.rightBarButtonItems = @[
+            SLPillBarItem(@"导出", self, @selector(sl_exportSelected)),
+            SLPillBarItem(@"全选", self, @selector(sl_toggleSelectAll)),
+            SLPillBarItem(@"取消", self, @selector(sl_endMultiSelect)),
+        ];
+    } else {
+        self.navigationItem.rightBarButtonItems = nil;
+        self.navigationItem.rightBarButtonItem =
+            SLPillIconBarItem(@"plus", @"添加", self,
+                              self.fishMode ? @selector(aweca_addMenu) : @selector(addCustomVoice));
+    }
+}
+
+- (void)sl_toggleSelectAll {
+    NSArray<NSDictionary *> *rows = self.filteredCustom;
+    if (rows.count && self.multiSel.count >= rows.count) {
+        [self.multiSel removeAllObjects];
+    } else {
+        for (NSDictionary *v in rows) {
+            NSString *t = v[@"voiceType"];
+            if (t.length) [self.multiSel addObject:t];
+        }
+    }
+    [self.tableView reloadData];
+}
+
+- (void)sl_exportSelected {
+    NSMutableArray<NSDictionary *> *picked = [NSMutableArray array];
+    for (NSDictionary *v in self.filteredCustom) {
+        if ([self.multiSel containsObject:v[@"voiceType"]]) [picked addObject:v];
+    }
+    if (!picked.count) { [AWECAUtils showToast:@"先勾选要导出的音色" duration:1.5]; return; }
+    [self sl_shareVoices:picked fromView:nil];
 }
 
 - (void)aweca_pushImportWithMode:(SLImportMode)mode {

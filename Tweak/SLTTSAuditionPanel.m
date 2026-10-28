@@ -10,6 +10,7 @@
 
 #import "SLTTSAuditionPanel.h"
 #import "AWECAUtils.h"
+#import "SLEntry.h"
 #import "SLLog.h"
 #import <AVFoundation/AVFoundation.h>
 #import <math.h>
@@ -208,16 +209,10 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor clearColor];
 
-    // 遮罩：模糊 + 轻压暗，能透出聊天背景
-    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-    blur.frame = self.view.bounds;
-    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view addSubview:blur];
-
-    UIView *shade = [[UIView alloc] initWithFrame:self.view.bounds];
-    shade.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    shade.backgroundColor = [UIColor colorWithWhite:0 alpha:0.16];
-    [self.view addSubview:shade];
+    // v0.4.54：去掉整屏遮罩（原来是毛玻璃 + 16% 压暗）。
+    // 试听只在卡片上发生，没必要把背后的聊天糊成一片灰；现在背景保持原样，
+    // 只靠卡片自己的阴影和毛玻璃把层次撑起来。
+    // 空出来的区域仍然吞掉触摸（view 本身透明但可命中），不会误触到下面的聊天。
 
     UIColor *tint = self.view.tintColor ?: [UIColor systemBlueColor];
 
@@ -234,8 +229,8 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
     card.layer.cornerRadius = 24.0;
     card.layer.cornerCurve = kCACornerCurveContinuous;
     card.layer.shadowColor = [UIColor blackColor].CGColor;
-    card.layer.shadowOpacity = 0.16;
-    card.layer.shadowRadius = 26.0;
+    card.layer.shadowOpacity = 0.22;   // v0.4.54：遮罩去掉后，卡片的层次全靠这层阴影
+    card.layer.shadowRadius = 28.0;
     card.layer.shadowOffset = CGSizeMake(0, 12);
     card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:card.bounds cornerRadius:24.0].CGPath;
     [self.view addSubview:card];
@@ -749,7 +744,10 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
         vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
         vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
         sSLShownPanel = vc;
-        [top presentViewController:vc animated:NO completion:nil];
+        [top presentViewController:vc animated:NO completion:^{
+            // v0.4.54：卡片出现后把球抬到最上层，别被试听卡片压住
+            SLRaiseFloatButton();
+        }];
         SLLog(@"AUDITION 弹出试听 %@ dur=%.2f pcm=%lu",
               path.lastPathComponent, duration, (unsigned long)pcm16k.length);
     });

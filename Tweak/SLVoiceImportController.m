@@ -4,6 +4,7 @@
 #import "AWECATTSManager.h"
 #import "AWECAUtils.h"
 #import "SLGlass.h"
+#import <math.h>
 
 #define kSLFishModelURL @"https://api.fish.audio/model"
 
@@ -13,7 +14,11 @@
 @property (nonatomic, strong) NSMutableSet<NSString *> *selected;
 // v0.4.53：UISearchBar 换掉 —— 它自带一层不透明底（浅灰/白），在玻璃页上就是一块白板，
 // 而且关不掉圆角外的那圈背景。改成自绘玻璃胶囊 + UITextField，跟地图页搜索框一套。
+// v0.4.54：胶囊本身改用 SLGlass 的 SLSearchPill（图标/文字在 layoutSubviews 里硬排），
+// 这里只留一层表头容器负责 16pt 边距和高度。
+@property (nonatomic, strong) UIView *searchHeader;
 @property (nonatomic, strong) UIView *searchPill;
+@property (nonatomic, assign) CGFloat searchHeaderWidth;
 @property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, copy) NSString *searchText;
 @property (nonatomic, assign) BOOL loading;
@@ -53,61 +58,47 @@
 
 #pragma mark - 搜索栏
 
-// 玻璃胶囊搜索框：超薄毛玻璃 + 0.8pt 发丝边 + 全圆角，里面一个放大镜 + 输入框。
-// 不再用 UISearchBar（它那层背景色在透明表格上是一块白底，也去不干净）。
-- (UIView *)sl_makeSearchPill:(CGFloat)width {
-    CGFloat h = 38.0;
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(16, 7, width - 32, h)];
-    box.layer.cornerRadius = h / 2.0;
-    box.layer.cornerCurve = kCACornerCurveContinuous;
-    box.layer.borderWidth = 0.8;
-    box.layer.borderColor = SLGlassHairlineColor().CGColor;
-    box.backgroundColor = [UIColor clearColor];
-
-    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
-    blur.frame = box.bounds;
-    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    blur.layer.cornerRadius = h / 2.0;
-    blur.layer.cornerCurve = kCACornerCurveContinuous;
-    blur.layer.masksToBounds = YES;
-    blur.userInteractionEnabled = NO;
-    [box addSubview:blur];
-
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
-    icon.tintColor = [UIColor secondaryLabelColor];
-    icon.contentMode = UIViewContentModeScaleAspectFit;
-    icon.frame = CGRectMake(14, (h - 16) / 2.0, 16, 16);
-    [box addSubview:icon];
-
-    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(38, 0, box.bounds.size.width - 38 - 14, h)];
-    tf.font = [UIFont systemFontOfSize:15];
-    tf.placeholder = @"搜 Fish 公开音色，如：温柔 女声";
-    tf.delegate = self;
-    tf.returnKeyType = UIReturnKeySearch;
-    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
-    tf.textColor = [UIColor labelColor];
-    tf.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [tf addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
-    [box addSubview:tf];
-    self.searchField = tf;
-    return box;
-}
-
+// v0.4.54：胶囊统一用 SLSearchPill（36pt 高，图标 13 起、文字接在图标后 7pt）。
+// 原来这里是「创建时用 self.view.bounds 算一次宽度」，跟表格真实宽度并不一致，
+// 而且桌面上看着偏大（38pt + 15 号字）。
 - (void)sl_syncSearchBar {
     if (self.mode == SLImportModeSearch) {
-        if (!self.searchPill) {
-            self.searchPill = [self sl_makeSearchPill:self.view.bounds.size.width];
+        if (!self.searchHeader) {
+            UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
+            SLSearchPill *p = [SLSearchPill pillWithPlaceholder:@"搜公开音色"];
+            p.field.delegate = self;
+            [p.field addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
+            [head addSubview:p];
+            self.searchHeader = head;
+            self.searchPill = p;
+            self.searchField = p.field;
+            self.searchHeaderWidth = 0;
         }
-        // 宽度跟着表格走：tableHeaderView 不会自动 resize，旋转/分屏后要手动重排
-        CGRect f = self.searchPill.frame;
-        f.size.width = self.view.bounds.size.width - 32;
-        self.searchPill.frame = f;
-        self.searchPill.subviews.firstObject.frame = self.searchPill.bounds;   // blur
-        self.tableView.tableHeaderView = self.searchPill;
-        self.tableView.tableHeaderView.frame = CGRectMake(0, 0, self.view.bounds.size.width, 52);
+        [self sl_layoutSearchHeader];
+        self.tableView.tableHeaderView = self.searchHeader;
     } else {
         self.tableView.tableHeaderView = nil;
     }
+}
+
+- (void)sl_layoutSearchHeader {
+    UIView *head = self.searchHeader;
+    if (!head) return;
+    CGFloat w = self.tableView.bounds.size.width;
+    if (w <= 0) w = self.view.bounds.size.width;
+    CGFloat h = [SLSearchPill pillHeight];
+    head.frame = CGRectMake(0, 0, w, h + 8.0);
+    self.searchPill.frame = CGRectMake(16.0, 4.0, MAX(0.0, w - 32.0), h);
+    // 只有宽度真变了才重新赋值，避免在 viewDidLayoutSubviews 里反复触发表格重算
+    if (fabs(w - self.searchHeaderWidth) > 0.5) {
+        self.searchHeaderWidth = w;
+        self.tableView.tableHeaderView = head;
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    if (self.mode == SLImportModeSearch) [self sl_layoutSearchHeader];
 }
 
 - (void)sl_searchChanged {

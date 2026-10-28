@@ -8,6 +8,11 @@ void SLStartEntryWatcher(void);
 void SLRefreshFloatButton(void);        // 改完设置后立刻刷新已挂载的按钮
 NSString *SLFloatIconSummary(void);     // 设置页右侧显示当前图标
 
+// v0.4.54：把球抬到最上层。
+// 设置浮窗 / 试听卡片都是 OverFullScreen 呈现，会盖在球上面（球一半被卡片压住）。
+// 面板每次出现后调一次：球若换了窗口先迁过去，再在同一个窗口里 bringSubviewToFront。
+void SLRaiseFloatButton(void);
+
 // v0.4.33：品牌图标（黑底 + 六根声波条），代码绘制，不依赖任何图片资源。
 // 设置页标题栏和悬浮球共用同一张，保证两处视觉一致。
 UIImage *SLBrandIconImage(CGFloat side);

@@ -1570,7 +1570,10 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     vc.rootVC = root;
     vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
     vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
-    [host presentViewController:vc animated:YES completion:nil];
+    // v0.4.54：浮窗盖上来之后把球重新抬到最上层，别让卡片压住它
+    [host presentViewController:vc animated:YES completion:^{
+        SLRaiseFloatButton();
+    }];
 }
 
 + (void)presentSettingsFrom:(UIViewController *)host {
@@ -1791,6 +1794,8 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
         self.cardWrap.alpha = 1.0;
         self.cardWrap.transform = CGAffineTransformIdentity;
     } completion:nil];
+    // v0.4.54：卡片进场动画结束时再抬一次球（present 的 completion 有时早于最后一次布局）
+    SLRaiseFloatButton();
 }
 
 - (void)sl_dismiss {
@@ -1896,6 +1901,38 @@ static UIWindow *SLKeyWindow(void) {
         }
     }
     return best;
+}
+
+// v0.4.54：把球抬到最上层。
+// 设置浮窗与试听卡片都是 OverFullScreen 呈现，直接盖在球上面 —— 用户看到的是
+// 「球被卡片压掉一半」。这里在面板每次出现后调一次：球若落在别的窗口就先迁到最顶层窗口，
+// 再在同一个窗口里 bringSubviewToFront；转场结束后补抬一次（系统重排图层会把它压回去）。
+void SLRaiseFloatButton(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SLFloatButton *btn = sSLFloatBtn;
+        if (!btn) {
+            UIWindow *w0 = SLKeyWindow();
+            btn = (SLFloatButton *)[w0 viewWithTag:SLBtnTag];
+        }
+        if (!btn) return;
+
+        UIWindow *top = SLKeyWindow();
+        UIWindow *host = btn.window;
+        if (top && host && top != host && top.windowLevel >= host.windowLevel) {
+            [btn removeFromSuperview];
+            [top addSubview:btn];
+            host = top;
+        }
+        [host bringSubviewToFront:btn];
+
+        __weak SLFloatButton *weakBtn = btn;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            SLFloatButton *b = weakBtn;
+            if (!b || !b.superview) return;
+            [b.superview bringSubviewToFront:b];
+        });
+    });
 }
 
 void SLRefreshFloatButton(void) {

@@ -234,3 +234,72 @@ void SLInstallPillBackSized(UIViewController *vc, CGFloat height) {
 void SLInstallPillBack(UIViewController *vc) {
     SLInstallPillBackSized(vc, 32.0);
 }
+
+#pragma mark - 搜索胶囊
+
+@interface SLSearchPill ()
+@property (nonatomic, strong) UIVisualEffectView *blur;
+@property (nonatomic, strong) UIImageView *icon;
+@property (nonatomic, strong) UITextField *field;
+@end
+
+@implementation SLSearchPill
+
++ (CGFloat)pillHeight { return 36.0; }
+
++ (instancetype)pillWithPlaceholder:(NSString *)placeholder {
+    CGFloat h = [self pillHeight];
+    SLSearchPill *p = [[SLSearchPill alloc] initWithFrame:CGRectMake(0, 0, 320.0, h)];
+    p.backgroundColor = [UIColor clearColor];
+    p.layer.cornerRadius = h / 2.0;
+    p.layer.cornerCurve = kCACornerCurveContinuous;
+    p.layer.borderWidth = 0.8;
+    p.layer.borderColor = SLGlassHairlineColor().CGColor;
+
+    p.blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+    p.blur.layer.cornerRadius = h / 2.0;
+    p.blur.layer.cornerCurve = kCACornerCurveContinuous;
+    p.blur.layer.masksToBounds = YES;
+    p.blur.userInteractionEnabled = NO;
+    [p addSubview:p.blur];
+
+    p.icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
+    p.icon.tintColor = [UIColor secondaryLabelColor];
+    p.icon.contentMode = UIViewContentModeScaleAspectFit;
+    [p addSubview:p.icon];
+
+    // v0.4.54：字号 15 → 14。胶囊整体收小之后 15 号字顶得太满，看着还是「大」。
+    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectZero];
+    tf.font = [UIFont systemFontOfSize:14];
+    tf.placeholder = placeholder;
+    tf.borderStyle = UITextBorderStyleNone;
+    tf.returnKeyType = UIReturnKeySearch;
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    tf.textColor = [UIColor labelColor];
+    tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    [p addSubview:tf];
+    p.field = tf;
+    return p;
+}
+
+// 所有排布只在这里算：图标 13pt 起，文字接在图标后 7pt，右侧留 12pt。
+// 原来的写法是在创建时用「当时的视图宽度」算死一次，之后表头被重设宽度也不会跟着走，
+// 图标和文字就叠在一起了。
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat h = CGRectGetHeight(self.bounds);
+    CGFloat w = CGRectGetWidth(self.bounds);
+    self.blur.frame = self.bounds;
+
+    CGFloat side = 15.0;
+    self.icon.frame = CGRectMake(13.0, (h - side) / 2.0, side, side);
+    CGFloat tx = CGRectGetMaxX(self.icon.frame) + 7.0;
+    self.field.frame = CGRectMake(tx, 0, MAX(0.0, w - tx - 12.0), h);
+
+    // 边框是 CGColor，动态色不会自己跟深浅色变；借每次布局重解一次（比覆写
+    // traitCollectionDidChange: 便宜，也不会碰到 iOS 17 起把它标废的 -Werror 坑）。
+    self.layer.borderColor = SLGlassHairlineColor().CGColor;
+}
+
+@end
