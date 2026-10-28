@@ -904,17 +904,8 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
                                            handler:^(UIAlertAction *a) {
         [ws aweca_pushImportWithMode:SLImportModeMine];
     }]];
-    // v0.4.54：别人分享过来的是「标题 + JSON」纯文本，复制之后这里一步就能收下
-    [sheet addAction:[UIAlertAction actionWithTitle:@"从剪贴板导入"
-                                             style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *a) {
-        [ws sl_importFromPasteboard];
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"粘贴 JSON 导入"
-                                             style:UIAlertActionStyleDefault
-                                           handler:^(UIAlertAction *a) {
-        [ws aweca_pushImportWithMode:SLImportModePaste];
-    }]];
+    // v0.4.55：剪贴板导入已合并进导入页「粘贴 JSON」标签（顶部自动识别 + 一键导入），
+    // 这里不再单列；菜单精简为「从 Fish 导入 / 手动填写 ID / 多选导出 / 分享」。
     [sheet addAction:[UIAlertAction actionWithTitle:@"手动填写音色 ID"
                                              style:UIAlertActionStyleDefault
                                            handler:^(UIAlertAction *a) {

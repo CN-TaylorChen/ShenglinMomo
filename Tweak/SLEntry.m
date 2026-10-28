@@ -1560,13 +1560,20 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
 - (void)sl_fixScrollInsetsIn:(UIView *)view top:(CGFloat)top;
 @end
 
+// v0.4.55：记住当前浮窗实例，避免长按球等在设置已开时又叠第二层
+static SLFloatPanelController *sSLFloatPanel = nil;
+
 @implementation SLFloatPanelController
 
 + (void)presentFrom:(UIViewController *)host root:(UIViewController *)root {
     if (!host || !root) return;
+    // v0.4.55：设置已开时长按球，topViewController 返回的是设置页本身（它没再 present 东西），
+    // 旧判断 host.presentedViewController 拦不住，会叠第二层。改用全局实例判断。
+    if (sSLFloatPanel && sSLFloatPanel.presentingViewController) return;
     // 已经有浮窗开着就不叠第二层，避免连点两次出现两张卡片
     if (host.presentedViewController) return;
     SLFloatPanelController *vc = [[SLFloatPanelController alloc] init];
+    sSLFloatPanel = vc;
     vc.rootVC = root;
     vc.modalPresentationStyle = UIModalPresentationOverFullScreen;
     vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
@@ -1799,6 +1806,7 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
 }
 
 - (void)sl_dismiss {
+    sSLFloatPanel = nil;
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 
@@ -1845,6 +1853,7 @@ void SLCloseHostingPanel(UIViewController *vc) {
     while (c && !c.presentingViewController) c = c.parentViewController;
     if (c) [c dismissViewControllerAnimated:YES completion:nil];
     else [vc dismissViewControllerAnimated:YES completion:nil];
+    sSLFloatPanel = nil;
 }
 
 // 键盘 / 状态栏 / 文本特效这些私有窗口不能挂球：挂上去要么看不见，要么跟着窗口一起消失

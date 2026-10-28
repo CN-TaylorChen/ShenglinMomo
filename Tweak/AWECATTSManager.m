@@ -814,8 +814,8 @@ static NSString *SLStringOf(id v) {
         }
     }
     NSString *vid = SLStringOf(raw[@"vid"]) ?: SLStringOf(raw[@"voice_id"])
-                 ?: SLStringOf(raw[@"reference_id"]) ?: SLStringOf(raw[@"_id"])
-                 ?: SLStringOf(raw[@"id"]);
+                 ?: SLStringOf(raw[@"voiceType"]) ?: SLStringOf(raw[@"reference_id"])
+                 ?: SLStringOf(raw[@"_id"]) ?: SLStringOf(raw[@"id"]);
     vid = [vid stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (!vid.length) { if (skipped) (*skipped)++; return nil; }
 

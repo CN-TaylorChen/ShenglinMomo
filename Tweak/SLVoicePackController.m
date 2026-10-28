@@ -241,6 +241,7 @@ static UIImage *SLPauseGlyph(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = self.isRoot ? @"语音包" : self.folder;
+    self.navigationItem.titleView = SLPillTitleView(self.isRoot ? @"语音包" : (self.folder ?: @""));
     self.navigationItem.rightBarButtonItem = SLPillIconBarItem(@"plus", @"新建", self, @selector(sl_addTapped));
     // v0.4.34：这一页现在装在浮窗里，表格必须透明 + 叠一层同款毛玻璃，
     // 否则会出现「浮窗里贴了一张不透明的灰纸」。

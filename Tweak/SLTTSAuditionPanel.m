@@ -637,6 +637,8 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
 - (void)sl_dismissWith:(void (^)(void))cb {
     [self dismissViewControllerAnimated:YES completion:^{
         if (sSLShownPanel == self) sSLShownPanel = nil;
+        // v0.4.55：还原悬浮球真实状态（按 isOneShotPending 回绿或灰）
+        SLRefreshFloatButton();
         if (cb) cb();
     }];
 }
@@ -747,6 +749,9 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
         [top presentViewController:vc animated:NO completion:^{
             // v0.4.54：卡片出现后把球抬到最上层，别被试听卡片压住
             SLRaiseFloatButton();
+            // v0.4.55：试听时音频已装载、等录音替换，球应显示「就绪」绿而非空闲灰
+            // （此刻 isOneShotPending 还是 NO）。关闭时再按真实状态还原。
+            SLFloatSetState(SLFloatStateReady);
         }];
         SLLog(@"AUDITION 弹出试听 %@ dur=%.2f pcm=%lu",
               path.lastPathComponent, duration, (unsigned long)pcm16k.length);

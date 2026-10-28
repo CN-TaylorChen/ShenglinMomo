@@ -20,6 +20,8 @@
 @property (nonatomic, strong) UIView *searchPill;
 @property (nonatomic, assign) CGFloat searchHeaderWidth;
 @property (nonatomic, strong) UITextField *searchField;
+@property (nonatomic, strong) UIView *clipboardBanner;
+@property (nonatomic, assign) NSInteger clipboardCount;
 @property (nonatomic, copy) NSString *searchText;
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, copy) NSString *status;
@@ -54,6 +56,7 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     if (self.mode == SLImportModeSearch) [self.searchField becomeFirstResponder];
+    else if (self.mode == SLImportModePaste) [self sl_syncClipboardBanner];
 }
 
 #pragma mark - 搜索栏
@@ -61,8 +64,15 @@
 // v0.4.54：胶囊统一用 SLSearchPill（36pt 高，图标 13 起、文字接在图标后 7pt）。
 // 原来这里是「创建时用 self.view.bounds 算一次宽度」，跟表格真实宽度并不一致，
 // 而且桌面上看着偏大（38pt + 15 号字）。
+// v0.4.55：搜索栏在「我的音色」和「搜公开库」两个列表模式都常驻，切标签不再忽隐忽现；
+// 只有「粘贴 JSON」模式才换成剪贴板一键导入横幅。
 - (void)sl_syncSearchBar {
-    if (self.mode == SLImportModeSearch) {
+    if (self.mode == SLImportModePaste) {
+        [self sl_syncClipboardBanner];
+        return;
+    }
+    self.tableView.tableHeaderView = nil;
+    if (self.mode == SLImportModeSearch || self.mode == SLImportModeMine) {
         if (!self.searchHeader) {
             UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
             SLSearchPill *p = [SLSearchPill pillWithPlaceholder:@"搜公开音色"];
@@ -74,11 +84,76 @@
             self.searchField = p.field;
             self.searchHeaderWidth = 0;
         }
+        self.searchPill.field.placeholder = (self.mode == SLImportModeMine)
+            ? @"搜索我的音色" : @"搜公开音色";
         [self sl_layoutSearchHeader];
         self.tableView.tableHeaderView = self.searchHeader;
-    } else {
-        self.tableView.tableHeaderView = nil;
     }
+}
+
+// v0.4.55：粘贴 JSON 模式下，若剪贴板已有音色分享文本，顶部给一键导入横幅，
+// 这样「从剪贴板导入」不必单独占菜单项，且复用已验证的导入流程（分享↔导入闭环）。
+- (void)sl_syncClipboardBanner {
+    if (self.mode != SLImportModePaste) { self.tableView.tableHeaderView = nil; return; }
+    NSString *text = [UIPasteboard generalPasteboard].string;
+    NSInteger n = 0;
+    if (text.length) {
+        NSInteger skipped = 0;
+        n = [AWECATTSManager sl_parseVoiceJSONText:text skipped:&skipped].count;
+    }
+    if (n <= 0) { self.tableView.tableHeaderView = nil; return; }
+    self.clipboardCount = n;
+    if (!self.clipboardBanner) self.clipboardBanner = [self sl_buildClipboardBanner];
+    self.tableView.tableHeaderView = self.clipboardBanner;
+}
+
+- (UIView *)sl_buildClipboardBanner {
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 52)];
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(16, 6, self.view.bounds.size.width - 32, 40)];
+    pill.backgroundColor = SLGlassPillFillColor();
+    pill.layer.cornerRadius = 14;
+    pill.layer.cornerCurve = kCACornerCurveContinuous;
+    pill.layer.borderWidth = 0.8;
+    pill.layer.borderColor = SLGlassHairlineColor().CGColor;
+    [head addSubview:pill];
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, pill.bounds.size.width - 28, 40)];
+    lab.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightMedium];
+    lab.textColor = [UIColor labelColor];
+    lab.numberOfLines = 1;
+    lab.lineBreakMode = NSLineBreakByTruncatingTail;
+    lab.text = [NSString stringWithFormat:@"剪贴板检测到 %ld 个音色，点此导入", (long)self.clipboardCount];
+    [pill addSubview:lab];
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sl_importClipboard)];
+    [pill addGestureRecognizer:tap];
+    pill.userInteractionEnabled = YES;
+    return head;
+}
+
+- (void)sl_importClipboard {
+    NSString *text = [UIPasteboard generalPasteboard].string;
+    if (!text.length) { [AWECAUtils showToast:@"剪贴板是空的" duration:1.5]; return; }
+    NSInteger skipped = 0;
+    NSArray<NSDictionary *> *items = [AWECATTSManager sl_parseVoiceJSONText:text skipped:&skipped];
+    if (!items.count) { [AWECAUtils showToast:@"剪贴板里没找到音色 JSON" duration:2.0]; return; }
+    NSDictionary *r = [AWECATTSManager sl_importFishVoices:items];
+    [self sl_downloadAvatarsForItems:items];
+    [self sl_finishWithResult:r skipped:skipped];
+}
+
+// 「我的音色」模式按名字本地筛选；「搜公开库」复用接口返回结果
+- (NSArray<NSDictionary *> *)sl_visibleItems {
+    if (self.mode == SLImportModeMine && self.searchText.length) {
+        NSString *q = self.searchText.lowercaseString;
+        NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+        for (NSDictionary *v in self.items) {
+            NSString *n = [v[@"name"] isKindOfClass:[NSString class]] ? [v[@"name"] lowercaseString] : @"";
+            if ([n containsString:q]) [out addObject:v];
+        }
+        return out;
+    }
+    return self.items;
 }
 
 - (void)sl_layoutSearchHeader {
@@ -103,12 +178,14 @@
 
 - (void)sl_searchChanged {
     self.searchText = self.searchField.text ?: @"";
+    [self.tableView reloadData];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)tf {
     [tf resignFirstResponder];
     self.searchText = tf.text ?: @"";
-    [self sl_fetchSearch:self.searchText];
+    if (self.mode == SLImportModeSearch) [self sl_fetchSearch:self.searchText];
+    else [self.tableView reloadData];
     return YES;
 }
 
@@ -123,7 +200,7 @@
     (void)tv;
     if (section == 0) return 1;
     if (self.mode == SLImportModePaste) return 1;
-    return MAX((NSInteger)self.items.count, 1);   // 空列表占一行显示状态
+    return MAX((NSInteger)[self sl_visibleItems].count, 1);   // 空列表占一行显示状态
 }
 
 - (UISegmentedControl *)sourceSeg {
@@ -278,20 +355,24 @@ static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
         return cell;
     }
 
-    if (!self.items.count) {
+    if (![self sl_visibleItems].count) {
         UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"empty"];
         if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"empty"];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
         cell.textLabel.font = [UIFont systemFontOfSize:14];
         cell.textLabel.textColor = [UIColor secondaryLabelColor];
-        cell.textLabel.text = self.loading ? @"正在获取..." : (self.status.length ? self.status : @"点 ＋ 里的「粘贴 JSON」也可以导入");
+        NSString *empty = self.loading ? @"正在获取..." : (self.status.length ? self.status : @"点 ＋ 里的「粘贴 JSON」也可以导入");
+        if (self.mode == SLImportModeMine && self.searchText.length && self.items.count && [self sl_visibleItems].count == 0) {
+            empty = [NSString stringWithFormat:@"没有匹配「%@」的音色", self.searchText];
+        }
+        cell.textLabel.text = empty;
         cell.accessoryView = nil;
         return cell;
     }
 
     UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"row"];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"row"];
-    NSDictionary *v = self.items[ip.row];
+    NSDictionary *v = [self sl_visibleItems][ip.row];
     NSString *vid = v[@"voiceType"];
     NSString *name = v[@"name"];
 
