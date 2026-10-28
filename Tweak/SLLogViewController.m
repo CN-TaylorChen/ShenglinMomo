@@ -17,6 +17,7 @@
     // 从毛玻璃设置页点进来像跳到了另一个 App；现在铺超薄毛玻璃 + 胶囊标题 + 胶囊按钮。
     SLInstallGlassBackdrop(self.view);
     self.navigationItem.titleView = SLPillTitleView(@"运行日志");
+    SLInstallPillBack(self);   // v0.4.53：系统返回键换胶囊，否则这一页顶部只有右边三颗胶囊
     self.navigationItem.rightBarButtonItems = @[
         SLPillBarItem(@"刷新", self, @selector(sl_reload)),
         SLPillBarItem(@"复制", self, @selector(sl_copy)),

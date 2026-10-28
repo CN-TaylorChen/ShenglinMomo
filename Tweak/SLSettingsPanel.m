@@ -26,7 +26,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.52"
+#define SLVersion @"0.4.53"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -83,7 +83,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 // v0.4.52：标题栏 = 品牌图标 + 「声临 · 陌陌版」+ 缩小版版本号。
 // 版本号不再跟名字挤在同一句里，改成 11pt 灰字贴在名字右下角，只做标注不抢视线。
 - (UIView *)sl_titleView {
-    CGFloat H = 24.0;
+    // v0.4.53：24 → 32，跟右边「完成」胶囊等高（原来标题那枚明显矮一截，两个胶囊不齐）
+    CGFloat H = 32.0;
     UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 100, H)];
 
     UIImageView *icon = [[UIImageView alloc] initWithImage:SLBrandIconImage(44)];
@@ -114,7 +115,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     pill.layer.cornerCurve = kCACornerCurveContinuous;
     pill.layer.masksToBounds = YES;
     pill.layer.borderWidth = 0.8;
-    pill.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.6].CGColor;
+    pill.layer.borderColor = SLGlassHairlineColor().CGColor;
     [box addSubview:pill];
 
     name.frame = CGRectMake(padX, (H - name.frame.size.height) / 2.0, name.frame.size.width, name.frame.size.height);
@@ -175,7 +176,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 2) return 3;   // 合成口令 + 短录音补全 + 合成后先试听（v0.4.52 删掉语音包口令与直发）
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
-    return 1;                     // 运行日志
+    if (section == 5) return 2;   // 运行日志 + 动画预览
+    return 1;
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
@@ -369,9 +371,16 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     }
 
     if (ip.section == 5) {
-        cell.textLabel.text = @"运行日志";
-        cell.detailTextLabel.text = @"点此查看";
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        if (ip.row == 0) {
+            cell.textLabel.text = @"运行日志";
+            cell.detailTextLabel.text = @"点此查看";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else {
+            // v0.4.53：手动切四态，省得每次都要真的去录一条才能看动画
+            cell.textLabel.text = @"动画预览";
+            cell.detailTextLabel.text = @"手动切换四态";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
         return cell;
     }
 
@@ -432,10 +441,43 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     }
     if (ip.section == 2 && (ip.row == 1 || ip.row == 2)) return;   // 两个开关行
     if (ip.section == 5) {
-        SLLogViewController *vc = [[SLLogViewController alloc] init];
-        [self.navigationController pushViewController:vc animated:YES];
+        if (ip.row == 0) {
+            SLLogViewController *vc = [[SLLogViewController alloc] init];
+            [self.navigationController pushViewController:vc animated:YES];
+        } else {
+            [self sl_previewFloatState];
+        }
         return;
     }
+}
+
+// v0.4.53：动画预览。录音 / 合成是过程态，给 4 秒后自动落回静止态，
+// 不然预览完球会一直红着（就绪/空闲留着不动，方便对比配色）。
+- (void)sl_previewFloatState {
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"悬浮球动画预览"
+                                                               message:nil
+                                                        preferredStyle:UIAlertControllerStyleActionSheet];
+    NSArray<NSString *> *names = @[@"空闲 · 灰", @"录音中 · 红", @"合成中 · 蓝", @"就绪 · 绿"];
+    for (NSInteger i = 0; i < (NSInteger)names.count; i++) {
+        SLFloatState st = (SLFloatState)i;
+        [ac addAction:[UIAlertAction actionWithTitle:names[i]
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(UIAlertAction *a) {
+            SLFloatSetState(st);
+            if (st == SLFloatStateRecording || st == SLFloatStateSynthesizing) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    SLFloatSetState([SLVoicePack isOneShotPending] ? SLFloatStateReady : SLFloatStateIdle);
+                });
+            }
+        }]];
+    }
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    // actionSheet 在 iPad / 大屏上必须有锚点，否则直接崩
+    ac.popoverPresentationController.sourceView = self.view;
+    ac.popoverPresentationController.sourceRect =
+        CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 1, 1);
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)sl_auditionChanged:(UISwitch *)sw {

@@ -22,8 +22,12 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 #define kCellFont [UIFont systemFontOfSize:15]
 
-@interface AWECATTSVoiceListController () <UISearchBarDelegate, PHPickerViewControllerDelegate>
-@property (nonatomic, strong) UISearchBar *searchBar;
+@interface AWECATTSVoiceListController () <UITextFieldDelegate, PHPickerViewControllerDelegate>
+// v0.4.53：UISearchBar 换成自绘玻璃胶囊 + UITextField。
+// UISearchBar 就算设 Minimal，它那层背景图仍然是系统画的浅灰/白块，压在透明表格上是一块白板；
+// 而且它自带上下留白，永远贴不紧导航栏。
+@property (nonatomic, strong) UIView *searchPill;
+@property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *customVoices;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *recommendedVoices;
 @property (nonatomic, strong) NSArray<NSDictionary *> *allVoices;
@@ -79,13 +83,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     }
     self.tableView.tableFooterView = footer;
 
-    UISearchBar *sb = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 44)];
-    sb.placeholder = @"搜索音色...";
-    sb.delegate = self;
-    // v0.4.50：表格透明之后，搜索栏默认那层灰底会变成一块突兀的色块，改成最简样式。
-    sb.searchBarStyle = UISearchBarStyleMinimal;
-    self.tableView.tableHeaderView = sb;
-    self.searchBar = sb;
+    self.tableView.tableHeaderView = [self sl_makeSearchHeader];
 
     self.filteredCustom = [self.customVoices mutableCopy];
     self.filteredRecommended = [self.recommendedVoices mutableCopy];
@@ -99,6 +97,65 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     // v0.4.50：标题改胶囊。放在这里是因为「音色 / 情绪 / 收藏」几个模式的 title
     // 是在不同分支里赋的，统一在将要出现时按当前 title 重建一次最不容易漏。
     if (self.title.length) self.navigationItem.titleView = SLPillTitleView(self.title);
+    SLInstallPillBack(self);   // v0.4.53：返回键胶囊（情绪分支在 viewDidLoad 里提前 return，所以放这）
+}
+
+#pragma mark - 搜索框（自绘玻璃胶囊）
+
+- (UIView *)sl_makeSearchHeader {
+    CGFloat w = self.view.bounds.size.width;
+    // 表头高 48、胶囊高 40、上边距 4 —— 尽量贴紧导航栏，不再留系统那圈 8pt 内嵌
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 48)];
+
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(16, 4, w - 32, 40)];
+    pill.backgroundColor = [UIColor clearColor];
+    pill.layer.cornerRadius = 20;
+    pill.layer.cornerCurve = kCACornerCurveContinuous;
+    pill.layer.borderWidth = 0.8;
+    pill.layer.borderColor = SLGlassHairlineColor().CGColor;
+    pill.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+    blur.frame = pill.bounds;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    blur.layer.cornerRadius = 20;
+    blur.layer.cornerCurve = kCACornerCurveContinuous;
+    blur.layer.masksToBounds = YES;
+    blur.userInteractionEnabled = NO;
+    [pill addSubview:blur];
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
+    icon.tintColor = [UIColor secondaryLabelColor];
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    icon.frame = CGRectMake(14, 12, 16, 16);
+    [pill addSubview:icon];
+
+    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(38, 0, pill.bounds.size.width - 52, 40)];
+    tf.font = [UIFont systemFontOfSize:15];
+    tf.placeholder = @"搜索音色...";
+    tf.delegate = self;
+    tf.returnKeyType = UIReturnKeySearch;
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    tf.textColor = [UIColor labelColor];
+    tf.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [tf addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
+    [pill addSubview:tf];
+    self.searchField = tf;
+    self.searchPill = pill;
+
+    [head addSubview:pill];
+    return head;
+}
+
+- (void)sl_searchChanged {
+    self.searchText = self.searchField.text ?: @"";
+    [self filterVoices];
+    [self.tableView reloadData];
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)tf {
+    [tf resignFirstResponder];
+    return YES;
 }
 
 #pragma mark - 情绪标签管理模式
@@ -309,16 +366,6 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 #pragma mark - 搜索
 
-- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
-    self.searchText = searchText;
-    [self filterVoices];
-    [self.tableView reloadData];
-}
-
-- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
-    [searchBar resignFirstResponder];
-}
-
 - (void)filterVoices {
     if (!self.searchText || self.searchText.length == 0) {
         self.filteredCustom = [self.customVoices mutableCopy];
@@ -413,6 +460,13 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     }
 }
 
+// v0.4.53：表头高度统一 28（系统默认在 insetGrouped 下会随字体/内容浮动，同一页里两行标题能差 6pt）。
+// 收藏空组直接给 0.01 —— 配合上面返回 nil 的标题，整组就彻底消失了。
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if (self.fishMode && section == 0 && self.filteredFavorites.count == 0) return 0.01;
+    return 28;
+}
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     if (self.emotionMode) return 1;
     return self.fishMode ? 2 : AWECAVoiceSectionCount;
@@ -430,7 +484,13 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
                 (unsigned long)mgr.fishEmotionAll.count, (unsigned long)mgr.fishEmotionSel.count];
     }
     if (self.fishMode) {
-        if (section == 0) return [NSString stringWithFormat:@"收藏 (%lu)", (unsigned long)self.filteredFavorites.count];
+        // v0.4.53：收藏为空时不画「收藏 (0)」这个空壳分组标题 ——
+        // 没收藏过的人一进来先看到一行空标题，会以为页面坏了。
+        if (section == 0) {
+            return self.filteredFavorites.count
+                ? [NSString stringWithFormat:@"收藏 (%lu)", (unsigned long)self.filteredFavorites.count]
+                : nil;
+        }
         return [NSString stringWithFormat:@"我导入的音色 (%lu)", (unsigned long)self.filteredCustom.count];
     }
     switch (section) {

@@ -47,10 +47,35 @@ static UIColor *SLGoldBg(void) {
     return [UIColor colorWithRed:0.980 green:0.933 blue:0.855 alpha:1.0];
 }
 static UIColor *SLChipBg(void) {
-    return [UIColor colorWithRed:0.945 green:0.937 blue:0.910 alpha:1.0];
+    // v0.4.53：跟深色模式。原来写死米白，夜里进地图页整排坐标芯片是亮的。
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithWhite:1.0 alpha:0.12]
+            : [UIColor colorWithRed:0.945 green:0.937 blue:0.910 alpha:1.0];
+    }];
 }
 static UIColor *SLHairline(void) {
-    return [UIColor colorWithWhite:0 alpha:0.06];
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithWhite:1.0 alpha:0.10]
+            : [UIColor colorWithWhite:0 alpha:0.06];
+    }];
+}
+// 卡片顶部的拖拽把手：原来固定 0.83 白，深色下等于一根发光条。
+static UIColor *SLGrabberColor(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [UIColor colorWithWhite:1.0 alpha:0.28]
+            : [UIColor colorWithWhite:0.83 alpha:1.0];
+    }];
+}
+// 定位图标的浅蓝底：深色下用强调色的低透明度，别让整张卡片中间亮一块。
+static UIColor *SLBadgeBg(void) {
+    return [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *tc) {
+        return tc.userInterfaceStyle == UIUserInterfaceStyleDark
+            ? [[UIColor colorWithRed:0.216 green:0.541 blue:0.867 alpha:1.0] colorWithAlphaComponent:0.24]
+            : [UIColor colorWithRed:0.902 green:0.945 blue:0.984 alpha:1.0];
+    }];
 }
 
 @interface SLMapPickerController () <MKMapViewDelegate, UITextFieldDelegate,
@@ -201,7 +226,8 @@ static UIColor *SLHairline(void) {
     self.navigationItem.titleView = self.searchCapsule;
     // v0.4.50：返回键换成毛玻璃胶囊（跟设置页的「完成」同一套控件）。
     // 自绘 leftBarButtonItem 会顶掉系统返回键，iOS 也就顺手禁掉侧滑，所以下面把手势代理接回来。
-    self.navigationItem.leftBarButtonItem = SLPillIconBarItem(@"chevron.left", @"返回", self, @selector(sl_backTap));
+    // v0.4.53：返回键高 40，跟右侧搜索胶囊等高（原来 32，顶部一高一矮）
+    self.navigationItem.leftBarButtonItem = SLPillIconBarItemSized(@"chevron.left", @"返回", 40, self, @selector(sl_backTap));
     UIGestureRecognizer *pop = self.navigationController.interactivePopGestureRecognizer;
     if (pop) pop.delegate = self;
 }
@@ -485,12 +511,12 @@ static UIColor *SLHairline(void) {
     [panel addSubview:glass];
 
     self.grabber = [[UIView alloc] initWithFrame:CGRectZero];
-    self.grabber.backgroundColor = [UIColor colorWithWhite:0.83 alpha:1];
+    self.grabber.backgroundColor = SLGrabberColor();
     self.grabber.layer.cornerRadius = 2.5;
     [panel addSubview:self.grabber];
 
     self.iconBadge = [[UIView alloc] initWithFrame:CGRectZero];
-    self.iconBadge.backgroundColor = [UIColor colorWithRed:0.902 green:0.945 blue:0.984 alpha:1.0];
+    self.iconBadge.backgroundColor = SLBadgeBg();
     self.iconBadge.layer.cornerRadius = 12;
     self.iconBadge.layer.cornerCurve = kCACornerCurveContinuous;
     [panel addSubview:self.iconBadge];

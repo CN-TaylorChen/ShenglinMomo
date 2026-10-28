@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.52"
+#define SLVersion @"0.4.53"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -1421,7 +1421,53 @@ static void SLDrainRemainingPCM(NSString *why) {
 // 录音必然要建总线并给出 ASBD，sendPcmPrepareWithASBD: 是唯一必经的关口，改从那里点亮。
 static BOOL gSLRecordingUI = NO;
 
+// v0.4.53：录音态不再靠「陌陌主动通知我录完了」来收尾。
+// 0.4.52 点亮的三个入口（总线 ASBD / 临时路径 / 编码器首帧）里，总线入口是每按必走；
+// 可收尾的四个点全是「录完了才调」的路径：置空 tempAudioPath / stopRecord（只对 4 个
+// 类名装得上，陌陌真实类名不在名单里就等于没装）/ recordSucessStoreAt（只在上滑发送
+// 成功时调）/ 180 秒超时。用户录音中途点「取消」，这四个一条都不触发 → 球一直红到
+// 180 秒，看起来就是「永远红」。
+//
+// 解决办法：录音是一个持续出帧的流（每 20~40ms 一帧，录到静音也照样出帧），
+// 所以「有没有帧」本身就是唯一可靠的活体信号 —— 超过 2.5 秒没有新帧，
+// 无论用户是松手、取消、还是被来电/跳转打断，都判定停录，立刻落回就绪/空闲。
+// 这样就不用猜陌陌把取消方法叫什么名字。
+static NSTimeInterval gSLLastPcmAt = 0;    // 最近一帧 PCM 的到达时间
+static NSTimeInterval gSLRecBeganAt = 0;   // 本轮点亮时间（一帧都没有时的兜底基准）
+static BOOL gSLRecWatchdog = NO;           // 轮询是否在跑，避免重复挂
+
 static void SLMarkRecordingEnded(void);   // 供上面超时兜底的 block 调用
+static void SLRecWatchdogTick(void);
+
+// 每来一帧就踢一脚。所有取帧点（编码器 / sendPcm / 总线准备）都要调。
+static void SLRecWatchdogKick(void) {
+    gSLLastPcmAt = [[NSDate date] timeIntervalSince1970];
+}
+
+static void SLRecWatchdogStart(void) {
+    if (gSLRecWatchdog) return;
+    gSLRecWatchdog = YES;
+    SLRecWatchdogTick();
+}
+
+static void SLRecWatchdogTick(void) {
+    if (!gSLRecordingUI) { gSLRecWatchdog = NO; return; }
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    // 有帧：以最后一帧为基准，2.5 秒静默就算停。
+    // 一帧都没有（只调了准备、其实没在录）：放到 10 秒 —— 万一某个版本是攒够一批才喂
+    // 编码器，帧间隔会很长，3 秒就收会把正在录的球提前按成绿色。
+    NSTimeInterval ref   = gSLLastPcmAt > 0 ? gSLLastPcmAt : gSLRecBeganAt;
+    NSTimeInterval limit = gSLLastPcmAt > 0 ? 2.5 : 10.0;
+    if (now - ref > limit) {
+        SLLog(@"REC-UI %.1fs 无新音频帧（有帧=%d）→ 判定已停录",
+              now - ref, gSLLastPcmAt > 0 ? 1 : 0);
+        gSLRecWatchdog = NO;
+        SLMarkRecordingEnded();
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ SLRecWatchdogTick(); });
+}
 
 // 落回哪个静止态，唯一真相是「有没有装填」，与 gSLTTSAudioPath 无关 ——
 // 那条变量只表示「槽位里此刻有没有可直接接管的具体音频」：选语音包时会被
@@ -1435,10 +1481,14 @@ static SLFloatState SLRestingState(void) {
 static void SLMarkRecordingStarted(void) {
     if (gSLRecordingUI) return;
     gSLRecordingUI = YES;
+    gSLRecBeganAt = [[NSDate date] timeIntervalSince1970];
+    gSLLastPcmAt = 0;
     SLLog(@"REC-UI 点亮录音态");
     SLFloatSetState(SLFloatStateRecording);
+    // v0.4.53：活体轮询。2.5 秒没帧就落定（松手/取消/被打断都覆盖）。
+    SLRecWatchdogStart();
     // 兜底：万一某个版本既没有停录回调、也没有落文件回调，180s 后强制落定，
-    // 绝不让球一直红着挂在那里。
+    // 绝不让球一直红着挂在那里（正常情况下活体轮询早就收了，这条基本用不到）。
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(180 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (gSLRecordingUI) {
@@ -1451,6 +1501,8 @@ static void SLMarkRecordingStarted(void) {
 static void SLMarkRecordingEnded(void) {
     if (!gSLRecordingUI) return;   // 没点亮过就不落定：初始化时的路径清空不该把装填态按灰
     gSLRecordingUI = NO;
+    gSLRecWatchdog = NO;
+    gSLLastPcmAt = 0;
     SLFloatState s = SLRestingState();
     SLLog(@"REC-UI 录音结束 → %@", s == SLFloatStateReady ? @"就绪" : @"空闲");
     SLFloatSetState(s);
@@ -1463,6 +1515,7 @@ static void SLBusArmWithASBD(id bus, AudioStreamBasicDescription asbd) {
     // 否则这段代码会在下面第三行 return，录音态永远走不到。
     // 不按 mFormatID 过滤：这函数本身就叫 sendPcmPrepareWithASBD:，给 ASBD 就是在开录音流。
     SLMarkRecordingStarted();
+    SLRecWatchdogKick();   // v0.4.53：开流也是一次活体信号，给轮询一个起点
     // v0.4.52：一次性装填。合成装填优先；否则看有没有待发的那一发。
     if (!gSLTTSAudioPath && !SLArmPackAutoQuiet()) return;
     if (gSLTTSPCM16k.length == 0) { SLLog(@"BUS-PREP 没有 AI PCM，本次不接管"); return; }
@@ -1512,6 +1565,7 @@ static void SLPcmPrepareByPointer(id self, SEL _cmd, AudioStreamBasicDescription
 static void SLPcmFeedObjC(id self, SEL _cmd, id data, unsigned long long size) {
     void (*orig)(id, SEL, id, unsigned long long) =
         (void (*)(id, SEL, id, unsigned long long))SLGetOrigIMP(self, _cmd);
+    SLRecWatchdogKick();   // v0.4.53：有帧 = 还在录
     if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
         if (size > 0) gSLBusChunkSize = (NSUInteger)size;
         NSData *d = SLBusNextChunk((NSUInteger)size);
@@ -1529,6 +1583,7 @@ static void SLPcmFeedObjC(id self, SEL _cmd, id data, unsigned long long size) {
 static void SLPcmFeedRaw(id self, SEL _cmd, void *data, unsigned long long size) {
     void (*orig)(id, SEL, void *, unsigned long long) =
         (void (*)(id, SEL, void *, unsigned long long))SLGetOrigIMP(self, _cmd);
+    SLRecWatchdogKick();   // v0.4.53：有帧 = 还在录
     if (gSLBusActive && (gSLBusRef == nil || self == gSLBusRef)) {
         if (size > 0) gSLBusChunkSize = (NSUInteger)size;
         NSData *d = SLBusNextChunk((NSUInteger)size);
@@ -1583,11 +1638,23 @@ static void SLStopRecordHook(id self, SEL _cmd) {
 
 static void SLInstallStopRecordHook(Class cls) {
     if (!cls) return;
-    SEL sel = NSSelectorFromString(@"stopRecord");
-    NSMethodSignature *sig = SLSigOf(cls, sel);
-    if (!sig || sig.numberOfArguments != 2) return;
-    if (SLRegisterMethod(cls, sel, (IMP)SLStopRecordHook)) {
-        SLLog(@"DRAIN-HOOK %s -> stopRecord", class_getName(cls));
+    // v0.4.53：除了 stopRecord，把「取消 / 丢弃」这一系也挂上。
+    // 用户录音中途点取消时走的往往不是 stopRecord，而是 cancel/delete/discard 一类；
+    // 以前只挂 stopRecord，取消就完全没人通知我们 → 球一直红。
+    // 只在这几个候选录音机类上装，且只钩无参方法，撞到别的方法的概率很低；
+    // 真正的活体兜底是 SLRecWatchdogTick（2.5 秒没帧就落定），这里只是让它更快一点。
+    NSArray *names = @[@"stopRecord", @"stopRecording", @"cancelRecord", @"cancelRecording",
+                       @"deleteRecord", @"discardRecord", @"abandonRecord",
+                       @"endRecording", @"endRecord"];
+    NSMutableArray *hits = [NSMutableArray array];
+    for (NSString *n in names) {
+        SEL sel = NSSelectorFromString(n);
+        NSMethodSignature *sig = SLSigOf(cls, sel);
+        if (!sig || sig.numberOfArguments != 2) continue;   // 只钩无参
+        if (SLRegisterMethod(cls, sel, (IMP)SLStopRecordHook)) [hits addObject:n];
+    }
+    if (hits.count) {
+        SLLog(@"DRAIN-HOOK %s -> %@", class_getName(cls), [hits componentsJoinedByString:@" "]);
     }
 }
 
@@ -1743,7 +1810,10 @@ static void SLEncodePcmDataHook(id self, SEL _cmd, id data) {
     void (*orig)(id, SEL, id) = (void (*)(id, SEL, id))SLGetOrigIMP(self, _cmd);
     // v0.4.52：编码器拿到第一帧真 PCM = 确定正在录音。第三条保险
     //（总线 ASBD / 临时路径 / 这里，任一命中都会点亮，幂等不重复）。
-    if ([data isKindOfClass:[NSData class]] && [(NSData *)data length] > 0) SLMarkRecordingStarted();
+    if ([data isKindOfClass:[NSData class]] && [(NSData *)data length] > 0) {
+        SLMarkRecordingStarted();
+        SLRecWatchdogKick();   // v0.4.53：编码器每帧都算活体信号
+    }
     // 我们自己补喂的字节：原样放行，否则会被再换一遍变成无限套
     if (gSLForcePassBytes > 0 && [data isKindOfClass:[NSData class]]) {
         NSUInteger n = [data length];
@@ -1884,6 +1954,8 @@ static void SLConsumeArmedOnSend(void) {
     gSLAutoPackName = nil;
     [SLVoicePack setOneShotPending:NO];
     gSLRecordingUI = NO;   // v0.4.52：这一发已经发出去，别再留着录音态标记
+    gSLRecWatchdog = NO;   // v0.4.53：活体轮询也一起停，避免下一拍又把状态改回去
+    gSLLastPcmAt = 0;
     SLFloatSetState(SLFloatStateIdle);
 }
 
@@ -2594,6 +2666,17 @@ NSString *SLHookStatusSummary(void) {
                                                       usingBlock:^(NSNotification *n) {
             @try { SLInstallHooks(); } @catch (NSException *e) {}
             @try { SLDumpUniverseClassesOnce(); } @catch (NSException *e) {}
+        }];
+        // v0.4.53：切后台时若还挂着录音态，强制落定。
+        // 后台不会再出帧，与其让球红着挂在那儿、切回来还是红的，不如当场收干净。
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *n) {
+            if (gSLRecordingUI) {
+                SLLog(@"REC-UI 进后台强制落定");
+                SLMarkRecordingEnded();
+            }
         }];
     });
 }

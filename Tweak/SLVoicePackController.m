@@ -256,11 +256,14 @@ static UIImage *SLPauseGlyph(void) {
     // v0.4.34：浮窗根页没有返回可点，给一个「完成」直接收窗
     BOOL navRoot = self.navigationController.viewControllers.firstObject == self;
     if (navRoot) {
-        if (!self.navigationItem.leftBarButtonItem) {
-            self.navigationItem.leftBarButtonItem = SLPillBarItem(@"完成", self, @selector(sl_closeModal));
-        }
+        // v0.4.53：根页一律回到「完成」，把子页留下的胶囊返回键 / hidesBackButton 复位，
+        // 否则从文件夹退回根页时左上角还挂着一颗返回箭头。
+        self.navigationItem.hidesBackButton = NO;
+        self.navigationItem.leftBarButtonItem = SLPillBarItem(@"完成", self, @selector(sl_closeModal));
     } else {
+        // v0.4.53：子页（文件夹 / 详情）也走胶囊返回键，别再退回系统那颗裸箭头
         self.navigationItem.leftBarButtonItem = nil;
+        SLInstallPillBack(self);
     }
     [self sl_reload];
 }

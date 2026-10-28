@@ -18,21 +18,39 @@ UIColor *SLGlassCellColor(void);
 /// 发丝高光边（深色 16% 白 / 浅色 55% 白），0.8pt。玻璃的「厚度」全靠这一圈。
 UIColor *SLGlassHairlineColor(void);
 
+/// 导航栏胶囊的底（深色 14% 白 / 浅色 60% 白）。bar item 里毛玻璃不渲染，只能用它顶上。
+UIColor *SLGlassPillFillColor(void);
+
 /// 给表格铺玻璃：table 本身透明 + backgroundView 换成超薄毛玻璃（设置页那张）。
 void SLApplyGlassTable(UITableView *tv);
 
 /// 给任意 view 铺玻璃底（自绘页面 / 日志页用），返回铺好的 blur，调用方可继续往 contentView 里放东西。
 UIVisualEffectView *_Nullable SLInstallGlassBackdrop(UIView *host);
 
-/// 胶囊导航按钮（毛玻璃 + 文字 + 发丝高光），用于「完成 / 保存 / 刷新 / 复制 / 清空」。
+/// 胶囊导航按钮（毛玻璃 + 文字 + 发丝高光），用于「完成 / 保存 / 刷新 / 复制 / 清空」。默认高 32。
 UIBarButtonItem *SLPillBarItem(NSString *title, id target, SEL action);
 
-/// 胶囊图标按钮（返回箭头之类）。icon 为空时退回文字。
+/// 指定高度的胶囊文字按钮（要跟同页搜索框对齐时用，例如地图页返回键 40pt）。
+UIBarButtonItem *SLPillBarItemSized(NSString *title, CGFloat height, id target, SEL action);
+
+/// 胶囊图标按钮（返回箭头之类）。icon 为空时退回文字。默认高 32。
 UIBarButtonItem *SLPillIconBarItem(NSString *_Nullable systemName,
                                    NSString *_Nullable fallbackTitle,
                                    id target, SEL action);
 
-/// 胶囊标题（二级页复用设置页那套：毛玻璃胶囊 + 15pt 文字）。
+/// 指定高度的胶囊图标按钮。
+UIBarButtonItem *SLPillIconBarItemSized(NSString *_Nullable systemName,
+                                        NSString *_Nullable fallbackTitle,
+                                        CGFloat height, id target, SEL action);
+
+/// 胶囊标题（二级页复用设置页那套：毛玻璃胶囊 + 15pt 文字）。默认高 32，与「完成」等高。
 UIView *SLPillTitleView(NSString *text);
+
+/// 把系统返回键换成胶囊返回键（默认高 32），顺带把侧滑返回手势接回来。
+/// 已经自带 leftBarButtonItem 的页面会被跳过（不顶掉「完成」这类按钮）。
+void SLInstallPillBack(UIViewController *vc);
+
+/// 同上，可指定高度（地图页要 40pt，跟搜索框等高）。
+void SLInstallPillBackSized(UIViewController *vc, CGFloat height);
 
 NS_ASSUME_NONNULL_END

@@ -462,6 +462,7 @@ static UIColor *SLFavAccent(void) {
     self.title = @"收藏的位置";
     // v0.4.50：跟设置页统一 —— 毛玻璃底 + 胶囊标题 + 胶囊「编辑 / 完成」
     self.navigationItem.titleView = SLPillTitleView(@"收藏的位置");
+    SLInstallPillBack(self);   // v0.4.53：返回键胶囊
     SLInstallGlassBackdrop(self.view);
     self.view.backgroundColor = SLFavPageBg();
     self.navigationItem.rightBarButtonItem = SLPillBarItem(@"编辑", self, @selector(sl_toggleEdit));

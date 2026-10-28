@@ -132,6 +132,7 @@ static UIView *AWECAMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     self.title = @"API 凭证";
     // v0.4.50：跟设置页统一 —— 透明表格 + 超薄毛玻璃底，标题与「完成」都走胶囊
     self.navigationItem.titleView = SLPillTitleView(@"API 凭证");
+    SLInstallPillBack(self);   // v0.4.53：返回键也走胶囊，跟标题 / 完成一套
     SLApplyGlassTable(self.tableView);
     self.tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 0);
     self.tableView.estimatedSectionFooterHeight = 28;

@@ -141,6 +141,7 @@
     self.title = @"裁剪";
     // v0.4.50：跟设置页统一 —— 毛玻璃底 + 胶囊标题 + 胶囊「保存」
     self.navigationItem.titleView = SLPillTitleView(@"裁剪");
+    SLInstallPillBack(self);   // v0.4.53：返回键胶囊
     SLInstallGlassBackdrop(self.view);
     self.navigationItem.rightBarButtonItem = SLPillBarItem(@"保存", self, @selector(sl_save));
 

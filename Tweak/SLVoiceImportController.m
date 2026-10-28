@@ -7,11 +7,14 @@
 
 #define kSLFishModelURL @"https://api.fish.audio/model"
 
-@interface SLVoiceImportController () <UISearchBarDelegate, UITextViewDelegate>
+@interface SLVoiceImportController () <UITextFieldDelegate, UITextViewDelegate>
 @property (nonatomic, assign) SLImportMode mode;
 @property (nonatomic, strong) NSArray<NSDictionary *> *items;
 @property (nonatomic, strong) NSMutableSet<NSString *> *selected;
-@property (nonatomic, strong) UISearchBar *searchBar;
+// v0.4.53：UISearchBar 换掉 —— 它自带一层不透明底（浅灰/白），在玻璃页上就是一块白板，
+// 而且关不掉圆角外的那圈背景。改成自绘玻璃胶囊 + UITextField，跟地图页搜索框一套。
+@property (nonatomic, strong) UIView *searchPill;
+@property (nonatomic, strong) UITextField *searchField;
 @property (nonatomic, copy) NSString *searchText;
 @property (nonatomic, assign) BOOL loading;
 @property (nonatomic, copy) NSString *status;
@@ -31,6 +34,7 @@
     self.title = @"导入 Fish 音色";
     // v0.4.50：跟设置页统一 —— 毛玻璃底 + 胶囊标题 + 胶囊「导入」
     self.navigationItem.titleView = SLPillTitleView(@"导入音色");
+    SLInstallPillBack(self);   // v0.4.53：返回键胶囊
     SLApplyGlassTable(self.tableView);
     self.selected = [NSMutableSet set];
     self.items = @[];
@@ -44,30 +48,77 @@
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    if (self.mode == SLImportModeSearch) [self.searchBar becomeFirstResponder];
+    if (self.mode == SLImportModeSearch) [self.searchField becomeFirstResponder];
 }
 
 #pragma mark - 搜索栏
 
+// 玻璃胶囊搜索框：超薄毛玻璃 + 0.8pt 发丝边 + 全圆角，里面一个放大镜 + 输入框。
+// 不再用 UISearchBar（它那层背景色在透明表格上是一块白底，也去不干净）。
+- (UIView *)sl_makeSearchPill:(CGFloat)width {
+    CGFloat h = 38.0;
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(16, 7, width - 32, h)];
+    box.layer.cornerRadius = h / 2.0;
+    box.layer.cornerCurve = kCACornerCurveContinuous;
+    box.layer.borderWidth = 0.8;
+    box.layer.borderColor = SLGlassHairlineColor().CGColor;
+    box.backgroundColor = [UIColor clearColor];
+
+    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
+    blur.frame = box.bounds;
+    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    blur.layer.cornerRadius = h / 2.0;
+    blur.layer.cornerCurve = kCACornerCurveContinuous;
+    blur.layer.masksToBounds = YES;
+    blur.userInteractionEnabled = NO;
+    [box addSubview:blur];
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
+    icon.tintColor = [UIColor secondaryLabelColor];
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    icon.frame = CGRectMake(14, (h - 16) / 2.0, 16, 16);
+    [box addSubview:icon];
+
+    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(38, 0, box.bounds.size.width - 38 - 14, h)];
+    tf.font = [UIFont systemFontOfSize:15];
+    tf.placeholder = @"搜 Fish 公开音色，如：温柔 女声";
+    tf.delegate = self;
+    tf.returnKeyType = UIReturnKeySearch;
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    tf.textColor = [UIColor labelColor];
+    tf.autoresizingMask = UIViewAutoresizingFlexibleWidth;
+    [tf addTarget:self action:@selector(sl_searchChanged) forControlEvents:UIControlEventEditingChanged];
+    [box addSubview:tf];
+    self.searchField = tf;
+    return box;
+}
+
 - (void)sl_syncSearchBar {
     if (self.mode == SLImportModeSearch) {
-        if (!self.searchBar) {
-            UISearchBar *sb = [[UISearchBar alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 52)];
-            sb.placeholder = @"搜 Fish 公开音色，如：温柔 女声";
-            sb.delegate = self;
-            sb.showsCancelButton = NO;
-            self.searchBar = sb;
+        if (!self.searchPill) {
+            self.searchPill = [self sl_makeSearchPill:self.view.bounds.size.width];
         }
-        self.tableView.tableHeaderView = self.searchBar;
+        // 宽度跟着表格走：tableHeaderView 不会自动 resize，旋转/分屏后要手动重排
+        CGRect f = self.searchPill.frame;
+        f.size.width = self.view.bounds.size.width - 32;
+        self.searchPill.frame = f;
+        self.searchPill.subviews.firstObject.frame = self.searchPill.bounds;   // blur
+        self.tableView.tableHeaderView = self.searchPill;
+        self.tableView.tableHeaderView.frame = CGRectMake(0, 0, self.view.bounds.size.width, 52);
     } else {
         self.tableView.tableHeaderView = nil;
     }
 }
 
-- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
-    [searchBar resignFirstResponder];
-    self.searchText = searchBar.text ?: @"";
+- (void)sl_searchChanged {
+    self.searchText = self.searchField.text ?: @"";
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)tf {
+    [tf resignFirstResponder];
+    self.searchText = tf.text ?: @"";
     [self sl_fetchSearch:self.searchText];
+    return YES;
 }
 
 #pragma mark - 数据源
@@ -93,16 +144,73 @@
     return _sourceSeg;
 }
 
+// v0.4.53：列表模式改成自绘表头 —— 左边「已选 0 / 20」，右边「全选 / 全取消」。
+// 原来这行只是文字，而且默认全选，用户想只导一个得先逐个点掉，很别扭。
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return nil;   // 卡片里只有一个控件，小标题多余
+    if (section != 1) return nil;   // 0 区卡片里只有一个分段控件，小标题多余
     if (self.mode == SLImportModePaste) return @"粘贴音色列表 JSON";
-    if (self.mode == SLImportModeMine) {
-        return self.items.count
-            ? [NSString stringWithFormat:@"我的音色 · 共 %lu 个（默认全选）", (unsigned long)self.items.count]
-            : @"我的音色";
+    return nil;                     // 列表模式走 viewForHeaderInSection
+}
+
+static UIButton *SLMiniPill(NSString *title, id target, SEL action) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+    UIFont *font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+    [b setTitle:title forState:UIControlStateNormal];
+    b.titleLabel.font = font;
+    [b setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+    b.backgroundColor = SLGlassPillFillColor();
+    b.layer.cornerRadius = 13;
+    b.layer.cornerCurve = kCACornerCurveContinuous;
+    b.layer.borderWidth = 0.8;
+    b.layer.borderColor = SLGlassHairlineColor().CGColor;
+    CGSize ts = [title sizeWithAttributes:@{NSFontAttributeName: font}];
+    b.frame = CGRectMake(0, 0, ceil(ts.width) + 24, 26);
+    [b addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+
+- (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
+    if (section != 1 || self.mode == SLImportModePaste) return nil;
+    CGFloat w = tv.bounds.size.width;
+    UIView *head = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, 40)];
+
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectMake(32, 0, w - 200, 40)];
+    lab.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    lab.textColor = [UIColor secondaryLabelColor];
+    lab.text = [NSString stringWithFormat:@"已选 %lu / %lu",
+                (unsigned long)self.selected.count, (unsigned long)self.items.count];
+    [head addSubview:lab];
+
+    UIButton *all = SLMiniPill(@"全选", self, @selector(sl_selectAll));
+    UIButton *none = SLMiniPill(@"全取消", self, @selector(sl_clearSelection));
+    CGFloat right = w - 32;
+    all.frame = CGRectMake(right - all.frame.size.width, 7, all.frame.size.width, 26);
+    none.frame = CGRectMake(CGRectGetMinX(all.frame) - 8 - none.frame.size.width, 7,
+                            none.frame.size.width, 26);
+    [head addSubview:none];
+    [head addSubview:all];
+    return head;
+}
+
+- (CGFloat)tableView:(UITableView *)tv heightForHeaderInSection:(NSInteger)section {
+    (void)tv;
+    if (section == 1) return (self.mode == SLImportModePaste) ? 28 : 40;
+    return 0.01;
+}
+
+- (void)sl_selectAll {
+    [self.selected removeAllObjects];
+    for (NSDictionary *v in self.items) {
+        NSString *vid = v[@"voiceType"];
+        if (vid.length) [self.selected addObject:vid];
     }
-    return self.searchText.length ? [NSString stringWithFormat:@"搜索结果「%@」", self.searchText] : @"搜索结果";
+    [self.tableView reloadData];
+}
+
+- (void)sl_clearSelection {
+    [self.selected removeAllObjects];
+    [self.tableView reloadData];
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
@@ -236,7 +344,7 @@
     if (self.mode == SLImportModeMine) {
         [self sl_fetchMine];
     } else if (self.mode == SLImportModeSearch) {
-        [self.searchBar becomeFirstResponder];
+        [self.searchField becomeFirstResponder];
     }
 }
 
@@ -309,11 +417,9 @@
                 self2.status = msg;
             } else {
                 self2.items = parsed;
+                // v0.4.53：默认一个都不选（原来默认全选，用户想只导一个还得逐个取消）。
+                // 现在是「要哪个点哪个」，表头有「全选 / 全取消」。
                 [self2.selected removeAllObjects];
-                for (NSDictionary *v in parsed) {
-                    NSString *vid = v[@"voiceType"];
-                    if (vid.length) [self2.selected addObject:vid];
-                }
                 self2.status = parsed.count ? nil : @"这个账号下没有音色";
             }
             [self2.tableView reloadData];
