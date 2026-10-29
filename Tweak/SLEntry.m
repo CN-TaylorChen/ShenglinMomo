@@ -1073,6 +1073,12 @@ static UIImage *SLTransparentImage(void) {
         CGPoint p = [g locationInView:self];
         if (!CGRectContainsPoint(_homeBtn.frame, p)) return;
     }
+    // v0.4.65：设置已开着时长按球 = 关闭设置（不必再点「完成」）
+    if ([SLFloatPanelController isSettingsOpen]) {
+        [SLFloatPanelController dismissSettings];
+        _longPressAt = CFAbsoluteTimeGetCurrent();
+        return;
+    }
     UIViewController *top = [AWECAUtils topViewController];
     if (!top) return;
     [SLFloatPanelController presentSettingsFrom:top];
@@ -1631,6 +1637,16 @@ static SLFloatPanelController *sSLFloatPanel = nil;
 
 + (void)presentSettingsFrom:(UIViewController *)host {
     [self presentFrom:host root:[[SLSettingsPanel alloc] init]];
+}
+
++ (BOOL)isSettingsOpen {
+    return sSLFloatPanel && sSLFloatPanel.presentingViewController != nil;
+}
+
++ (void)dismissSettings {
+    if (sSLFloatPanel && sSLFloatPanel.presentingViewController) {
+        [sSLFloatPanel sl_dismiss];
+    }
 }
 
 + (void)presentVoicePackFrom:(UIViewController *)host {
