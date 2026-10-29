@@ -42,9 +42,9 @@ static NSString *SLFloatIconImagePath(NSString *name) {
 // 把图片降采样成 32×6 再交给 UIImageView 拉伸，靠 layer 的线性插值自己平滑成一条横向色带。
 // 只留大块明暗与色相分布、不留任何细节，所以胶囊上不会出现「一张缩略图糊上去」。
 // 取景跟 _thumb 的 aspectFill 对齐（中心横条），色晕和图标才是同一段画面。
-static UIImage *SLHazeImage(UIImage *src) {
-    if (!src.CGImage) return nil;
-    const size_t w = 32, h = 6;
+// v0.4.76：目标网格改成参数 —— 胶囊用 32×6；列表卡片用 6×1（面积大，32 段会拉出竖光带）。
+static UIImage *SLHazeImage(UIImage *src, size_t w, size_t h) {
+    if (!src.CGImage || w == 0 || h == 0) return nil;
     unsigned char *buf = (unsigned char *)calloc(w * h * 4, sizeof(unsigned char));
     if (!buf) return nil;
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -261,6 +261,12 @@ static UIImage *SLTransparentImage(void) {
 /// v0.4.75：色晕（胶囊底色）挂载与刷新
 - (void)sl_updateIconMotion;
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated;
+/// v0.4.76：当前自定义图标（没选图返回 nil）。语音包列表要拿它铺同源底色。
+- (UIImage *)sl_customIconImage;
+/// v0.4.76：名字滚动 / 换名后重算宽度
+- (void)sl_layoutNameMarquee;
+- (void)sl_startNameMarquee;
+- (void)sl_resizePillForName;
 /// v0.4.45：回到前台重挂呼吸光晕（后台期间动画会被系统整条移除）
 - (void)sl_restartHalo;
 /// v0.4.46：拖动中越过中线翻面 / 松手贴边
@@ -288,13 +294,17 @@ static UIImage *SLTransparentImage(void) {
 @end
 
 @interface SLPackMenuRow : UIControl
+- (void)sl_layoutTitleMarquee;
 @property (nonatomic, strong) UIButton *play;
 @property (nonatomic, strong) UIImageView *icon;
 @property (nonatomic, strong) UILabel *title;
 @property (nonatomic, strong) UIImageView *check;
 @end
 
-@implementation SLPackMenuRow
+@implementation SLPackMenuRow {
+    UIView *_titleClip;
+}
+
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
@@ -318,7 +328,12 @@ static UIImage *SLTransparentImage(void) {
         _title.textColor = [UIColor labelColor];
         _title.lineBreakMode = NSLineBreakByTruncatingMiddle;
         _title.userInteractionEnabled = NO;
-        [self addSubview:_title];
+        // v0.4.76：跟胶囊同名处理 —— 放不下就滚，放得下就静止。
+        _titleClip = [[UIView alloc] initWithFrame:CGRectZero];
+        _titleClip.clipsToBounds = YES;
+        _titleClip.userInteractionEnabled = NO;
+        [_titleClip addSubview:_title];
+        [self addSubview:_titleClip];
 
         // v0.4.40：原声不再是列表里的一行 —— 撤销靠「再点一次已选中的那条」。
         // v0.4.41：右侧永远有一个圈。以前只在选中时冒出一个圆叉，未选中整条右边空着，
@@ -344,7 +359,33 @@ static UIImage *SLTransparentImage(void) {
     CGFloat right = CGRectGetWidth(b) - 12.0;
     _check.frame = CGRectMake(right - 18.0, (h - 18.0) / 2.0, 18.0, 18.0);
     CGFloat tw = CGRectGetMinX(_check.frame) - 8.0 - 50.0;
-    _title.frame = CGRectMake(50.0, 0, MAX(0, tw), h);
+    _titleClip.frame = CGRectMake(50.0, 0, MAX(0, tw), h);
+    [self sl_layoutTitleMarquee];
+}
+
+/// v0.4.76：行内名字滚动。规则跟胶囊一样：放不下才滚，26pt/s，两端各停 1.2s。
+- (void)sl_layoutTitleMarquee {
+    CGFloat cw = CGRectGetWidth(_titleClip.bounds), chh = CGRectGetHeight(_titleClip.bounds);
+    if (cw <= 0.0) return;
+    [_title.layer removeAnimationForKey:@"slRowMarquee"];
+    CGSize sz = [_title sizeThatFits:CGSizeMake(CGFLOAT_MAX, chh)];
+    CGFloat tw = ceil(sz.width);
+    if (tw <= cw - 6.0) {
+        _title.frame = CGRectMake(0, 0, cw, chh);
+        _title.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        return;
+    }
+    _title.frame = CGRectMake(0, 0, tw, chh);
+    _title.lineBreakMode = NSLineBreakByClipping;
+    CGFloat dist = tw - cw + 4.0;
+    CGFloat hold = 1.2, move = MAX(1.6, dist / 26.0), total = hold + move + hold;
+    CAKeyframeAnimation *a = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
+    a.values = @[@0.0, @0.0, @(-dist), @(-dist), @0.0];
+    a.keyTimes = @[@0.0, @(hold / total), @((hold + move) / total), @0.999, @1.0];
+    a.duration = total;
+    a.repeatCount = HUGE_VALF;
+    a.removedOnCompletion = NO;
+    [_title.layer addAnimation:a forKey:@"slRowMarquee"];
 }
 
 - (void)setHighlighted:(BOOL)highlighted {
@@ -427,6 +468,14 @@ static UIImage *SLTransparentImage(void) {
     UIView *_bars;
     UIView *_barCell[4];
     UIImageView *_thumb;
+    // v0.4.76：照片的裁剪路径。跟胶囊遮罩同一条曲线（左端圆头 / 球态正圆），
+    // 不再让照片自己 cornerRadius 裁一次，两条边对不齐就会露出半截白线。
+    CAShapeLayer *_thumbMask;
+    // v0.4.76：白勾边。原来挂在 _glassHost 的 border 上（在照片下面，被吃掉半截），
+    // 现在单独一层放在最顶上，底下是玻璃还是照片都画完整一圈。
+    CAShapeLayer *_hairline;
+    // v0.4.76：名字的裁剪窗口。名字超宽时内层 label 加宽、跑平移动画。
+    UIView *_nameClip;
     // v0.4.75：胶囊底色（图标色晕）。铺在毛玻璃内容层之上、状态色之下。
     UIImageView *_haze;
     UIView *_sep;
@@ -482,10 +531,9 @@ static UIImage *SLTransparentImage(void) {
         // 右端会留下一块白圆残影（截图里那个白圆片就是它）。
         _glassHost = [[UIView alloc] initWithFrame:CGRectZero];
         _glassHost.userInteractionEnabled = NO;
-        // v0.4.46：材质变透之后，玻璃的「存在感」全靠这圈高光 —— 0.5/0.5 太淡，
-        // 透到背景里就分不出边界在哪。加粗到 0.8、提到 0.62，像一层薄玻璃的边缘反光。
-        _glassHost.layer.borderWidth = 0.8;
-        _glassHost.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.62].CGColor;
+        // v0.4.46：材质变透之后，玻璃的「存在感」全靠这圈高光。
+        // v0.4.76：border 挪到 _hairline（见下）—— border 画在子视图下面，
+        // 照片一盖就只剩被啃过的半截线，这是那条「残线」的直接原因。
         _glassMask = [CAShapeLayer layer];
         _glassHost.layer.mask = _glassMask;
         [self addSubview:_glassHost];
@@ -531,9 +579,21 @@ static UIImage *SLTransparentImage(void) {
 
         _thumb = [[UIImageView alloc] initWithFrame:CGRectZero];
         _thumb.contentMode = UIViewContentModeScaleAspectFill;
-        _thumb.clipsToBounds = YES;
+        // v0.4.76：不再 clipsToBounds + cornerRadius 自己裁圆，改挂 _thumbMask
+        //（路径在 layoutSubviews 里按「胶囊左端圆头」重建，和 _glassMask 同一条曲线）
+        _thumbMask = [CAShapeLayer layer];
+        _thumbMask.path = [UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, SLBallSide, SLBallSide)
+                                                     cornerRadius:SLBallSide / 2.0].CGPath;
+        _thumb.layer.mask = _thumbMask;
         _thumb.userInteractionEnabled = NO;
         [self addSubview:_thumb];
+
+        // v0.4.76：白勾边。放在 _thumb 之上、其余子视图之下 —— 胶囊边缘没有别的东西压它。
+        _hairline = [CAShapeLayer layer];
+        _hairline.fillColor = [UIColor clearColor].CGColor;
+        _hairline.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.62].CGColor;
+        _hairline.lineWidth = 0.8;
+        [self.layer addSublayer:_hairline];
 
         _sep = [[UIView alloc] initWithFrame:CGRectZero];
         _sep.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.28];
@@ -548,7 +608,14 @@ static UIImage *SLTransparentImage(void) {
         // 右边空一大片，看着像没排好。
         _name.textAlignment = NSTextAlignmentCenter;
         _name.userInteractionEnabled = NO;
-        [self addSubview:_name];
+        // v0.4.76：套一层裁剪窗口。名字放得下就居中静止；放不下就把内层 label 拉宽、
+        // 跑 transform.translation.x 的滚动动画（动 transform 而不是 frame，layout 不会拍回去）。
+        _nameClip = [[UIView alloc] initWithFrame:CGRectZero];
+        _nameClip.clipsToBounds = YES;
+        _nameClip.userInteractionEnabled = NO;
+        _nameClip.hidden = YES;
+        [_nameClip addSubview:_name];
+        [self addSubview:_nameClip];
 
         // v0.4.45：中间文字区只是一块「接住触摸」的空壳，点它不做任何事。
         // 它存在的唯一意义：别让触摸落到 self（本身是 UIButton）上，
@@ -625,6 +692,12 @@ static UIImage *SLTransparentImage(void) {
 
 #pragma mark 图标
 
+- (UIImage *)sl_customIconImage {
+    NSString *v = SLFloatIconValue();
+    if (![v hasPrefix:@"image:"]) return nil;
+    return [UIImage imageWithContentsOfFile:SLFloatIconImagePath([v substringFromIndex:6])];
+}
+
 - (void)sl_loadIcon {
     NSString *v = SLFloatIconValue();
     _glyph.hidden = YES;
@@ -638,7 +711,7 @@ static UIImage *SLTransparentImage(void) {
     if (img) {
         _thumb.image = img;
         _thumb.hidden = NO;
-        _haze.image = SLHazeImage(img);
+        _haze.image = SLHazeImage(img, 32, 6);
     } else {
         _haze.image = nil;
         // 48pt 里六根条太密，前 3 根 30% 的几乎看不见，糊成一团。
@@ -649,6 +722,7 @@ static UIImage *SLTransparentImage(void) {
         _glyph.alpha = 0.0;   // v0.4.49：静态图不显示，实际由 _bars 逐根绘制 + 动画
     }
     _name.text = SLFloatPackName();
+    [self sl_resizePillForName];
     [self setNeedsLayout];
     // v0.4.74：换图标后要按新形态重挂（换成自定义图片才动，换回四杠就清干净）
     [self sl_updateIconMotion];
@@ -888,6 +962,7 @@ static UIImage *SLTransparentImage(void) {
     // v0.4.41：状态一变就重读名字。原来只改颜色不改文字，发完那一发胶囊还挂着
     // 刚才的包名 —— 用户以为没发出去，实际问题只是字没刷新。
     _name.text = SLFloatPackName();
+    [self sl_resizePillForName];
     [self setNeedsLayout];
 }
 
@@ -973,10 +1048,71 @@ static UIImage *SLTransparentImage(void) {
 #pragma mark 展开 / 收起
 
 - (CGSize)sl_pillSize {
-    // v0.4.37：胶囊宽度不再跟着包名长度变，统一撑满 196。
-    // 下拉列表要和它严格等宽，宽度固定后两条边才永远共线。
+    // v0.4.37：原来固定撑满 196，「原声」两个字也占 196，中间空 66pt。
+    // v0.4.76：宽度跟着名字走 —— 57（图标+间隔）+ 48（箭头）+ 两侧各 8pt = 121，
+    // 再加文字实际宽度；下限 146（两个字刚好），上限仍是 196，再长就靠滚动。
     _name.text = SLFloatPackName();
-    return CGSizeMake(SLPillMaxW, SLBallSide);
+    CGSize sz = [_name sizeThatFits:CGSizeMake(CGFLOAT_MAX, SLBallSide)];
+    CGFloat w = ceil(sz.width) + 121.0;
+    w = MAX(146.0, MIN(w, SLPillMaxW));
+    return CGSizeMake(w, SLBallSide);
+}
+
+/// v0.4.76：名字放得下就居中静止，放不下就把 label 拉宽跑滚动。
+/// 动的是 transform.translation.x，layoutSubviews 重排不会把它拍回 0。
+- (void)sl_layoutNameMarquee {
+    CGFloat cw = CGRectGetWidth(_nameClip.bounds);
+    CGFloat chh = CGRectGetHeight(_nameClip.bounds);
+    if (cw <= 0.0 || chh <= 0.0) return;
+    [_name.layer removeAnimationForKey:@"slNameMarquee"];
+    CGSize sz = [_name sizeThatFits:CGSizeMake(CGFLOAT_MAX, chh)];
+    CGFloat tw = ceil(sz.width);
+    if (tw <= cw - 12.0) {
+        _name.frame = CGRectMake(0, 0, cw, chh);
+        _name.textAlignment = NSTextAlignmentCenter;
+        _name.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        return;
+    }
+    _name.frame = CGRectMake(0, 0, tw, chh);
+    _name.textAlignment = NSTextAlignmentLeft;
+    _name.lineBreakMode = NSLineBreakByClipping;
+    if (!self.slExpanded || self.window == nil) return;
+    [self sl_startNameMarquee];
+}
+
+- (void)sl_startNameMarquee {
+    CGFloat cw = CGRectGetWidth(_nameClip.bounds);
+    CGFloat tw = CGRectGetWidth(_name.frame);
+    CGFloat dist = tw - cw + 6.0;
+    if (dist <= 1.0) return;
+    // 停 1.2s → 匀速左移（26pt/s，最快 1.6s）→ 末尾停 1.2s → 跳回
+    CGFloat hold = 1.2, move = MAX(1.6, dist / 26.0), total = hold + move + hold;
+    CAKeyframeAnimation *a = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
+    a.values = @[@0.0, @0.0, @(-dist), @(-dist), @0.0];
+    a.keyTimes = @[@0.0, @(hold / total), @((hold + move) / total), @0.999, @1.0];
+    a.duration = total;
+    a.repeatCount = HUGE_VALF;
+    a.removedOnCompletion = NO;
+    [_name.layer addAnimation:a forKey:@"slNameMarquee"];
+}
+
+/// v0.4.76：换包 / 状态变化后名字变了，展开态要跟着改宽度（否则会留一段空白或多截一截）
+- (void)sl_resizePillForName {
+    if (!self.slExpanded || self.window == nil) return;
+    CGSize sz = [self sl_pillSize];
+    CGRect f = self.frame;
+    if (fabs(sz.width - CGRectGetWidth(f)) < 0.5) return;
+    if (_mirrored) f.origin.x = CGRectGetMaxX(f) - sz.width;
+    f.size = sz;
+    if (self.superview) {
+        CGFloat minX = 6.0, maxX = CGRectGetWidth(self.superview.bounds) - 6.0;
+        if (CGRectGetMaxX(f) > maxX) f.origin.x = maxX - sz.width;
+        if (f.origin.x < minX) f.origin.x = minX;
+    }
+    [UIView animateWithDuration:0.22 delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
+                     animations:^{ self.frame = f; }
+                     completion:nil];
 }
 
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated {
@@ -1224,7 +1360,8 @@ static UIImage *SLTransparentImage(void) {
 
     _glassHost.frame = b;
     _glassHost.layer.cornerRadius = h / 2.0;
-    _glassHost.layer.cornerCurve = kCACornerCurveContinuous;
+    // v0.4.76：去掉 cornerCurve = continuous。描边曾经走连续曲率、遮罩走正圆，
+    // 两条曲线在圆头两端差 0.3~0.5pt，正是「白线只剩中间一段」的另一半原因。
     _glassMask.path = [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:h / 2.0].CGPath;
     // 玻璃始终是最大尺寸，只靠 mask 露出当前形状，右对齐
     // v0.4.40：镜像开关。MX(x, wd) 把「距左 x」翻成「距右 x」，宽度不变的居中元素不要用它。
@@ -1244,7 +1381,26 @@ static UIImage *SLTransparentImage(void) {
     // 改成两种形态都用满 48（左端留出一整块圆形），球和胶囊的图标视觉尺寸就一致了。
     CGFloat iconS = SLBallSide;
     _thumb.frame = exp ? CGRectMake(SLMX(0.0, iconS), 0, iconS, iconS) : b;
-    _thumb.layer.cornerRadius = MIN(CGRectGetWidth(_thumb.bounds), CGRectGetHeight(_thumb.bounds)) / 2.0;
+    // v0.4.76：照片的裁剪路径 = 胶囊左端圆头。
+    // 展开态只圆左边两角（右边是直边，照片正好当胶囊的「左端帽」），
+    // 球态四角全圆；两种都跟 _glassMask 用同一条 bezier，边缘像素天然对齐。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    {
+        CGFloat tr = iconS / 2.0;
+        CGRect tr2 = CGRectMake(0, 0, iconS, iconS);
+        UIBezierPath *tp = exp
+            ? [UIBezierPath bezierPathWithRoundedRect:tr2
+                                    byRoundingCorners:(UIRectCornerTopLeft | UIRectCornerBottomLeft)
+                                          cornerRadii:CGSizeMake(tr, tr)]
+            : [UIBezierPath bezierPathWithRoundedRect:tr2 cornerRadius:tr];
+        _thumbMask.path = tp.CGPath;
+    }
+    // v0.4.76：勾边路径跟着胶囊外形走，内缩 0.4 让 0.8pt 描边正好压在边界上。
+    _hairline.frame = b;
+    _hairline.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, 0.4, 0.4)
+                                                cornerRadius:MAX(0.0, h / 2.0 - 0.4)].CGPath;
+    [CATransaction commit];
     // v0.4.75：色晕跟玻璃同尺寸铺满（球态被 _glassMask 裁成圆）。
     _haze.frame = CGRectMake(0, 0, SLPillMaxW, h);
 
@@ -1263,7 +1419,8 @@ static UIImage *SLTransparentImage(void) {
     {
         CGFloat nx = mir ? 48.0 : 57.0;
         CGFloat nw = MAX(0.0, w - nx - (mir ? 57.0 : 48.0));
-        _name.frame = CGRectMake(nx, 0, nw, h);
+        _nameClip.frame = CGRectMake(nx, 0, nw, h);
+        [self sl_layoutNameMarquee];
     }
     // v0.4.45：中间这块必须有个真的控件接走触摸，否则触摸落到 self 上会被收走。
     // 这里只接触摸、不挂 target —— 点名字什么都不该发生。
@@ -1276,7 +1433,7 @@ static UIImage *SLTransparentImage(void) {
 #undef SLMX
 
     _sep.hidden = !exp;
-    _name.hidden = !exp;
+    _nameClip.hidden = !exp;
     _midBtn.hidden = !exp;
     _menuBtn.hidden = !exp;
     _homeBtn.hidden = !exp;
@@ -1317,6 +1474,7 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     UIView *_card;
     UIVisualEffectView *_blur;
     UIView *_hair;
+    UIImageView *_haze;     // v0.4.76：跟胶囊同源的色晕
     UIScrollView *_list;
     NSArray<NSDictionary *> *_nodes;      // 渲染节点：分组头 / 语音包 / 空占位
     NSMutableArray<UIView *> *_rowViews;
@@ -1402,7 +1560,10 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     _anchor = anchor;
     CGRect ar = [anchor convertRect:anchor.bounds toView:self];
     CGFloat cardW = CGRectGetWidth(ar);
-    if (cardW < 120.0) cardW = 196.0;   // 胶囊还没展开时拿不到宽度
+    // v0.4.76：胶囊宽度改成跟名字走、最窄 146。列表不跟着缩 ——
+    // 行内固定占掉 88pt（试听键 48 + 间距 8 + 右侧圈 18 + 内边距），
+    // 卡片再跟着收到 146，名字只剩 58pt，滚起来也读不下去。
+    if (cardW < SLPillMaxW) cardW = SLPillMaxW;
     _cardW = cardW;
 
     _card = [[UIView alloc] initWithFrame:[self sl_cardFrameForAnchor:anchor width:cardW height:120.0]];
@@ -1422,6 +1583,23 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     _blur.layer.cornerCurve = kCACornerCurveContinuous;
     _blur.clipsToBounds = YES;
     [_card addSubview:_blur];
+
+    // v0.4.76：列表底跟胶囊同源。同一条色带，但压到 6×1 再拉满 ——
+    // 32×6 直接铺到 190pt 高会拉出一道竖光带（像刷了金属漆），
+    // 降到 6 段只剩「哪边偏冷、哪边偏暖」的大块走向；面积大，浓度也从 0.36 收到 0.22。
+    if ([anchor isKindOfClass:[SLFloatButton class]]) {
+        UIImage *icon = [(SLFloatButton *)anchor sl_customIconImage];
+        UIImage *hz = icon ? SLHazeImage(icon, 6, 1) : nil;
+        if (hz) {
+            _haze = [[UIImageView alloc] initWithFrame:_blur.contentView.bounds];
+            _haze.image = hz;
+            _haze.contentMode = UIViewContentModeScaleToFill;
+            _haze.alpha = 0.22;
+            _haze.userInteractionEnabled = NO;
+            _haze.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [_blur.contentView addSubview:_haze];
+        }
+    }
 
     // v0.4.46：跟胶囊边缘同一个规格（0.8pt / 0.6）—— 材质透下来之后，
     // 这圈高光是「玻璃」和「背景」之间唯一的界线。
