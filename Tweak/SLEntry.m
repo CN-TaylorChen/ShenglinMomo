@@ -7,13 +7,13 @@
 #import "SLGlass.h"
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
+#include <stdlib.h>   // v0.4.75：SLHazeImage 里的 calloc/free
 
 // ===================== 悬浮球图标 =====================
 // v0.4.33：默认图标换成「双声波」品牌图形（代码绘制，黑底 + 六根条：
 // 左三根 30% 白表示被替换掉的原声，右三根纯白表示合成声）。
 // 存一个字符串：
 //   brand            品牌图形（默认）
-//   emoji:🎙️        表情
 //   image:icon.png   相册选的自定义图片（已裁成圆形，存沙盒）
 //   text:xxx         旧版遗留值，读取时自动迁移成默认
 #define kSLFloatIconKey @"SLFloatIcon"
@@ -23,7 +23,6 @@
 // 四态差异全部由图标自身的运动表达，所以这里只存「图标怎么动」这一件事：
 //   0 = 关闭（和 v0.4.72 一模一样）
 //   1 = 律动（四态缩放，合成态用「泵动」：慢缩 → 急弹 → 缓落）
-//   2 = 律动 + 扫光（再叠一道 45° 高光，按状态让路）
 #define kSLFloatEffectKey @"SLFloatEffect"
 
 static NSString *SLFloatIconDir(void) {
@@ -39,18 +38,50 @@ static NSString *SLFloatIconImagePath(NSString *name) {
     return [SLFloatIconDir() stringByAppendingPathComponent:(name.length ? name : @"icon.png")];
 }
 
+// v0.4.75：胶囊底色 = 图标图的「色晕」。
+// 把图片降采样成 32×6 再交给 UIImageView 拉伸，靠 layer 的线性插值自己平滑成一条横向色带。
+// 只留大块明暗与色相分布、不留任何细节，所以胶囊上不会出现「一张缩略图糊上去」。
+// 取景跟 _thumb 的 aspectFill 对齐（中心横条），色晕和图标才是同一段画面。
+static UIImage *SLHazeImage(UIImage *src) {
+    if (!src.CGImage) return nil;
+    const size_t w = 32, h = 6;
+    unsigned char *buf = (unsigned char *)calloc(w * h * 4, sizeof(unsigned char));
+    if (!buf) return nil;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs,
+                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return nil; }
+
+    CGImageRef cg = src.CGImage;
+    CGFloat iw = (CGFloat)CGImageGetWidth(cg), ih = (CGFloat)CGImageGetHeight(cg);
+    CGFloat bandH = iw * (CGFloat)h / (CGFloat)w;   // 保持宽高比，别把脸压扁
+    if (bandH > ih) bandH = ih;
+    CGImageRef part = CGImageCreateWithImageInRect(cg, CGRectMake(0.0, (ih - bandH) * 0.5, iw, bandH));
+    if (part) {
+        CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+        CGContextDrawImage(ctx, CGRectMake(0.0, 0.0, (CGFloat)w, (CGFloat)h), part);
+        CGImageRelease(part);
+    }
+    CGImageRef small = CGBitmapContextCreateImage(ctx);
+    UIImage *out = small ? [UIImage imageWithCGImage:small scale:1.0 orientation:UIImageOrientationUp] : nil;
+    if (small) CGImageRelease(small);
+    CGContextRelease(ctx);
+    free(buf);
+    return out;
+}
+
 static NSString *SLFloatIconValue(void) {
     NSString *v = [[NSUserDefaults standardUserDefaults] stringForKey:kSLFloatIconKey];
     if (!v.length) return kSLFloatIconDefault;
     if ([v hasPrefix:@"text:"]) return kSLFloatIconDefault;        // 旧版文字图标 → 默认
-    if ([v isEqualToString:@"emoji:🎙️"]) return kSLFloatIconDefault;  // 旧默认表情 → 新品牌图形
     return v;
 }
 
 // v0.4.74：越界值一律当「关闭」，以后换方案数值改了也不会出现脏状态
 static NSInteger SLFloatEffectValue(void) {
     NSInteger v = [[NSUserDefaults standardUserDefaults] integerForKey:kSLFloatEffectKey];
-    if (v < 0 || v > 2) return 0;
+    if (v < 0 || v > 1) return 0;
     return v;
 }
 
@@ -58,11 +89,9 @@ NSString *SLFloatIconSummary(void) {
     NSString *v = SLFloatIconValue();
     NSString *base = @"默认";
     if ([v hasPrefix:@"image:"]) base = @"自定义图片";
-    else if ([v hasPrefix:@"emoji:"]) base = [v substringFromIndex:6];
     // v0.4.74：正在试哪一档动效，设置页那行右侧一眼能看到
     NSInteger fx = SLFloatEffectValue();
     if (fx == 1) return [base stringByAppendingString:@" · 律动"];
-    if (fx == 2) return [base stringByAppendingString:@" · 律动+扫光"];
     return base;
 }
 
@@ -228,10 +257,9 @@ static UIImage *SLTransparentImage(void) {
 /// v0.4.49：四杠逐根动画（A 均衡器 / C 呼吸，绕中心缩放）
 - (void)sl_layoutBars;
 - (void)sl_updateBarMotion;
-/// v0.4.74：自定义图片 / emoji 的图标动效（律动 / 律动 + 扫光）
+/// v0.4.74：自定义图片的图标动效（四态律动）
+/// v0.4.75：色晕（胶囊底色）挂载与刷新
 - (void)sl_updateIconMotion;
-/// v0.4.74：扫光条几何（跟着图标尺寸走）
-- (void)sl_layoutSweepForSize:(CGSize)sz;
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated;
 /// v0.4.45：回到前台重挂呼吸光晕（后台期间动画会被系统整条移除）
 - (void)sl_restartHalo;
@@ -399,10 +427,8 @@ static UIImage *SLTransparentImage(void) {
     UIView *_bars;
     UIView *_barCell[4];
     UIImageView *_thumb;
-    // v0.4.74：图标扫光层。挂在 _thumb.layer 上 —— _thumb 本身 clipsToBounds + 圆角，
-    // 渐变会被圆自动裁掉，不用再算 path，也不占额外视图层级。
-    CAGradientLayer *_sweep;
-    UILabel *_emoji;
+    // v0.4.75：胶囊底色（图标色晕）。铺在毛玻璃内容层之上、状态色之下。
+    UIImageView *_haze;
     UIView *_sep;
     UILabel *_name;
     UIButton *_menuBtn;
@@ -471,6 +497,16 @@ static UIImage *SLTransparentImage(void) {
         _chrome.frame = CGRectMake(0, 0, SLPillMaxW, SLBallSide);
         [_glassHost addSubview:_chrome];
 
+        // v0.4.75：胶囊底色。铺在毛玻璃之上、状态色之下：
+        // 默认四杠图形没有色晕（胶囊还是纯玻璃），只有选了自定义图片才有。
+        // alpha 0.36 等价于「白覆盖 64%」——浅色下胶囊底落在 #B1B4B9 附近，
+        // 能看出一条横向色带，文字对比度又还够；深色下同一数值只是略微压暗，不会糊死。
+        _haze = [[UIImageView alloc] initWithFrame:CGRectZero];
+        _haze.contentMode = UIViewContentModeScaleToFill;
+        _haze.userInteractionEnabled = NO;
+        _haze.alpha = 0.36;
+        [_chrome.contentView addSubview:_haze];
+
         _tint = [[UIView alloc] initWithFrame:CGRectZero];
         _tint.userInteractionEnabled = NO;
         _tint.alpha = 0.0;
@@ -481,8 +517,8 @@ static UIImage *SLTransparentImage(void) {
         _glyph.userInteractionEnabled = NO;
         [self addSubview:_glyph];
 
-        // v0.4.49：四杠容器。放在 _glyph 之上、_thumb/_emoji 之下，
-        // 位置/显隐跟随 _glyph；自定义头像或 emoji 时整组隐藏。
+        // v0.4.49：四杠容器。放在 _glyph 之上、_thumb 之下，
+        // 位置/显隐跟随 _glyph；用自定义头像时整组隐藏。
         _bars = [[UIView alloc] initWithFrame:CGRectZero];
         _bars.userInteractionEnabled = NO;
         [self addSubview:_bars];
@@ -498,24 +534,6 @@ static UIImage *SLTransparentImage(void) {
         _thumb.clipsToBounds = YES;
         _thumb.userInteractionEnabled = NO;
         [self addSubview:_thumb];
-
-        // v0.4.74：45° 扫光。默认 opacity 0 —— 只有动效选到「律动 + 扫光」才点亮，
-        // 所以不选它的时候这颗球和对前几版完全没区别。
-        _sweep = [CAGradientLayer layer];
-        _sweep.colors = @[(__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
-                          (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.92].CGColor,
-                          (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor];
-        _sweep.locations = @[@0.0, @0.5, @1.0];
-        _sweep.startPoint = CGPointMake(0.0, 0.0);
-        _sweep.endPoint = CGPointMake(1.0, 0.0);
-        _sweep.opacity = 0.0f;
-        [_thumb.layer addSublayer:_sweep];
-
-        _emoji = [[UILabel alloc] initWithFrame:CGRectZero];
-        _emoji.textAlignment = NSTextAlignmentCenter;
-        _emoji.font = [UIFont systemFontOfSize:22];
-        _emoji.userInteractionEnabled = NO;
-        [self addSubview:_emoji];
 
         _sep = [[UIView alloc] initWithFrame:CGRectZero];
         _sep.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.28];
@@ -611,7 +629,6 @@ static UIImage *SLTransparentImage(void) {
     NSString *v = SLFloatIconValue();
     _glyph.hidden = YES;
     _thumb.hidden = YES;
-    _emoji.hidden = YES;
 
     UIImage *img = nil;
     if ([v hasPrefix:@"image:"]) {
@@ -621,10 +638,9 @@ static UIImage *SLTransparentImage(void) {
     if (img) {
         _thumb.image = img;
         _thumb.hidden = NO;
-    } else if ([v hasPrefix:@"emoji:"]) {
-        _emoji.text = [v substringFromIndex:6];
-        _emoji.hidden = NO;
+        _haze.image = SLHazeImage(img);
     } else {
+        _haze.image = nil;
         // 48pt 里六根条太密，前 3 根 30% 的几乎看不见，糊成一团。
         // 球和胶囊上换成四根（两淡两实）、条更粗；大尺寸仍用六根。
         _glyph.image = [SLBrandGlyphCompact(44, [UIColor blackColor]) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
@@ -741,18 +757,14 @@ static UIImage *SLTransparentImage(void) {
 // 再叠一圈不同频的环会拍频，空闲约 16.8 秒才同相一次、录音每 2.3 秒错一拍，看着像抖。
 // 所以这里只让「图标自己」动，而且周期全部对齐光晕的 half，绝不另一套节奏。
 - (void)sl_updateIconMotion {
-    // 只对自定义图片 / 表情生效。默认四杠图形本来就有四套逐根动画，再叠一层会打架。
+    // 只对自定义图片生效。默认四杠图形本来就有四套逐根动画，再叠一层会打架。
     UIView *target = nil;
     if (!_thumb.hidden) target = _thumb;
-    else if (!_emoji.hidden) target = _emoji;
 
     NSInteger fx = SLFloatEffectValue();
 
     // 先无条件清干净：换图标、关动效、切回四杠形态都走这一条
     [_thumb.layer removeAnimationForKey:@"slIconMotion"];
-    [_emoji.layer removeAnimationForKey:@"slIconMotion"];
-    [_sweep removeAllAnimations];
-    _sweep.opacity = 0.0f;
 
     if (!target || fx <= 0) return;
 
@@ -800,48 +812,6 @@ static UIImage *SLTransparentImage(void) {
         a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
         [target.layer addAnimation:a forKey:@"slIconMotion"];
     }
-
-    // ---- 扫光：只有「律动 + 扫光」才开 ----
-    // 让路原则：图标自己动得越猛，扫光越淡、越快，只当氛围，绝不抢戏。
-    //   空闲 4.6s / 0.85（图标几乎不动，扫光是主运动）
-    //   录音 1.8s / 0.38（快速缩放当主角）
-    //   合成 1.4s / 0.34（泵动当主角）
-    //   就绪 2.4s / 0.55（双跳 + 光循环扫，收尾）
-    if (fx < 2) return;
-
-    CGSize sz = target.bounds.size;
-    if (sz.width <= 0.0 || sz.height <= 0.0) return;
-
-    CGFloat sweepDur = 4.6, sweepAlpha = 0.85;
-    if (st == SLFloatStateRecording) { sweepDur = 1.8; sweepAlpha = 0.38; }
-    else if (st == SLFloatStateSynthesizing) { sweepDur = 1.4; sweepAlpha = 0.34; }
-    else if (st == SLFloatStateReady) { sweepDur = 2.4; sweepAlpha = 0.55; }
-
-    [self sl_layoutSweepForSize:sz];
-    _sweep.opacity = (float)sweepAlpha;
-
-    // 45° 斜条从左上角外扫到右下角外：起点/终点都按高度放大，保证整块都被扫过
-    CGFloat span = sz.height * 1.2;
-    CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"position.x"];
-    sp.fromValue = @(-span);
-    sp.toValue = @(sz.width + span);
-    sp.duration = sweepDur;
-    sp.repeatCount = HUGE_VALF;
-    sp.fillMode = kCAFillModeBoth;
-    sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-    [_sweep addAnimation:sp forKey:@"slSweep"];
-}
-
-// 扫光条：宽度随图标走、高度两倍多（斜着放才够长），整体转 45°。
-// 只设 bounds / transform，position 交给动画控制 —— 否则每次 layout 都会把扫光拽回中间。
-- (void)sl_layoutSweepForSize:(CGSize)sz {
-    if (sz.width <= 0.0 || sz.height <= 0.0) return;
-    CGFloat band = MAX(18.0, sz.width * 0.38);
-    _sweep.bounds = CGRectMake(0, 0, band, sz.height * 2.6);
-    // 纵向必须钉在正中间：扫光动画只动 position.x，position.y 没人管的话
-    // 默认是 0，条会贴着图标顶边转，只剩一段残影。
-    _sweep.position = CGPointMake(sz.width * 0.5, sz.height * 0.5);
-    _sweep.transform = CATransform3DMakeRotation(M_PI / 4.0, 0, 0, 1);
 }
 
 #pragma mark 状态
@@ -869,6 +839,8 @@ static UIImage *SLTransparentImage(void) {
                      animations:^{
         self->_tint.backgroundColor = fill;
         self->_tint.alpha = accent ? 1.0 : 0.0;
+        // v0.4.75：状态色一来就把色晕让掉（红 + 图色会混成脏色），回空闲再淡回来。
+        self->_haze.alpha = accent ? 0.0 : 0.36;
         self->_sep.backgroundColor = accent ? [accent colorWithAlphaComponent:0.35]
                                             : [UIColor colorWithWhite:0.5 alpha:0.28];
         self->_glyph.tintColor = accent ?: [UIColor labelColor];
@@ -1263,8 +1235,8 @@ static UIImage *SLTransparentImage(void) {
     // v0.4.39：左图标与球态同尺寸（22pt，不再缩水到 18），头像 32 → 42
     _glyph.frame = exp ? CGRectMake(SLMX(13.0, 22.0), (h - 22.0) / 2.0, 22.0, 22.0)
                        : CGRectMake((w - 22.0) / 2.0, (h - 22.0) / 2.0, 22.0, 22.0);
-    _glyph.hidden = (_thumb.hidden == NO) || (_emoji.hidden == NO);
-    // v0.4.49：四杠容器跟随 _glyph 的位置与显隐；自定义头像 / emoji 时自动让位
+    _glyph.hidden = (_thumb.hidden == NO);
+    // v0.4.49：四杠容器跟随 _glyph 的位置与显隐；自定义头像时自动让位
     _bars.frame = _glyph.frame;
     _bars.hidden = _glyph.hidden;
     [self sl_layoutBars];
@@ -1273,20 +1245,8 @@ static UIImage *SLTransparentImage(void) {
     CGFloat iconS = SLBallSide;
     _thumb.frame = exp ? CGRectMake(SLMX(0.0, iconS), 0, iconS, iconS) : b;
     _thumb.layer.cornerRadius = MIN(CGRectGetWidth(_thumb.bounds), CGRectGetHeight(_thumb.bounds)) / 2.0;
-    // v0.4.74：扫光条跟着图标尺寸走（球态 48、展开态也是 48，换了设备也不会错位）。
-    // 关掉隐式动画，免得布局时扫光条自己「长出来」一下。
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    [self sl_layoutSweepForSize:_thumb.bounds.size];
-    [CATransaction commit];
-    // v0.4.74：首次进场时 _thumb.bounds 还是 0，扫光那条算不出长度就跳过了。
-    // 等这里尺寸真正有效、而扫光还没挂上时，补一次 —— 只补「律动+扫光」，别的档位不碰，
-    // 否则每帧 layout 都会把缩放动画重启一遍，看着像在闪。
-    if (SLFloatEffectValue() == 2 && _sweep.animationKeys.count == 0 && !_thumb.hidden) {
-        [self sl_updateIconMotion];
-    }
-    _emoji.font = [UIFont systemFontOfSize:22.0];   // v0.4.44：emoji 图标同样不缩
-    _emoji.frame = exp ? CGRectMake(SLMX(0.0, iconS), 0, iconS, iconS) : b;
+    // v0.4.75：色晕跟玻璃同尺寸铺满（球态被 _glassMask 裁成圆）。
+    _haze.frame = CGRectMake(0, 0, SLPillMaxW, h);
 
     // v0.4.37：状态色铺满整条胶囊。原来展开态只盖左侧 48pt 圆，
     // 球是蓝的、胶囊还是白玻璃，中间像被切断。
@@ -2370,10 +2330,6 @@ void SLStartEntryWatcher(void) {
     }
 }
 
-- (NSArray<NSString *> *)sl_emojiItems {
-    return @[@"🎙️", @"🔊", @"✨", @"🐻", @"🌸", @"🎀"];
-}
-
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
     return 2;   // v0.4.9：删掉表情预设，只留自定义图片；v0.4.74：多一段图标动效
@@ -2381,7 +2337,7 @@ void SLStartEntryWatcher(void) {
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 1) return 3;   // 关闭 / 律动 / 律动 + 扫光
+    if (section == 1) return 2;   // 关闭 / 律动
     return 2;   // 从相册选择 / 恢复默认
 }
 
@@ -2395,8 +2351,8 @@ void SLStartEntryWatcher(void) {
 - (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
     (void)tv;
     if (section != 1) return nil;
-    return @"只对自定义图片 / 表情生效；扫光只作用于自定义图片。"
-           @"外圈光晕与状态底色不变，不会多出额外的环。";
+    return @"只对自定义图片生效。外圈光晕与状态底色不变，不会多出额外的环。"
+           @"换成默认四杠时走四杠自己的逐根动画。";
 }
 
 // v0.4.50：单元格底色统一刷玻璃片（表格透明后不刷就是纯灰行）
@@ -2413,10 +2369,10 @@ void SLStartEntryWatcher(void) {
     cell.textLabel.font = [UIFont systemFontOfSize:16];
     cell.detailTextLabel.text = nil;
 
-    // v0.4.74：第 2 段 = 图标动效三选一
+    // v0.4.74：第 2 段 = 图标动效二选一
     if (ip.section == 1) {
         static NSArray *names = nil;
-        if (!names) names = @[@"关闭", @"律动", @"律动 + 扫光"];
+        if (!names) names = @[@"关闭", @"律动"];
         cell.textLabel.text = names[ip.row];
         cell.accessoryType = (SLFloatEffectValue() == ip.row) ? UITableViewCellAccessoryCheckmark
                                                              : UITableViewCellAccessoryNone;
@@ -2441,7 +2397,7 @@ void SLStartEntryWatcher(void) {
     [tv deselectRowAtIndexPath:ip animated:YES];
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
 
-    // v0.4.74：动效三选一。写完立刻刷球，不用退出设置就能看到变化。
+    // v0.4.74：动效二选一。写完立刻刷球，不用退出设置就能看到变化。
     if (ip.section == 1) {
         [d setInteger:ip.row forKey:kSLFloatEffectKey];
         [d synchronize];
@@ -2458,48 +2414,6 @@ void SLStartEntryWatcher(void) {
     [d synchronize];
     [[NSFileManager defaultManager] removeItemAtPath:SLFloatIconImagePath(@"icon.png") error:nil];
     [self sl_applied];
-}
-
-// 自定义表情：弹框输入，最多取前 2 个组合字符（emoji 由多个 code point 组成，不能按字节切）
-- (void)sl_askCustomEmoji {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"自定义表情"
-                                                               message:@"输入一个表情或 1~2 个字符，显示在悬浮球上"
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"🎙️";
-        tf.textAlignment = NSTextAlignmentCenter;
-        tf.font = [UIFont systemFontOfSize:22];
-        NSString *cur = SLFloatIconValue();
-        if ([cur hasPrefix:@"emoji:"]) tf.text = [cur substringFromIndex:6];
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    __weak typeof(self) ws = self;
-    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        NSString *v = [ws sl_firstChars:ac.textFields.firstObject.text count:2];
-        if (!v.length) {
-            [AWECAUtils showToast:@"至少输入一个字符" duration:1.5];
-            return;
-        }
-        NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-        [d setObject:[@"emoji:" stringByAppendingString:v] forKey:kSLFloatIconKey];
-        [d synchronize];
-        [ws sl_applied];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
-}
-
-- (NSString *)sl_firstChars:(NSString *)text count:(NSUInteger)count {
-    NSString *t = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
-    NSMutableString *out = [NSMutableString string];
-    NSUInteger i = 0, n = 0;
-    while (i < t.length && n < count) {
-        NSRange r = [t rangeOfComposedCharacterSequenceAtIndex:i];
-        if (r.length == 0) break;
-        [out appendString:[t substringWithRange:r]];
-        i = r.location + r.length;
-        n++;
-    }
-    return out;
 }
 
 - (void)sl_applied {
