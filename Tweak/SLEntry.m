@@ -161,6 +161,8 @@ static BOOL sSLFloatSettleMuted = NO;
 @interface SLFloatPanelController : UIViewController
 + (void)presentFrom:(UIViewController *)host root:(UIViewController *)root;
 + (void)presentSettingsFrom:(UIViewController *)host;
++ (BOOL)isSettingsOpen;
++ (void)dismissSettings;
 + (void)presentVoicePackFrom:(UIViewController *)host;
 @end
 
