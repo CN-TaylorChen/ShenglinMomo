@@ -940,7 +940,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     CGFloat pw = 224, rowW = pw - 12, rowH = 52;
     UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, pw - 32, 20)];
     title.text = @"添加音色";
-    title.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
     title.textColor = [UIColor labelColor];
     [panel addSubview:title];
 
@@ -1008,7 +1008,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
     [row addSubview:iv];
     UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, 9, rowW - 60, 18)];
-    t1.text = title; t1.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
+    t1.text = title; t1.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
     [row addSubview:t1];
     UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
     t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];

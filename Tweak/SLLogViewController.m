@@ -71,7 +71,7 @@
         [self.status.leadingAnchor constraintEqualToAnchor:statusCard.leadingAnchor constant:12],
         [self.status.trailingAnchor constraintEqualToAnchor:statusCard.trailingAnchor constant:-12],
         [self.status.topAnchor constraintEqualToAnchor:statusCard.topAnchor constant:10],
-        [self.status.heightAnchor constraintEqualToConstant:92],
+        [self.status.heightAnchor constraintEqualToConstant:150],
 
         [logCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [logCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
@@ -88,10 +88,16 @@
 }
 
 - (void)sl_reload {
-    NSString *st = @"钩子状态：未知";
-    @try { NSString *s = SLHookStatusSummary(); if (s.length) st = s; } @catch (NSException *e) { }
-    self.status.text = [NSString stringWithFormat:@"%@\n文件：%@",
-                        st, [SLLog filePath] ?: @"(不可写)"];
+    NSString *summary = @"没有装上任何钩子（类名/方法签名不匹配，把日志发给开发者）";
+    @try { NSString *s = SLHookStatusSummary(); if (s.length) summary = s; } @catch (NSException *e) { }
+    // v0.4.68：状态卡改为可滚动、限高 ~150pt；顶部显示「已装钩子 N 个」并展示完整列表（滚动看全），不再显空
+    NSString *head = summary;
+    if ([summary hasPrefix:@"已装钩子："]) {
+        NSString *body = [summary substringFromIndex:@"已装钩子：".length];
+        NSInteger n = (NSInteger)[[body componentsSeparatedByString:@"  "] count];
+        head = [NSString stringWithFormat:@"已装钩子 %ld 个\n%@", (long)n, body];
+    }
+    self.status.text = [NSString stringWithFormat:@"%@\n文件：%@", head, [SLLog filePath] ?: @"(不可写)"];
     self.tv.text = [SLLog tailLines:400] ?: @"(暂无日志)";
     if (self.tv.text.length > 1) {
         [self.tv scrollRangeToVisible:NSMakeRange(self.tv.text.length - 1, 1)];
