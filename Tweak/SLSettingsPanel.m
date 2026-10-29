@@ -26,7 +26,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.68"
+#define SLVersion @"0.4.69"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 

@@ -13,6 +13,7 @@
 #import "SLGlass.h"
 #import <AVFoundation/AVFoundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <objc/runtime.h>
 
 typedef UIDocumentPickerViewController * _Nullable (^SLPickerMaker)(void);
 
@@ -43,6 +44,12 @@ static UIView *SLPackHeader(NSString *text, CGFloat x, CGFloat width) {
 @property (nonatomic, strong) AVAudioPlayer *player;
 @property (nonatomic, copy) NSString *playingRel;
 @property (nonatomic, assign) CGFloat slLeading;
+
+- (void)sl_showAddPanel;
+- (void)sl_dismissAddPanel;
+- (CGRect)sl_addButtonRectInView:(UIView *)view;
+- (UIView *)sl_panelRowWithIcon:(UIImage *)icon width:(CGFloat)rowW title:(NSString *)title subtitle:(NSString *)subtitle tap:(void(^)(void))tap;
+- (void)sl_panelRowTapped:(UITapGestureRecognizer *)gr;
 @end
 
 // ===================== 语音包列表单元格 =====================
@@ -309,26 +316,128 @@ static UIImage *SLPauseGlyph(void) {
 #pragma mark - 导入
 
 - (void)sl_addTapped {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:nil message:nil
-                                                                preferredStyle:UIAlertControllerStyleActionSheet];
-    if (self.isRoot) {
-        [sheet addAction:[UIAlertAction actionWithTitle:@"新建文件夹" style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) { [self sl_newFolder:nil]; }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:@"导入文件夹" style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) { [self sl_pickFolder]; }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:@"导入音频文件" style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) { [self sl_pickFiles]; }]];
-    } else {
-        [sheet addAction:[UIAlertAction actionWithTitle:[NSString stringWithFormat:@"导入到「%@」", self.folder]
-                                                 style:UIAlertActionStyleDefault
-                                               handler:^(UIAlertAction *a) { [self sl_pickFiles]; }]];
-        [sheet addAction:[UIAlertAction actionWithTitle:@"导入文件夹" style:UIAlertActionStyleDefault
-                                                handler:^(UIAlertAction *a) { [self sl_pickFolder]; }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    sheet.popoverPresentationController.barButtonItem = self.navigationItem.rightBarButtonItem;
-    [self presentViewController:sheet animated:YES completion:nil];
+    [self sl_showAddPanel];
 }
+
+// v0.4.69：把原来的底部 action sheet 换成「锚定在 ＋ 下方」的玻璃小面板（音色库同款）。
+- (void)sl_showAddPanel {
+    [self sl_dismissAddPanel];
+    UIView *host = self.navigationController.view ?: self.view;
+    __weak typeof(self) ws = self;
+
+    UIView *dim = [[UIView alloc] initWithFrame:host.bounds];
+    dim.backgroundColor = [UIColor blackColor];
+    dim.alpha = 0;
+    dim.tag = 99228;
+    dim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [dim addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sl_dismissAddPanel)]];
+    [host addSubview:dim];
+    [UIView animateWithDuration:0.2 animations:^{ dim.alpha = 0.16; }];
+
+    UIView *panel = [[UIView alloc] init];
+    panel.tag = 99227;
+    panel.layer.cornerRadius = 16;
+    panel.layer.cornerCurve = kCACornerCurveContinuous;
+    panel.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
+    panel.layer.borderColor = [SLGlassHairlineColor() CGColor];
+    panel.layer.shadowColor = [UIColor blackColor].CGColor;
+    panel.layer.shadowOpacity = 0.22;
+    panel.layer.shadowRadius = 18;
+    panel.layer.shadowOffset = CGSizeMake(0, 8);
+    UIVisualEffectView *blur = SLInstallGlassBackdrop(panel);
+    blur.layer.cornerRadius = 16;
+    blur.layer.cornerCurve = kCACornerCurveContinuous;
+    blur.layer.masksToBounds = YES;
+    blur.userInteractionEnabled = NO;
+
+    CGFloat pw = 224, rowW = pw - 12, rowH = 52;
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, pw - 32, 20)];
+    title.text = @"添加";
+    title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    title.textColor = [UIColor labelColor];
+    [panel addSubview:title];
+
+    CGFloat y = 38;
+    if (self.isRoot) {
+        UIView *r1 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder.badge.plus"] width:rowW title:@"新建文件夹" subtitle:@"创建新文件夹" tap:^{ [ws sl_newFolder:nil]; }];
+        r1.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r1]; y += rowH + 2;
+        UIView *r2 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder"] width:rowW title:@"导入文件夹" subtitle:@"整个目录导入" tap:^{ [ws sl_pickFolder]; }];
+        r2.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r2]; y += rowH + 2;
+        UIView *r3 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"music.note"] width:rowW title:@"导入音频文件" subtitle:@"选择音频文件" tap:^{ [ws sl_pickFiles]; }];
+        r3.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r3]; y += rowH + 2;
+    } else {
+        UIView *r1 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"square.and.arrow.down"] width:rowW title:[NSString stringWithFormat:@"导入到「%@」", self.folder ?: @""] subtitle:@"选择音频文件" tap:^{ [ws sl_pickFiles]; }];
+        r1.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r1]; y += rowH + 2;
+        UIView *r2 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder"] width:rowW title:@"导入文件夹" subtitle:@"整个目录导入" tap:^{ [ws sl_pickFolder]; }];
+        r2.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r2]; y += rowH + 2;
+    }
+
+    CGFloat ph = y + 8;
+    CGRect btnRect = [self sl_addButtonRectInView:host];
+    CGFloat px = CGRectGetMaxX(btnRect) - pw;
+    if (px < 8) px = 8;
+    if (px + pw > host.bounds.size.width - 8) px = host.bounds.size.width - pw - 8;
+    CGFloat py = CGRectGetMaxY(btnRect) + 8;
+    if (py + ph > host.bounds.size.height - 8) py = CGRectGetMinY(btnRect) - ph - 8;
+
+    panel.frame = CGRectMake(px, py, pw, ph);
+    panel.alpha = 0;
+    panel.transform = CGAffineTransformMakeScale(0.92, 0.92);
+    [host addSubview:panel];
+    [UIView animateWithDuration:0.24 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.7 options:0 animations:^{
+        panel.alpha = 1;
+        panel.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)sl_dismissAddPanel {
+    UIView *host = self.navigationController.view ?: self.view;
+    UIView *dim = [host viewWithTag:99228];
+    UIView *panel = [host viewWithTag:99227];
+    if (!dim && !panel) return;
+    [UIView animateWithDuration:0.18 animations:^{
+        dim.alpha = 0;
+        panel.alpha = 0;
+        panel.transform = CGAffineTransformMakeScale(0.94, 0.94);
+    } completion:^(BOOL f){
+        [dim removeFromSuperview];
+        [panel removeFromSuperview];
+    }];
+}
+
+- (CGRect)sl_addButtonRectInView:(UIView *)view {
+    UIBarButtonItem *bbi = self.navigationItem.rightBarButtonItem;
+    UIView *bbv = [bbi valueForKey:@"view"];
+    if (bbv) return [bbv convertRect:bbv.bounds toView:view];
+    return CGRectMake(view.bounds.size.width - 56, 8, 44, 44);
+}
+
+- (UIView *)sl_panelRowWithIcon:(UIImage *)icon width:(CGFloat)rowW title:(NSString *)title subtitle:(NSString *)subtitle tap:(void(^)(void))tap {
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 52)];
+    row.backgroundColor = SLGlassCellColor();
+    row.layer.cornerRadius = 12;
+    row.layer.cornerCurve = kCACornerCurveContinuous;
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 11, 30, 30)];
+    iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
+    [row addSubview:iv];
+    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, 9, rowW - 60, 18)];
+    t1.text = title; t1.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
+    [row addSubview:t1];
+    UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
+    t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
+    [row addSubview:t2];
+    row.userInteractionEnabled = YES;
+    if (tap) objc_setAssociatedObject(row, "slPackPanelAction", tap, OBJC_ASSOCIATION_COPY);
+    [row addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sl_panelRowTapped:)]];
+    return row;
+}
+
+- (void)sl_panelRowTapped:(UITapGestureRecognizer *)gr {
+    void(^act)(void) = objc_getAssociatedObject(gr.view, "slPackPanelAction");
+    [self sl_dismissAddPanel];
+    if (act) act();
+}
+
 
 // 菜单收起过程中直接 present 会被 UIKit 丢弃（这就是"点了没反应"），统一延后到消失之后
 - (void)sl_presentPicker:(SLPickerMaker)make {
