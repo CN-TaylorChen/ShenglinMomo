@@ -359,16 +359,16 @@ static UIImage *SLPauseGlyph(void) {
 
     CGFloat y = 38;
     if (self.isRoot) {
-        UIView *r1 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder.badge.plus"] width:rowW title:@"新建文件夹" subtitle:@"创建新文件夹" tap:^{ [ws sl_newFolder:nil]; }];
+        UIView *r1 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder.badge.plus"] width:rowW title:@"新建文件夹" subtitle:nil tap:^{ [ws sl_newFolder:nil]; }];
         r1.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r1]; y += rowH + 2;
-        UIView *r2 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder"] width:rowW title:@"导入文件夹" subtitle:@"整个目录导入" tap:^{ [ws sl_pickFolder]; }];
+        UIView *r2 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder"] width:rowW title:@"导入文件夹" subtitle:nil tap:^{ [ws sl_pickFolder]; }];
         r2.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r2]; y += rowH + 2;
-        UIView *r3 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"music.note"] width:rowW title:@"导入音频文件" subtitle:@"选择音频文件" tap:^{ [ws sl_pickFiles]; }];
+        UIView *r3 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"music.note"] width:rowW title:@"导入音频文件" subtitle:nil tap:^{ [ws sl_pickFiles]; }];
         r3.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r3]; y += rowH + 2;
     } else {
-        UIView *r1 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"square.and.arrow.down"] width:rowW title:[NSString stringWithFormat:@"导入到「%@」", self.folder ?: @""] subtitle:@"选择音频文件" tap:^{ [ws sl_pickFiles]; }];
+        UIView *r1 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"square.and.arrow.down"] width:rowW title:[NSString stringWithFormat:@"导入到「%@」", self.folder ?: @""] subtitle:nil tap:^{ [ws sl_pickFiles]; }];
         r1.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r1]; y += rowH + 2;
-        UIView *r2 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder"] width:rowW title:@"导入文件夹" subtitle:@"整个目录导入" tap:^{ [ws sl_pickFolder]; }];
+        UIView *r2 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder"] width:rowW title:@"导入文件夹" subtitle:nil tap:^{ [ws sl_pickFolder]; }];
         r2.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r2]; y += rowH + 2;
     }
 
@@ -420,12 +420,16 @@ static UIImage *SLPauseGlyph(void) {
     UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 11, 30, 30)];
     iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
     [row addSubview:iv];
-    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, 9, rowW - 60, 18)];
+    // v0.4.70：副标题与主标题同义（新建文件夹/创建新文件夹 等），全部去掉；无副标题时单行垂直居中
+    BOOL singleLine = (subtitle.length == 0);
+    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, singleLine ? 16 : 9, rowW - 60, singleLine ? 20 : 18)];
     t1.text = title; t1.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
     [row addSubview:t1];
-    UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
-    t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
-    [row addSubview:t2];
+    if (!singleLine) {
+        UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
+        t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
+        [row addSubview:t2];
+    }
     row.userInteractionEnabled = YES;
     if (tap) objc_setAssociatedObject(row, "slPackPanelAction", tap, OBJC_ASSOCIATION_COPY);
     [row addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sl_panelRowTapped:)]];

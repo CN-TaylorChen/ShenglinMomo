@@ -945,14 +945,14 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [panel addSubview:title];
 
     UIView *fishRow = [self aweca_panelRowWithIcon:[UIImage systemImageNamed:@"icloud.and.arrow.down"]
-                                              width:rowW title:@"从 Fish 导入" subtitle:@"我的音色 / 搜公开库" tap:^{
+                                              width:rowW title:@"从 Fish 导入" subtitle:nil tap:^{
         [ws aweca_pushImportWithMode:SLImportModeMine];
     }];
     fishRow.frame = CGRectMake(6, 38, rowW, rowH);
     [panel addSubview:fishRow];
 
     UIView *manualRow = [self aweca_panelRowWithIcon:[UIImage systemImageNamed:@"plus"]
-                                                width:rowW title:@"手动添加" subtitle:@"填写音色 ID" tap:^{
+                                                width:rowW title:@"手动添加" subtitle:nil tap:^{
         [ws addCustomVoice];
     }];
     manualRow.frame = CGRectMake(6, 38 + rowH + 2, rowW, rowH);
@@ -1007,12 +1007,16 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 11, 30, 30)];
     iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
     [row addSubview:iv];
-    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, 9, rowW - 60, 18)];
+    // v0.4.70：副标题与主标题同义（新建文件夹/创建新文件夹 等），全部去掉；无副标题时单行垂直居中
+    BOOL singleLine = (subtitle.length == 0);
+    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, singleLine ? 16 : 9, rowW - 60, singleLine ? 20 : 18)];
     t1.text = title; t1.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
     [row addSubview:t1];
-    UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
-    t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
-    [row addSubview:t2];
+    if (!singleLine) {
+        UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
+        t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
+        [row addSubview:t2];
+    }
     row.userInteractionEnabled = YES;
     if (tap) objc_setAssociatedObject(row, "awecaPanelAction", tap, OBJC_ASSOCIATION_COPY);
     [row addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(aweca_panelRowTapped:)]];
