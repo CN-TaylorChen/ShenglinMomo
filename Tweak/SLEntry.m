@@ -223,6 +223,7 @@ static BOOL sSLFloatSettleMuted = NO;
 
 #define SLBallSide 48.0
 #define SLPillMaxW 196.0
+#define SLPillMinW 146.0   // v0.4.77：展开态定宽，就是 146 / 196 里最短的那一档
 
 // v0.4.44：下压留白改成 0。
 // 之前留 14pt 是为了让搜索栏不压圆角，但导航栏是透明的 —— 那 14pt 成了整张卡片上
@@ -593,7 +594,10 @@ static UIImage *SLTransparentImage(void) {
         _hairline.fillColor = [UIColor clearColor].CGColor;
         _hairline.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.62].CGColor;
         _hairline.lineWidth = 0.8;
-        [self.layer addSublayer:_hairline];
+        // v0.4.77：必须排在 _thumb 之下 —— 加在最后会盖住所有子视图，
+        // 照片上那条「残缺的线」就是它压出来的。放低一层后即使路径溢出 0.x pt
+        // 也会被照片吃掉，不会在照片上留边。
+        [self.layer insertSublayer:_hairline below:_thumb.layer];
 
         _sep = [[UIView alloc] initWithFrame:CGRectZero];
         _sep.backgroundColor = [UIColor colorWithWhite:0.5 alpha:0.28];
@@ -712,6 +716,8 @@ static UIImage *SLTransparentImage(void) {
         _thumb.image = img;
         _thumb.hidden = NO;
         _haze.image = SLHazeImage(img, 32, 6);
+        // v0.4.77：色晕不随状态让位，这里也兜一次 —— 换图前若被旧逻辑压到 0 会一直不显。
+        _haze.alpha = 0.36;
     } else {
         _haze.image = nil;
         // 48pt 里六根条太密，前 3 根 30% 的几乎看不见，糊成一团。
@@ -901,9 +907,15 @@ static UIImage *SLTransparentImage(void) {
     else if (state == SLFloatStateSynthesizing) accent = [UIColor systemBlueColor];
     else if (state == SLFloatStateReady) accent = [UIColor systemGreenColor];
 
-    // v0.4.37：状态色加深到 26% 并铺满整条胶囊（见 layout 里的 _tint.frame），
-    // 过渡用 0.26s 淡入淡出，避免蓝 → 白硬切。
-    UIColor *fill = accent ? [accent colorWithAlphaComponent:0.26] : [UIColor clearColor];
+    // v0.4.77：选了自定义图片时，胶囊底永远只铺图色晕，一点状态色都不掺。
+    // 原来状态色一来就把色晕让掉（0.36 → 0），剩下 74% 是超薄毛玻璃自己的白，
+    // 在浅色聊天背景上就是一片灰白玻璃 —— 从图色跳到白、再跳到状态色，中间硬断一截，
+    // 就是「其他形态的背景会变成白色」的来源。
+    // 现在：有图 → 底色恒定，状态只靠字形 / 文字 / 箭头 / 外圈光环（有图时四杠本来就隐藏）；
+    // 没图（默认 logo）→ 仍然铺 26% 状态色，否则四态根本没有底色谱可用。
+    BOOL hasArt = (_thumb != nil && _thumb.hidden == NO);
+    BOOL useTint = (accent != nil) && !hasArt;
+    UIColor *fill = useTint ? [accent colorWithAlphaComponent:0.26] : [UIColor clearColor];
     // v0.4.57：所有着色元素（胶囊底、分隔线、字形 tint、四杠、名字）一起做 0.26s 交叉淡入淡出。
     // 原来只有 _tint 在动画块里，四杠/字形/名字是瞬间换色，蓝→绿会「啪」地硬切（录屏确认一帧跳变）。
     // 现在把颜色改动全收进同一个动画块，整颗球颜色平滑过渡；光环描边是 CAShapeLayer 属性，
@@ -912,11 +924,11 @@ static UIImage *SLTransparentImage(void) {
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
                      animations:^{
         self->_tint.backgroundColor = fill;
-        self->_tint.alpha = accent ? 1.0 : 0.0;
-        // v0.4.75：状态色一来就把色晕让掉（红 + 图色会混成脏色），回空闲再淡回来。
-        self->_haze.alpha = accent ? 0.0 : 0.36;
-        self->_sep.backgroundColor = accent ? [accent colorWithAlphaComponent:0.35]
-                                            : [UIColor colorWithWhite:0.5 alpha:0.28];
+        self->_tint.alpha = useTint ? 1.0 : 0.0;
+        // v0.4.77：色晕不再让位（见上），整块胶囊从头到尾是同一个底，没有「白一下」的过渡。
+        self->_sep.backgroundColor = (accent && !hasArt)
+            ? [accent colorWithAlphaComponent:0.35]
+            : [UIColor colorWithWhite:0.5 alpha:0.28];
         self->_glyph.tintColor = accent ?: [UIColor labelColor];
         self->_name.textColor = accent ?: [UIColor labelColor];
         // 四杠跟着换色：几何不变，只有背景色随动画块交叉淡入淡出（as[i] 透明度恒定）
@@ -1049,13 +1061,12 @@ static UIImage *SLTransparentImage(void) {
 
 - (CGSize)sl_pillSize {
     // v0.4.37：原来固定撑满 196，「原声」两个字也占 196，中间空 66pt。
-    // v0.4.76：宽度跟着名字走 —— 57（图标+间隔）+ 48（箭头）+ 两侧各 8pt = 121，
-    // 再加文字实际宽度；下限 146（两个字刚好），上限仍是 196，再长就靠滚动。
+    // v0.4.76：宽度跟着名字走（146~196 自适应）。
+    // v0.4.77：定回固定 146 —— 要的是「胶囊最短的那一档」，尺寸恒定，
+    // 展开动画、换音色都不再跳。代价：名字区只剩 146 - 57（分隔线）- 48（箭头）= 41pt，
+    // 12.5pt 字号下两个字（25pt）居中、三个字（37.5pt）刚好贴边，四个字以上才滚。
     _name.text = SLFloatPackName();
-    CGSize sz = [_name sizeThatFits:CGSizeMake(CGFLOAT_MAX, SLBallSide)];
-    CGFloat w = ceil(sz.width) + 121.0;
-    w = MAX(146.0, MIN(w, SLPillMaxW));
-    return CGSizeMake(w, SLBallSide);
+    return CGSizeMake(SLPillMinW, SLBallSide);
 }
 
 /// v0.4.76：名字放得下就居中静止，放不下就把 label 拉宽跑滚动。
@@ -1067,7 +1078,10 @@ static UIImage *SLTransparentImage(void) {
     [_name.layer removeAnimationForKey:@"slNameMarquee"];
     CGSize sz = [_name sizeThatFits:CGSizeMake(CGFLOAT_MAX, chh)];
     CGFloat tw = ceil(sz.width);
-    if (tw <= cw - 12.0) {
+    // v0.4.77：窗口只剩 41pt，不能再要求「左右各留 6pt」——
+    // 三个字（37.5pt）本来放得下，按老阈值会被判成溢出，然后挤出 2pt 的空滚，
+    // 肉眼看就是「名字抖一下」。改成放得下就居中，真溢出才滚。
+    if (tw <= cw + 0.5) {
         _name.frame = CGRectMake(0, 0, cw, chh);
         _name.textAlignment = NSTextAlignmentCenter;
         _name.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -1085,8 +1099,10 @@ static UIImage *SLTransparentImage(void) {
     CGFloat tw = CGRectGetWidth(_name.frame);
     CGFloat dist = tw - cw + 6.0;
     if (dist <= 1.0) return;
-    // 停 1.2s → 匀速左移（26pt/s，最快 1.6s）→ 末尾停 1.2s → 跳回
-    CGFloat hold = 1.2, move = MAX(1.6, dist / 26.0), total = hold + move + hold;
+    // 停 1.2s → 匀速左移（26pt/s）→ 末尾停 1.2s → 跳回
+    // v0.4.77：定宽后需要滚的距离普遍只有十几 pt，原来 MAX(1.6, …) 会把 15pt 拉成 1.6s
+    //（≈9pt/s，看着像在爬）。改成按速度算，上下各卡一道：0.9s 下限、2.4s 上限。
+    CGFloat hold = 1.2, move = MAX(0.9, MIN(2.4, dist / 26.0)), total = hold + move + hold;
     CAKeyframeAnimation *a = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.x"];
     a.values = @[@0.0, @0.0, @(-dist), @(-dist), @0.0];
     a.keyTimes = @[@0.0, @(hold / total), @((hold + move) / total), @0.999, @1.0];
@@ -1351,6 +1367,43 @@ static UIImage *SLTransparentImage(void) {
 
 #pragma mark 布局
 
+// v0.4.77：只画「看得见玻璃」的那一段轮廓。
+// 照片当端帽时，它朝外那一侧与胶囊轮廓是同一条曲线 —— 线画上去只会压在照片上，
+// 所以从照片直边起笔、绕到另一端再收在直边；球态照片铺满整颗球，没有玻璃可勾，返回 nil
+// （边界交给外圈光环）。半圆用两段三次贝塞尔拼，避开 addArc 的 clockwise 方向坑。
+- (UIBezierPath *)sl_hairlinePathForWidth:(CGFloat)w height:(CGFloat)h
+                                expanded:(BOOL)exp mirrored:(BOOL)mir {
+    if (!exp) return nil;
+    CGFloat in = 0.4;
+    CGFloat r = MAX(0.0, h / 2.0 - in);
+    const CGFloat k = 0.5523;          // 半径 × 0.5523 ≈ 1/4 圆弧的控制点偏移
+    UIBezierPath *p = [UIBezierPath bezierPath];
+    if (!mir) {
+        // 照片在左端，直边 x = 48
+        [p moveToPoint:CGPointMake(SLBallSide, in)];
+        [p addLineToPoint:CGPointMake(w - in - r, in)];
+        [p addCurveToPoint:CGPointMake(w - in, h / 2.0)
+             controlPoint1:CGPointMake(w - in - r + k * r, in)
+             controlPoint2:CGPointMake(w - in, h / 2.0 - k * r)];
+        [p addCurveToPoint:CGPointMake(w - in - r, h - in)
+             controlPoint1:CGPointMake(w - in, h / 2.0 + k * r)
+             controlPoint2:CGPointMake(w - in - r + k * r, h - in)];
+        [p addLineToPoint:CGPointMake(SLBallSide, h - in)];
+    } else {
+        // 镜像时照片在右端，直边 x = w - 48
+        [p moveToPoint:CGPointMake(w - SLBallSide, in)];
+        [p addLineToPoint:CGPointMake(in + r, in)];
+        [p addCurveToPoint:CGPointMake(in, h / 2.0)
+             controlPoint1:CGPointMake(in + r - k * r, in)
+             controlPoint2:CGPointMake(in, h / 2.0 - k * r)];
+        [p addCurveToPoint:CGPointMake(in + r, h - in)
+             controlPoint1:CGPointMake(in, h / 2.0 + k * r)
+             controlPoint2:CGPointMake(in + r - k * r, h - in)];
+        [p addLineToPoint:CGPointMake(w - SLBallSide, h - in)];
+    }
+    return p;
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGRect b = self.bounds;
@@ -1389,20 +1442,36 @@ static UIImage *SLTransparentImage(void) {
     {
         CGFloat tr = iconS / 2.0;
         CGRect tr2 = CGRectMake(0, 0, iconS, iconS);
+        // v0.4.77：端帽方向必须跟镜像一起翻。原来写死「左边两角圆」，
+        // 镜像（照片在右端）时朝外那一边成了直边，胶囊圆头只能由描边去补 ——
+        // 那条白弧就压在照片上，像被切了一刀。
+        UIRectCorner rc = UIRectCornerAllCorners;
+        if (exp) {
+            rc = mir ? (UIRectCornerTopRight | UIRectCornerBottomRight)
+                     : (UIRectCornerTopLeft | UIRectCornerBottomLeft);
+        }
         UIBezierPath *tp = exp
             ? [UIBezierPath bezierPathWithRoundedRect:tr2
-                                    byRoundingCorners:(UIRectCornerTopLeft | UIRectCornerBottomLeft)
+                                    byRoundingCorners:rc
                                           cornerRadii:CGSizeMake(tr, tr)]
             : [UIBezierPath bezierPathWithRoundedRect:tr2 cornerRadius:tr];
         _thumbMask.path = tp.CGPath;
     }
     // v0.4.76：勾边路径跟着胶囊外形走，内缩 0.4 让 0.8pt 描边正好压在边界上。
+    // v0.4.77：有照片时改成 open path —— 从照片直边起笔、绕到另一端收笔，
+    // 照片那 48pt 一段不画（端帽自己的边缘就是轮廓），球态则整圈不画。
     _hairline.frame = b;
-    _hairline.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, 0.4, 0.4)
-                                                cornerRadius:MAX(0.0, h / 2.0 - 0.4)].CGPath;
+    if (_thumb.hidden) {
+        _hairline.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, 0.4, 0.4)
+                                                    cornerRadius:MAX(0.0, h / 2.0 - 0.4)].CGPath;
+    } else {
+        _hairline.path = [self sl_hairlinePathForWidth:w height:h expanded:exp mirrored:mir].CGPath;
+    }
     [CATransaction commit];
     // v0.4.75：色晕跟玻璃同尺寸铺满（球态被 _glassMask 裁成圆）。
-    _haze.frame = CGRectMake(0, 0, SLPillMaxW, h);
+    // v0.4.77：定宽 146 后玻璃仍是 196 最大尺寸、靠右对齐（镜像靠左），
+    // 色晕得跟着「可见区」走，否则铺在 196 上、只露出其中 146 那一段，色带中心会偏。
+    _haze.frame = CGRectMake(mir ? 0 : (SLPillMaxW - w), 0, w, h);
 
     // v0.4.37：状态色铺满整条胶囊。原来展开态只盖左侧 48pt 圆，
     // 球是蓝的、胶囊还是白玻璃，中间像被切断。
