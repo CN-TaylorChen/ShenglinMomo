@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.62"
+#define SLVersion @"0.4.63"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2666,7 +2666,12 @@ NSString *SLHookStatusSummary(void) {
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification *n) {
             @try { SLInstallHooks(); } @catch (NSException *e) {}
-            @try { SLDumpUniverseClassesOnce(); } @catch (NSException *e) {}
+            // v0.4.63：CENSUS 会 objc_getClassList 枚举全部类并 class_copyMethodList，
+            // 纯诊断（只写日志）却跑在主线程，每次回前台都卡一下。挪到后台队列，
+            // 主线程不再被类表遍历阻塞（tweak 被多个 Momo 进程加载时尤其明显）。
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                @try { SLDumpUniverseClassesOnce(); } @catch (NSException *e) {}
+            });
         }];
         // v0.4.53：切后台时若还挂着录音态，强制落定。
         // 后台不会再出帧，与其让球红着挂在那儿、切回来还是红的，不如当场收干净。

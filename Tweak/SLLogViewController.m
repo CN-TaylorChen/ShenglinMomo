@@ -4,7 +4,7 @@
 
 @interface SLLogViewController ()
 @property (nonatomic, strong) UITextView *tv;
-@property (nonatomic, strong) UILabel *status;
+@property (nonatomic, strong) UITextView *status;
 @end
 
 @implementation SLLogViewController
@@ -24,11 +24,17 @@
         SLPillBarItem(@"清空", self, @selector(sl_clear))
     ];
 
-    self.status = [[UILabel alloc] initWithFrame:CGRectZero];
+    // v0.4.63：原来是 UILabel numberOfLines=0，会把「已装钩子：…」整串 30+ 方法名全展开，
+    // 占掉约 40% 屏高。改成高度受限的可滚动 UITextView，完整列表仍在（可滚动 / 复制时也能拿到）。
+    self.status = [[UITextView alloc] initWithFrame:CGRectZero];
     self.status.translatesAutoresizingMaskIntoConstraints = NO;
-    self.status.numberOfLines = 0;
+    self.status.editable = NO;
+    self.status.selectable = NO;
+    self.status.scrollEnabled = YES;
     self.status.font = [UIFont systemFontOfSize:11];
     self.status.textColor = [UIColor secondaryLabelColor];
+    self.status.backgroundColor = [UIColor clearColor];
+    self.status.textContainerInset = UIEdgeInsetsMake(0, 0, 0, 0);
 
     // 状态卡：钩子摘要 + 日志文件路径。玻璃片垫底，压在模糊背景上才读得清。
     UIView *statusCard = [[UIView alloc] initWithFrame:CGRectZero];
@@ -65,7 +71,7 @@
         [self.status.leadingAnchor constraintEqualToAnchor:statusCard.leadingAnchor constant:12],
         [self.status.trailingAnchor constraintEqualToAnchor:statusCard.trailingAnchor constant:-12],
         [self.status.topAnchor constraintEqualToAnchor:statusCard.topAnchor constant:10],
-        [self.status.bottomAnchor constraintEqualToAnchor:statusCard.bottomAnchor constant:-10],
+        [self.status.heightAnchor constraintEqualToConstant:92],
 
         [logCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
         [logCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
