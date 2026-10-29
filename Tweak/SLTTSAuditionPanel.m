@@ -774,7 +774,7 @@ static NSData *SLWavFromPCM(NSData *pcm, uint32_t sampleRate, uint16_t channels,
         vc.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
         sSLShownPanel = vc;
         SLLog(@"AUDITION t=%.3f present 开始", CACurrentMediaTime());
-        [top presentViewController:vc animated:NO completion:^{
+        [top presentViewController:vc animated:YES completion:^{
             SLLog(@"AUDITION t=%.3f present completion", CACurrentMediaTime());
             // v0.4.54：卡片出现后把球抬到最上层，别被试听卡片压住
             SLRaiseFloatButton();
