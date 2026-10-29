@@ -19,17 +19,12 @@
 #define kSLFloatIconKey @"SLFloatIcon"
 #define kSLFloatIconDefault @"brand"
 
-// v0.4.73：图标动效三种方案，先在设置里做成可切换，实机对比后再定默认值。
-//   A  整图缩放呼吸（图片自己动）
-//   B  缩放 + 合成态外圈一段弧在转（图片静止，方向感交给弧）
-//   C  图片完全不动，外圈一圈常驻状态环（灰 / 红 / 蓝 / 绿）
+// v0.4.74：自定义图标动效。外圈（光晕 + 26% 状态底色）永远不动，
+// 四态差异全部由图标自身的运动表达，所以这里只存「图标怎么动」这一件事：
+//   0 = 关闭（和 v0.4.72 一模一样）
+//   1 = 律动（四态缩放，合成态用「泵动」：慢缩 → 急弹 → 缓落）
+//   2 = 律动 + 扫光（再叠一道 45° 高光，按状态让路）
 #define kSLFloatEffectKey @"SLFloatEffect"
-typedef NS_ENUM(NSInteger, SLIconEffect) {
-    SLIconEffectNone  = 0,
-    SLIconEffectScale = 1,
-    SLIconEffectArc   = 2,
-    SLIconEffectRing  = 3,
-};
 
 static NSString *SLFloatIconDir(void) {
     NSString *dir = [[AWECAUtils documentsPath] stringByAppendingPathComponent:@"ShenglinMomo/float"];
@@ -52,22 +47,23 @@ static NSString *SLFloatIconValue(void) {
     return v;
 }
 
-// v0.4.73：当前动效的短标记，设置页那行右侧顺手带上，免得忘了在试哪一版
-static NSString *SLFloatEffectShort(void) {
-    NSInteger m = [[NSUserDefaults standardUserDefaults] integerForKey:kSLFloatEffectKey];
-    if (m == SLIconEffectScale) return @"A";
-    if (m == SLIconEffectArc) return @"B";
-    if (m == SLIconEffectRing) return @"C";
-    return @"";
+// v0.4.74：越界值一律当「关闭」，以后换方案数值改了也不会出现脏状态
+static NSInteger SLFloatEffectValue(void) {
+    NSInteger v = [[NSUserDefaults standardUserDefaults] integerForKey:kSLFloatEffectKey];
+    if (v < 0 || v > 2) return 0;
+    return v;
 }
 
 NSString *SLFloatIconSummary(void) {
     NSString *v = SLFloatIconValue();
-    NSString *name = @"默认";
-    if ([v hasPrefix:@"image:"]) name = @"自定义图片";
-    else if ([v hasPrefix:@"emoji:"]) name = [v substringFromIndex:6];
-    NSString *e = SLFloatEffectShort();
-    return e.length ? [NSString stringWithFormat:@"%@ · 动效%@", name, e] : name;
+    NSString *base = @"默认";
+    if ([v hasPrefix:@"image:"]) base = @"自定义图片";
+    else if ([v hasPrefix:@"emoji:"]) base = [v substringFromIndex:6];
+    // v0.4.74：正在试哪一档动效，设置页那行右侧一眼能看到
+    NSInteger fx = SLFloatEffectValue();
+    if (fx == 1) return [base stringByAppendingString:@" · 律动"];
+    if (fx == 2) return [base stringByAppendingString:@" · 律动+扫光"];
+    return base;
 }
 
 // 品牌图形：黑底圆 + 六根圆角条。100 单位为画布基准，跟设计稿一一对应，
@@ -227,17 +223,15 @@ static UIImage *SLTransparentImage(void) {
 @interface SLFloatButton : UIButton
 @property (nonatomic, assign) BOOL slExpanded;
 @property (nonatomic, assign) SLFloatState slState;
-/// v0.4.73：图标动效模式（0 关 / 1 A / 2 B / 3 C），读 NSUserDefaults
-@property (nonatomic, assign) SLIconEffect slIconEffect;
-- (void)sl_applyIconEffect;
-- (void)sl_clearIconEffect;
-- (BOOL)sl_iconIsCustom;
-- (CGRect)sl_ringRect;
 - (void)sl_loadIcon;
 - (void)sl_applyState:(SLFloatState)state;
 /// v0.4.49：四杠逐根动画（A 均衡器 / C 呼吸，绕中心缩放）
 - (void)sl_layoutBars;
 - (void)sl_updateBarMotion;
+/// v0.4.74：自定义图片 / emoji 的图标动效（律动 / 律动 + 扫光）
+- (void)sl_updateIconMotion;
+/// v0.4.74：扫光条几何（跟着图标尺寸走）
+- (void)sl_layoutSweepForSize:(CGSize)sz;
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated;
 /// v0.4.45：回到前台重挂呼吸光晕（后台期间动画会被系统整条移除）
 - (void)sl_restartHalo;
@@ -405,6 +399,9 @@ static UIImage *SLTransparentImage(void) {
     UIView *_bars;
     UIView *_barCell[4];
     UIImageView *_thumb;
+    // v0.4.74：图标扫光层。挂在 _thumb.layer 上 —— _thumb 本身 clipsToBounds + 圆角，
+    // 渐变会被圆自动裁掉，不用再算 path，也不占额外视图层级。
+    CAGradientLayer *_sweep;
     UILabel *_emoji;
     UIView *_sep;
     UILabel *_name;
@@ -417,10 +414,6 @@ static UIImage *SLTransparentImage(void) {
     CAShapeLayer *_haloIn;
     CAShapeLayer *_haloOut;
     CAShapeLayer *_pulse;
-    // v0.4.73：动效三方案的载体。_ring = C 的常驻状态环，_arc = B 合成态的转弧，
-    // 两者共用同一个 40pt 圆，只是画法与动画不同。
-    CAShapeLayer *_ring;
-    CAShapeLayer *_arc;
     UIView *_readyDot;
     CFTimeInterval _longPressAt;
     // v0.4.40：球在哪半边，胶囊就往哪边「挂」—— 图标端留在球原位，箭头端伸向屏内
@@ -506,6 +499,18 @@ static UIImage *SLTransparentImage(void) {
         _thumb.userInteractionEnabled = NO;
         [self addSubview:_thumb];
 
+        // v0.4.74：45° 扫光。默认 opacity 0 —— 只有动效选到「律动 + 扫光」才点亮，
+        // 所以不选它的时候这颗球和对前几版完全没区别。
+        _sweep = [CAGradientLayer layer];
+        _sweep.colors = @[(__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
+                          (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.92].CGColor,
+                          (__bridge id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor];
+        _sweep.locations = @[@0.0, @0.5, @1.0];
+        _sweep.startPoint = CGPointMake(0.0, 0.0);
+        _sweep.endPoint = CGPointMake(1.0, 0.0);
+        _sweep.opacity = 0.0f;
+        [_thumb.layer addSublayer:_sweep];
+
         _emoji = [[UILabel alloc] initWithFrame:CGRectZero];
         _emoji.textAlignment = NSTextAlignmentCenter;
         _emoji.font = [UIFont systemFontOfSize:22];
@@ -574,23 +579,6 @@ static UIImage *SLTransparentImage(void) {
         _readyDot.userInteractionEnabled = NO;
         [self addSubview:_readyDot];
 
-        // v0.4.73：环 / 弧都挂在 self.layer 上（在图片之上，才压得住图片边缘），
-        // 默认 opacity 0，具体显不显由 sl_applyIconEffect 决定。
-        _ring = [CAShapeLayer layer];
-        _ring.fillColor = nil;
-        _ring.lineWidth = 2.0;
-        _ring.opacity = 0.0;
-        [self.layer addSublayer:_ring];
-
-        _arc = [CAShapeLayer layer];
-        _arc.fillColor = nil;
-        _arc.lineWidth = 2.5;
-        _arc.lineCap = kCALineCapRound;
-        _arc.opacity = 0.0;
-        [self.layer addSublayer:_arc];
-
-        _slIconEffect = (SLIconEffect)[[NSUserDefaults standardUserDefaults] integerForKey:kSLFloatEffectKey];
-
         [self addTarget:self action:@selector(sl_tap) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(sl_pan:)];
         [self addGestureRecognizer:pan];
@@ -645,10 +633,9 @@ static UIImage *SLTransparentImage(void) {
         _glyph.alpha = 0.0;   // v0.4.49：静态图不显示，实际由 _bars 逐根绘制 + 动画
     }
     _name.text = SLFloatPackName();
-    // v0.4.73：换了图标就把动效重挂一遍（自定义图片和四杠走的是两条分支，
-    // 环只在自定义图标时出现，隐显必须在这里跟着 _thumb 一起翻）。
-    [self sl_applyIconEffect];
     [self setNeedsLayout];
+    // v0.4.74：换图标后要按新形态重挂（换成自定义图片才动，换回四杠就清干净）
+    [self sl_updateIconMotion];
 }
 
 // v0.4.49：把四根条摆到 _bars 里。几何沿用 SLBrandGlyphCompact：
@@ -748,136 +735,113 @@ static UIImage *SLTransparentImage(void) {
     }
 }
 
-#pragma mark 图标动效（A / B / C）
+// v0.4.74：自定义图标的四态动效。
+// 一条铁律：外圈一律不动 —— 光晕（_haloIn/_haloOut）和内层 26% 状态底色原样保留，
+// 不再加环、不加弧。原因：光晕本来就在呼吸（2.8 / 0.9 / 1.4 / 1.6s 半周期），
+// 再叠一圈不同频的环会拍频，空闲约 16.8 秒才同相一次、录音每 2.3 秒错一拍，看着像抖。
+// 所以这里只让「图标自己」动，而且周期全部对齐光晕的 half，绝不另一套节奏。
+- (void)sl_updateIconMotion {
+    // 只对自定义图片 / 表情生效。默认四杠图形本来就有四套逐根动画，再叠一层会打架。
+    UIView *target = nil;
+    if (!_thumb.hidden) target = _thumb;
+    else if (!_emoji.hidden) target = _emoji;
 
-// 只有自定义图片 / 表情才参与这三种动效。默认的四杠品牌图形本来就有四套逐根动画，
-// 再套一层缩放或圆环，两套节奏会互相抢。
-- (BOOL)sl_iconIsCustom {
-    return (!_thumb.hidden) || (!_emoji.hidden);
-}
+    NSInteger fx = SLFloatEffectValue();
 
-// 环 / 弧共用的圆：直径 40pt（48 的球让出 4pt 玻璃边）。
-// 球态居中；展开态贴着图标端那颗 48pt 圆居中，镜像时翻到右端。
-- (CGRect)sl_ringRect {
-    CGFloat d = SLBallSide - 8.0;
-    CGRect b = self.bounds;
-    if (!self.slExpanded) {
-        return CGRectMake((CGRectGetWidth(b) - d) / 2.0, (CGRectGetHeight(b) - d) / 2.0, d, d);
-    }
-    CGFloat x = _mirrored ? (CGRectGetWidth(b) - 4.0 - d) : 4.0;
-    return CGRectMake(x, (CGRectGetHeight(b) - d) / 2.0, d, d);
-}
+    // 先无条件清干净：换图标、关动效、切回四杠形态都走这一条
+    [_thumb.layer removeAnimationForKey:@"slIconMotion"];
+    [_emoji.layer removeAnimationForKey:@"slIconMotion"];
+    [_sweep removeAllAnimations];
+    _sweep.opacity = 0.0f;
 
-- (void)sl_clearIconEffect {
-    [_thumb.layer removeAnimationForKey:@"slEffScale"];
-    [_emoji.layer removeAnimationForKey:@"slEffScale"];
-    [_ring removeAnimationForKey:@"slRingBreath"];
-    [_ring removeAnimationForKey:@"slRingSweepA"];
-    [_ring removeAnimationForKey:@"slRingSweepB"];
-    [_arc removeAnimationForKey:@"slArcSpin"];
-    _ring.opacity = 0.0;
-    _arc.opacity = 0.0;
-    _ring.strokeStart = 0.0;
-    _ring.strokeEnd = 1.0;
-}
-
-- (void)sl_applyIconEffect {
-    [self sl_clearIconEffect];
-    SLIconEffect mode = self.slIconEffect;
-    if (mode == SLIconEffectNone) return;
+    if (!target || fx <= 0) return;
 
     SLFloatState st = self.slState;
-    CALayer *iconLayer = (!_thumb.hidden) ? _thumb.layer : ((!_emoji.hidden) ? _emoji.layer : nil);
 
-    // ---- A / B：让图片自己动 ----
-    // B 的合成态刻意不缩放：那一刻图片要「静」，方向感交给外面那段转弧，
-    // 否则图片一边涨缩、弧一边转，两套方向打架。
-    if (iconLayer && (mode == SLIconEffectScale || mode == SLIconEffectArc)) {
-        BOOL restOnSynth = (mode == SLIconEffectArc && st == SLFloatStateSynthesizing);
-        if (!restOnSynth) {
-            if (st == SLFloatStateReady) {
-                // 就绪双跳，和四杠那套「上冲两次」同节奏，胶囊里外一致
-                CAKeyframeAnimation *k = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
-                k.values = @[@1.0, @1.06, @1.0, @1.06, @1.02, @1.0];
-                k.keyTimes = @[@0.0, @0.18, @0.38, @0.56, @0.78, @1.0];
-                k.duration = 1.1;
-                k.repeatCount = HUGE_VALF;
-                k.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-                [iconLayer addAnimation:k forKey:@"slEffScale"];
-            } else {
-                // 幅度压得很小：人像放大会「喘气」，0.96 只是让人看出它还活着
-                CGFloat lo = 0.96, dur = 1.2;
-                if (st == SLFloatStateRecording) { lo = 0.95; dur = 0.32; }
-                else if (st == SLFloatStateSynthesizing) { lo = 0.97; dur = 0.60; }
-                CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-                a.fromValue = @(lo);
-                a.toValue = @1.0;
-                a.duration = dur;
-                a.autoreverses = YES;
-                a.repeatCount = HUGE_VALF;
-                a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-                [iconLayer addAnimation:a forKey:@"slEffScale"];
-            }
-        }
+    // 半周期与光晕一致：空闲 1.4 / 录音 0.45 / 合成 0.70 / 就绪 0.80
+    CGFloat half = 1.4;
+    CGFloat lo = 0.96;
+    BOOL pump = NO, hop = NO;
+    if (st == SLFloatStateRecording) { half = 0.45; lo = 0.94; }
+    else if (st == SLFloatStateSynthesizing) { half = 0.70; pump = YES; }
+    else if (st == SLFloatStateReady) { half = 0.80; hop = YES; }
+
+    if (pump) {
+        // 合成态「泵动」：前一半慢慢蓄到 0.945，14% 的时间急弹到 1.03，再缓落回 1.0。
+        // 刻意用不对称曲线 —— 空闲和录音都是正弦来回，合成态一眼就能区分开。
+        // 不转、不摇：人像照片旋转或左右晃动都会显得怪。
+        CAKeyframeAnimation *k = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        k.values = @[@1.0, @0.945, @1.03, @1.005, @1.0];
+        k.keyTimes = @[@0.0, @0.50, @0.64, @0.80, @1.0];
+        k.duration = half * 2.0;
+        k.repeatCount = HUGE_VALF;
+        k.fillMode = kCAFillModeBoth;
+        k.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [target.layer addAnimation:k forKey:@"slIconMotion"];
+    } else if (hop) {
+        // 就绪：双跳，和四杠同拍同时长（1.1s）
+        CAKeyframeAnimation *k = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+        k.values = @[@1.0, @1.06, @1.0, @1.06, @1.02, @1.0];
+        k.keyTimes = @[@0.0, @0.18, @0.38, @0.56, @0.78, @1.0];
+        k.duration = 1.1;
+        k.repeatCount = HUGE_VALF;
+        k.fillMode = kCAFillModeBoth;
+        k.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [target.layer addAnimation:k forKey:@"slIconMotion"];
+    } else {
+        // 空闲 0.96 / 录音 0.94：只是「轻重」不同，不靠幅度区分，避免人像呼吸过重
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+        a.fromValue = @(lo);
+        a.toValue = @1.0;
+        a.duration = half;
+        a.autoreverses = YES;
+        a.repeatCount = HUGE_VALF;
+        a.fillMode = kCAFillModeBoth;
+        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [target.layer addAnimation:a forKey:@"slIconMotion"];
     }
 
-    // ---- B：合成态外圈一段弧绕圈跑 ----
-    if (mode == SLIconEffectArc && st == SLFloatStateSynthesizing) {
-        _arc.strokeColor = [UIColor systemBlueColor].CGColor;
-        _arc.strokeStart = 0.0;
-        _arc.strokeEnd = 0.26;
-        _arc.opacity = 0.95;
-        CABasicAnimation *spin = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
-        spin.fromValue = @0.0;
-        spin.toValue = @(M_PI * 2.0);
-        spin.duration = 1.1;
-        spin.repeatCount = HUGE_VALF;
-        [_arc addAnimation:spin forKey:@"slArcSpin"];
-    }
+    // ---- 扫光：只有「律动 + 扫光」才开 ----
+    // 让路原则：图标自己动得越猛，扫光越淡、越快，只当氛围，绝不抢戏。
+    //   空闲 4.6s / 0.85（图标几乎不动，扫光是主运动）
+    //   录音 1.8s / 0.38（快速缩放当主角）
+    //   合成 1.4s / 0.34（泵动当主角）
+    //   就绪 2.4s / 0.55（双跳 + 光循环扫，收尾）
+    if (fx < 2) return;
 
-    // ---- C：外圈常驻状态环 ----
-    if (mode == SLIconEffectRing && [self sl_iconIsCustom]) {
-        UIColor *c = [UIColor colorWithWhite:0.42 alpha:1.0];   // 空闲：中性灰，不抢注意力
-        if (st == SLFloatStateRecording) c = [UIColor systemRedColor];
-        else if (st == SLFloatStateSynthesizing) c = [UIColor systemBlueColor];
-        else if (st == SLFloatStateReady) c = [UIColor systemGreenColor];
-        _ring.strokeColor = c.CGColor;
+    CGSize sz = target.bounds.size;
+    if (sz.width <= 0.0 || sz.height <= 0.0) return;
 
-        if (st == SLFloatStateSynthesizing) {
-            // 合成：只留 25% 的弧绕着跑，比整圈闪烁更像「正在生成」
-            _ring.strokeStart = 0.0;
-            _ring.strokeEnd = 0.25;
-            CABasicAnimation *s0 = [CABasicAnimation animationWithKeyPath:@"strokeStart"];
-            s0.fromValue = @0.0; s0.toValue = @0.75;
-            s0.duration = 1.1; s0.repeatCount = HUGE_VALF;
-            [_ring addAnimation:s0 forKey:@"slRingSweepA"];
-            CABasicAnimation *s1 = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
-            s1.fromValue = @0.25; s1.toValue = @1.0;
-            s1.duration = 1.1; s1.repeatCount = HUGE_VALF;
-            [_ring addAnimation:s1 forKey:@"slRingSweepB"];
-            _ring.opacity = 0.95;
-        } else {
-            _ring.strokeStart = 0.0;
-            _ring.strokeEnd = 1.0;
-            if (st == SLFloatStateReady) {
-                // 就绪常亮：它要一直亮到你发出去，再呼吸反而看不清状态
-                _ring.opacity = 0.92;
-            } else {
-                CGFloat half = (st == SLFloatStateRecording) ? 0.32 : 1.2;
-                CGFloat a0 = (st == SLFloatStateRecording) ? 0.45 : 0.28;
-                CGFloat a1 = (st == SLFloatStateRecording) ? 1.00 : 0.68;
-                CABasicAnimation *br = [CABasicAnimation animationWithKeyPath:@"opacity"];
-                br.fromValue = @(a0);
-                br.toValue = @(a1);
-                br.duration = half;
-                br.autoreverses = YES;
-                br.repeatCount = HUGE_VALF;
-                br.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
-                [_ring addAnimation:br forKey:@"slRingBreath"];
-                _ring.opacity = a1;
-            }
-        }
-    }
+    CGFloat sweepDur = 4.6, sweepAlpha = 0.85;
+    if (st == SLFloatStateRecording) { sweepDur = 1.8; sweepAlpha = 0.38; }
+    else if (st == SLFloatStateSynthesizing) { sweepDur = 1.4; sweepAlpha = 0.34; }
+    else if (st == SLFloatStateReady) { sweepDur = 2.4; sweepAlpha = 0.55; }
+
+    [self sl_layoutSweepForSize:sz];
+    _sweep.opacity = (float)sweepAlpha;
+
+    // 45° 斜条从左上角外扫到右下角外：起点/终点都按高度放大，保证整块都被扫过
+    CGFloat span = sz.height * 1.2;
+    CABasicAnimation *sp = [CABasicAnimation animationWithKeyPath:@"position.x"];
+    sp.fromValue = @(-span);
+    sp.toValue = @(sz.width + span);
+    sp.duration = sweepDur;
+    sp.repeatCount = HUGE_VALF;
+    sp.fillMode = kCAFillModeBoth;
+    sp.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+    [_sweep addAnimation:sp forKey:@"slSweep"];
+}
+
+// 扫光条：宽度随图标走、高度两倍多（斜着放才够长），整体转 45°。
+// 只设 bounds / transform，position 交给动画控制 —— 否则每次 layout 都会把扫光拽回中间。
+- (void)sl_layoutSweepForSize:(CGSize)sz {
+    if (sz.width <= 0.0 || sz.height <= 0.0) return;
+    CGFloat band = MAX(18.0, sz.width * 0.38);
+    _sweep.bounds = CGRectMake(0, 0, band, sz.height * 2.6);
+    // 纵向必须钉在正中间：扫光动画只动 position.x，position.y 没人管的话
+    // 默认是 0，条会贴着图标顶边转，只剩一段残影。
+    _sweep.position = CGPointMake(sz.width * 0.5, sz.height * 0.5);
+    _sweep.transform = CATransform3DMakeRotation(M_PI / 4.0, 0, 0, 1);
 }
 
 #pragma mark 状态
@@ -913,6 +877,9 @@ static UIImage *SLTransparentImage(void) {
         [self sl_layoutBars];
     } completion:nil];
     [self sl_updateBarMotion];
+    // v0.4.74：图标动效也跟着状态换节奏。注意不能塞进 sl_updateBarMotion ——
+    // 自定义图片时 _bars 是 hidden，那个方法一开始就 return 了，根本走不到这一句。
+    [self sl_updateIconMotion];
     // v0.4.57：合成完成→就绪，整颗胶囊轻轻「落定」一下（缩放回弹）。
     // v0.4.60：只在「没有试听面板」时才弹 —— 面板自己有 0.94→1.0 的弹入，
     // 两下缩放同帧叠加会像「球被按了一下」，所以面板路径改走 SLFloatSetStateQuiet 静音。
@@ -949,8 +916,6 @@ static UIImage *SLTransparentImage(void) {
     // v0.4.41：状态一变就重读名字。原来只改颜色不改文字，发完那一发胶囊还挂着
     // 刚才的包名 —— 用户以为没发出去，实际问题只是字没刷新。
     _name.text = SLFloatPackName();
-    // v0.4.73：状态色 / 节奏都变了，动效跟着换一套
-    [self sl_applyIconEffect];
     [self setNeedsLayout];
 }
 
@@ -1000,8 +965,8 @@ static UIImage *SLTransparentImage(void) {
     [self sl_startBreath:self.slState];
     // v0.4.49：四杠循环动画同样会被系统在后台移除，回前台一并重挂
     [self sl_updateBarMotion];
-    // v0.4.73：环 / 弧是 CA 动画，进后台同样会被整条摘掉
-    [self sl_applyIconEffect];
+    // v0.4.74：图标缩放 / 扫光同样是常驻 CA 动画，一样会被摘掉
+    [self sl_updateIconMotion];
 }
 
 - (void)dealloc {
@@ -1308,6 +1273,18 @@ static UIImage *SLTransparentImage(void) {
     CGFloat iconS = SLBallSide;
     _thumb.frame = exp ? CGRectMake(SLMX(0.0, iconS), 0, iconS, iconS) : b;
     _thumb.layer.cornerRadius = MIN(CGRectGetWidth(_thumb.bounds), CGRectGetHeight(_thumb.bounds)) / 2.0;
+    // v0.4.74：扫光条跟着图标尺寸走（球态 48、展开态也是 48，换了设备也不会错位）。
+    // 关掉隐式动画，免得布局时扫光条自己「长出来」一下。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [self sl_layoutSweepForSize:_thumb.bounds.size];
+    [CATransaction commit];
+    // v0.4.74：首次进场时 _thumb.bounds 还是 0，扫光那条算不出长度就跳过了。
+    // 等这里尺寸真正有效、而扫光还没挂上时，补一次 —— 只补「律动+扫光」，别的档位不碰，
+    // 否则每帧 layout 都会把缩放动画重启一遍，看着像在闪。
+    if (SLFloatEffectValue() == 2 && _sweep.animationKeys.count == 0 && !_thumb.hidden) {
+        [self sl_updateIconMotion];
+    }
     _emoji.font = [UIFont systemFontOfSize:22.0];   // v0.4.44：emoji 图标同样不缩
     _emoji.frame = exp ? CGRectMake(SLMX(0.0, iconS), 0, iconS, iconS) : b;
 
@@ -1351,13 +1328,6 @@ static UIImage *SLTransparentImage(void) {
                                                cornerRadius:(h + 14.0) / 2.0].CGPath;
     _pulse.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -5.0, -5.0)
                                              cornerRadius:(h + 10.0) / 2.0].CGPath;
-
-    // v0.4.73：环 / 弧跟着形态走 —— 球态居中，展开态贴图标端那颗 48pt 圆。
-    // 用整圆当 path，局部弧长靠 strokeStart/End 控制，B 的转弧则直接转这一圈。
-    CGRect rr = [self sl_ringRect];
-    CGPathRef circle = [UIBezierPath bezierPathWithOvalInRect:rr].CGPath;
-    _ring.path = circle;
-    _arc.path = circle;
 }
 
 @end
@@ -2235,11 +2205,6 @@ void SLRefreshFloatButton(void) {
         btn = (SLFloatButton *)[w viewWithTag:SLBtnTag];
     }
     SLApplyFloatIcon(btn);
-    // v0.4.73：动效模式可能刚在设置里改过，先同步给按钮，再让 sl_applyState 重挂动画
-    if ([btn isKindOfClass:[SLFloatButton class]]) {
-        ((SLFloatButton *)btn).slIconEffect =
-            (SLIconEffect)[[NSUserDefaults standardUserDefaults] integerForKey:kSLFloatEffectKey];
-    }
     // v0.4.40：装填了就亮成蓝的、撤销了回空闲 —— 名字（sl_loadIcon）和颜色一起走，
     // 否则会出现「名字写原声、球还是蓝的」这种自相矛盾。
     if (btn) [btn sl_applyState:([SLVoicePack isOneShotPending] ? SLFloatStateReady : SLFloatStateIdle)];
@@ -2411,19 +2376,27 @@ void SLStartEntryWatcher(void) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    // v0.4.73：第 1 段是三种图标动效的对比开关（试完再定默认值）
-    return 2;
+    return 2;   // v0.4.9：删掉表情预设，只留自定义图片；v0.4.74：多一段图标动效
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 1) return 4;   // 关闭 / A / B / C
+    if (section == 1) return 3;   // 关闭 / 律动 / 律动 + 扫光
     return 2;   // 从相册选择 / 恢复默认
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    return section == 1 ? @"图标动效（自定义图片 / 表情生效）" : @"自定义图标";
+    if (section == 1) return @"图标动效";
+    return @"自定义图标";
+}
+
+// v0.4.74：把三种动效的差别写在段尾，省得逐个点着试
+- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
+    (void)tv;
+    if (section != 1) return nil;
+    return @"只对自定义图片 / 表情生效；扫光只作用于自定义图片。"
+           @"外圈光晕与状态底色不变，不会多出额外的环。";
 }
 
 // v0.4.50：单元格底色统一刷玻璃片（表格透明后不刷就是纯灰行）
@@ -2440,13 +2413,13 @@ void SLStartEntryWatcher(void) {
     cell.textLabel.font = [UIFont systemFontOfSize:16];
     cell.detailTextLabel.text = nil;
 
+    // v0.4.74：第 2 段 = 图标动效三选一
     if (ip.section == 1) {
-        // v0.4.73：四选一，选中即生效 —— 直接在球上看，不用重启陌陌
-        NSInteger cur = [[NSUserDefaults standardUserDefaults] integerForKey:kSLFloatEffectKey];
-        NSArray<NSString *> *items = @[@"关闭", @"A · 缩放呼吸", @"B · 缩放 + 合成转弧", @"C · 外圈状态环"];
-        cell.textLabel.text = items[ip.row];
-        cell.accessoryType = (cur == ip.row) ? UITableViewCellAccessoryCheckmark
-                                            : UITableViewCellAccessoryNone;
+        static NSArray *names = nil;
+        if (!names) names = @[@"关闭", @"律动", @"律动 + 扫光"];
+        cell.textLabel.text = names[ip.row];
+        cell.accessoryType = (SLFloatEffectValue() == ip.row) ? UITableViewCellAccessoryCheckmark
+                                                             : UITableViewCellAccessoryNone;
         return cell;
     }
 
@@ -2468,11 +2441,12 @@ void SLStartEntryWatcher(void) {
     [tv deselectRowAtIndexPath:ip animated:YES];
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
 
+    // v0.4.74：动效三选一。写完立刻刷球，不用退出设置就能看到变化。
     if (ip.section == 1) {
         [d setInteger:ip.row forKey:kSLFloatEffectKey];
         [d synchronize];
-        SLRefreshFloatButton();   // 立刻换动画，球就在旁边能直接看到
-        [tv reloadSections:[NSIndexSet indexSetWithIndex:1] withRowAnimation:UITableViewRowAnimationNone];
+        [tv reloadData];
+        SLRefreshFloatButton();
         return;
     }
 
