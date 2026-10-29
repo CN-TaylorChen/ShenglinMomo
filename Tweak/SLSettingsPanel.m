@@ -23,10 +23,23 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLGlass.h"
 
+// v0.4.71：语速/音量改用右侧「数值 + 细轨滑块」，行高仍 44pt、跟开关同一列。
+// 系统 UISlider 轨道偏粗，这里压成 3pt，跟设置页的玻璃发丝边一个量级。
+@interface SLThinSlider : UISlider
+@end
+@implementation SLThinSlider
+- (CGRect)trackRectForBounds:(CGRect)bounds {
+    CGRect r = [super trackRectForBounds:bounds];
+    r.origin.y = (bounds.size.height - 3.0) / 2.0;
+    r.size.height = 3.0;
+    return r;
+}
+@end
+
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.70"
+#define SLVersion @"0.4.71"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -300,12 +313,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (ip.row == 2) {
             cell.textLabel.text = @"语速";
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"%.2fx", mgr.speedRatio];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.accessoryView = [self sl_ratioAccessory:YES];
         } else {
             cell.textLabel.text = @"音量";
-            cell.detailTextLabel.text = [NSString stringWithFormat:@"%.2fx", mgr.volumeRatio];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.accessoryView = [self sl_ratioAccessory:NO];
         }
         return cell;
     }
@@ -567,6 +578,87 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         [AWECAUtils showToast:[NSString stringWithFormat:@"%@已改为 %.2fx", title, v] duration:1.5];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
+}
+
+// v0.4.71：语速/音量 → 右侧「数值 + 细轨滑块」；点整行仍走 sl_editRatio 精修（要填 1.37 这种值时用）
+- (UIView *)sl_ratioAccessory:(BOOL)speed {
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 188, 32)];
+
+    UILabel *val = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 52, 32)];
+    val.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
+    val.textColor = [UIColor secondaryLabelColor];
+    val.textAlignment = NSTextAlignmentRight;
+    val.tag = speed ? 99201 : 99202;
+    val.userInteractionEnabled = YES;
+    [val addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sl_ratioReset:)]];
+    [box addSubview:val];
+
+    SLThinSlider *sl = [[SLThinSlider alloc] initWithFrame:CGRectMake(58, 0, 130, 32)];
+    sl.minimumValue = 0.5f;
+    sl.maximumValue = 2.0f;
+    sl.tag = speed ? 99211 : 99212;
+    sl.minimumTrackTintColor = [UIColor labelColor];
+    sl.maximumTrackTintColor = [UIColor tertiaryLabelColor];
+    [sl addTarget:self action:@selector(sl_ratioSliding:) forControlEvents:UIControlEventValueChanged];
+    [sl addTarget:self action:@selector(sl_ratioSettled:) forControlEvents:UIControlEventTouchUpInside |
+                                                                  UIControlEventTouchUpOutside |
+                                                                  UIControlEventTouchCancel];
+    [box addSubview:sl];
+
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    float cur = speed ? mgr.speedRatio : mgr.volumeRatio;
+    if (cur < 0.5f) cur = 0.5f;
+    if (cur > 2.0f) cur = 2.0f;
+    sl.value = cur;
+    val.text = [NSString stringWithFormat:@"%.2fx", cur];
+    return box;
+}
+
+- (float)sl_ratioSnap:(float)v {
+    v = roundf(v * 20.0f) / 20.0f;          // 0.05 一档，130pt 轨道约 4pt 一档
+    if (v < 0.5f) v = 0.5f;
+    if (v > 2.0f) v = 2.0f;
+    return v;
+}
+
+- (void)sl_ratioShowValue:(UISlider *)sl value:(float)v {
+    UILabel *val = [sl.superview viewWithTag:(sl.tag == 99211 ? 99201 : 99202)];
+    val.text = [NSString stringWithFormat:@"%.2fx", v];
+}
+
+- (void)sl_ratioSliding:(UISlider *)sl {
+    BOOL speed = (sl.tag == 99211);
+    float v = [self sl_ratioSnap:sl.value];
+    sl.value = v;
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    if (speed) mgr.speedRatio = v; else mgr.volumeRatio = v;   // 拖动中只改内存，不写盘
+    [self sl_ratioShowValue:sl value:v];
+}
+
+- (void)sl_ratioSettled:(UISlider *)sl {
+    BOOL speed = (sl.tag == 99211);
+    float v = sl.value;
+    BOOL hitCenter = (fabsf(v - 1.0f) < 0.06f);
+    if (hitCenter) v = 1.0f;
+    v = [self sl_ratioSnap:v];
+    sl.value = v;
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    if (speed) mgr.speedRatio = v; else mgr.volumeRatio = v;
+    [mgr saveConfig];
+    [self sl_ratioShowValue:sl value:v];
+    if (hitCenter) {   // 只有吸附回 1.00x 才轻震一次，普通松手不震
+        UIImpactFeedbackGenerator *fb = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [fb impactOccurred];
+    }
+}
+
+- (void)sl_ratioReset:(UITapGestureRecognizer *)g {
+    BOOL speed = (g.view.tag == 99201);
+    AWECATTSManager *mgr = [AWECATTSManager shared];
+    if (speed) mgr.speedRatio = 1.0f; else mgr.volumeRatio = 1.0f;
+    [mgr saveConfig];
+    [self.tableView reloadData];
+    [AWECAUtils showToast:(speed ? @"语速已回到 1.00x" : @"音量已回到 1.00x") duration:1.4];
 }
 
 - (void)sl_powerChanged:(UISwitch *)sw {

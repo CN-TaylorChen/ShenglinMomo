@@ -336,7 +336,7 @@ static UIImage *SLPauseGlyph(void) {
 
     UIView *panel = [[UIView alloc] init];
     panel.tag = 99227;
-    panel.layer.cornerRadius = 16;
+    panel.layer.cornerRadius = 12;
     panel.layer.cornerCurve = kCACornerCurveContinuous;
     panel.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
     panel.layer.borderColor = [SLGlassHairlineColor() CGColor];
@@ -345,19 +345,15 @@ static UIImage *SLPauseGlyph(void) {
     panel.layer.shadowRadius = 18;
     panel.layer.shadowOffset = CGSizeMake(0, 8);
     UIVisualEffectView *blur = SLInstallGlassBackdrop(panel);
-    blur.layer.cornerRadius = 16;
+    blur.layer.cornerRadius = 12;
     blur.layer.cornerCurve = kCACornerCurveContinuous;
     blur.layer.masksToBounds = YES;
     blur.userInteractionEnabled = NO;
 
-    CGFloat pw = 224, rowW = pw - 12, rowH = 52;
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, pw - 32, 20)];
-    title.text = @"添加";
-    title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    title.textColor = [UIColor labelColor];
-    [panel addSubview:title];
+    // v0.4.71：面板收紧 —— 宽 224→172、行高 52→38、去掉「添加」小标题（＋ 本身就是添加入口）
+    CGFloat pw = 172, rowW = pw - 12, rowH = 38;
 
-    CGFloat y = 38;
+    CGFloat y = 6;
     if (self.isRoot) {
         UIView *r1 = [self sl_panelRowWithIcon:[UIImage systemImageNamed:@"folder.badge.plus"] width:rowW title:@"新建文件夹" subtitle:nil tap:^{ [ws sl_newFolder:nil]; }];
         r1.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r1]; y += rowH + 2;
@@ -372,7 +368,7 @@ static UIImage *SLPauseGlyph(void) {
         r2.frame = CGRectMake(6, y, rowW, rowH); [panel addSubview:r2]; y += rowH + 2;
     }
 
-    CGFloat ph = y + 8;
+    CGFloat ph = y + 6;
     CGRect btnRect = [self sl_addButtonRectInView:host];
     CGFloat px = CGRectGetMaxX(btnRect) - pw;
     if (px < 8) px = 8;
@@ -413,20 +409,23 @@ static UIImage *SLPauseGlyph(void) {
 }
 
 - (UIView *)sl_panelRowWithIcon:(UIImage *)icon width:(CGFloat)rowW title:(NSString *)title subtitle:(NSString *)subtitle tap:(void(^)(void))tap {
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 52)];
+    // v0.4.70：副标题与主标题同义，全部去掉；v0.4.71：行高 52→38、图标 30→20、字号 15→13
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 38)];
     row.backgroundColor = SLGlassCellColor();
-    row.layer.cornerRadius = 12;
+    row.layer.cornerRadius = 10;
     row.layer.cornerCurve = kCACornerCurveContinuous;
-    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 11, 30, 30)];
-    iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 9, 20, 20)];
+    iv.image = [icon imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:14
+                                                                                          weight:UIImageSymbolWeightMedium]];
+    iv.tintColor = [UIColor labelColor];
+    iv.contentMode = UIViewContentModeCenter;
     [row addSubview:iv];
-    // v0.4.70：副标题与主标题同义（新建文件夹/创建新文件夹 等），全部去掉；无副标题时单行垂直居中
     BOOL singleLine = (subtitle.length == 0);
-    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, singleLine ? 16 : 9, rowW - 60, singleLine ? 20 : 18)];
-    t1.text = title; t1.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
+    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(38, singleLine ? 9 : 6, rowW - 48, singleLine ? 20 : 17)];
+    t1.text = title; t1.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
     [row addSubview:t1];
     if (!singleLine) {
-        UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
+        UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(38, 23, rowW - 48, 13)];
         t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
         [row addSubview:t2];
     }

@@ -923,7 +923,7 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     // 底色透出背后的超薄毛玻璃，行卡片也统一成同款玻璃 chip。
     UIView *panel = [[UIView alloc] init];
     panel.tag = 99217;
-    panel.layer.cornerRadius = 16;
+    panel.layer.cornerRadius = 12;
     panel.layer.cornerCurve = kCACornerCurveContinuous;
     panel.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
     panel.layer.borderColor = [SLGlassHairlineColor() CGColor];
@@ -932,33 +932,29 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     panel.layer.shadowRadius = 18;
     panel.layer.shadowOffset = CGSizeMake(0, 8);
     UIVisualEffectView *blur = SLInstallGlassBackdrop(panel);
-    blur.layer.cornerRadius = 16;
+    blur.layer.cornerRadius = 12;
     blur.layer.cornerCurve = kCACornerCurveContinuous;
     blur.layer.masksToBounds = YES;
     blur.userInteractionEnabled = NO;
 
-    CGFloat pw = 224, rowW = pw - 12, rowH = 52;
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, pw - 32, 20)];
-    title.text = @"添加音色";
-    title.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    title.textColor = [UIColor labelColor];
-    [panel addSubview:title];
+    // v0.4.71：与语音包面板统一收紧 —— 宽 224→172、行高 52→38、去掉「添加音色」小标题
+    CGFloat pw = 172, rowW = pw - 12, rowH = 38;
 
     UIView *fishRow = [self aweca_panelRowWithIcon:[UIImage systemImageNamed:@"icloud.and.arrow.down"]
                                               width:rowW title:@"从 Fish 导入" subtitle:nil tap:^{
         [ws aweca_pushImportWithMode:SLImportModeMine];
     }];
-    fishRow.frame = CGRectMake(6, 38, rowW, rowH);
+    fishRow.frame = CGRectMake(6, 6, rowW, rowH);
     [panel addSubview:fishRow];
 
     UIView *manualRow = [self aweca_panelRowWithIcon:[UIImage systemImageNamed:@"plus"]
                                                 width:rowW title:@"手动添加" subtitle:nil tap:^{
         [ws addCustomVoice];
     }];
-    manualRow.frame = CGRectMake(6, 38 + rowH + 2, rowW, rowH);
+    manualRow.frame = CGRectMake(6, 6 + rowH + 2, rowW, rowH);
     [panel addSubview:manualRow];
 
-    CGFloat ph = 38 + rowH * 2 + 2 + 10;
+    CGFloat ph = 6 + rowH * 2 + 2 + 6;
     CGRect btnRect = [self aweca_addButtonRectInView:host];
     CGFloat px = CGRectGetMaxX(btnRect) - pw;
     if (px < 8) px = 8;
@@ -1000,20 +996,23 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 
 - (UIView *)aweca_panelRowWithIcon:(UIImage *)icon width:(CGFloat)rowW title:(NSString *)title subtitle:(NSString *)subtitle tap:(void(^)(void))tap {
     // v0.4.64：行变成玻璃 chip（SLGlassCellColor + 连续圆角），跟音色库列表单元格同款。
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 52)];
+    // v0.4.70：副标题与主标题同义，全部去掉；v0.4.71：行高 52→38、图标 30→20、字号 15→13
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 38)];
     row.backgroundColor = SLGlassCellColor();
-    row.layer.cornerRadius = 12;
+    row.layer.cornerRadius = 10;
     row.layer.cornerCurve = kCACornerCurveContinuous;
-    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 11, 30, 30)];
-    iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
+    UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 9, 20, 20)];
+    iv.image = [icon imageWithConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:14
+                                                                                          weight:UIImageSymbolWeightMedium]];
+    iv.tintColor = [UIColor labelColor];
+    iv.contentMode = UIViewContentModeCenter;
     [row addSubview:iv];
-    // v0.4.70：副标题与主标题同义（新建文件夹/创建新文件夹 等），全部去掉；无副标题时单行垂直居中
     BOOL singleLine = (subtitle.length == 0);
-    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(50, singleLine ? 16 : 9, rowW - 60, singleLine ? 20 : 18)];
-    t1.text = title; t1.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
+    UILabel *t1 = [[UILabel alloc] initWithFrame:CGRectMake(38, singleLine ? 9 : 6, rowW - 48, singleLine ? 20 : 17)];
+    t1.text = title; t1.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium]; t1.textColor = [UIColor labelColor];
     [row addSubview:t1];
     if (!singleLine) {
-        UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(50, 29, rowW - 60, 15)];
+        UILabel *t2 = [[UILabel alloc] initWithFrame:CGRectMake(38, 23, rowW - 48, 13)];
         t2.text = subtitle; t2.font = [UIFont systemFontOfSize:11]; t2.textColor = [UIColor tertiaryLabelColor];
         [row addSubview:t2];
     }
