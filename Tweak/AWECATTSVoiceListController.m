@@ -919,9 +919,12 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     [UIView animateWithDuration:0.2 animations:^{ dim.alpha = 0.16; }];
 
     // 面板载体
+    // v0.4.64：统一音色库玻璃语言 —— 圆角走 kCACornerCurveContinuous（和音色库卡片一致），
+    // 底色透出背后的超薄毛玻璃，行卡片也统一成同款玻璃 chip。
     UIView *panel = [[UIView alloc] init];
     panel.tag = 99217;
-    panel.layer.cornerRadius = 14;
+    panel.layer.cornerRadius = 16;
+    panel.layer.cornerCurve = kCACornerCurveContinuous;
     panel.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;
     panel.layer.borderColor = [SLGlassHairlineColor() CGColor];
     panel.layer.shadowColor = [UIColor blackColor].CGColor;
@@ -929,15 +932,16 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
     panel.layer.shadowRadius = 18;
     panel.layer.shadowOffset = CGSizeMake(0, 8);
     UIVisualEffectView *blur = SLInstallGlassBackdrop(panel);
-    blur.layer.cornerRadius = 14;
+    blur.layer.cornerRadius = 16;
+    blur.layer.cornerCurve = kCACornerCurveContinuous;
     blur.layer.masksToBounds = YES;
     blur.userInteractionEnabled = NO;
 
     CGFloat pw = 224, rowW = pw - 12, rowH = 52;
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 10, pw - 32, 20)];
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(16, 12, pw - 32, 20)];
     title.text = @"添加音色";
-    title.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    title.textColor = [UIColor tertiaryLabelColor];
+    title.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    title.textColor = [UIColor labelColor];
     [panel addSubview:title];
 
     UIView *fishRow = [self aweca_panelRowWithIcon:[UIImage systemImageNamed:@"icloud.and.arrow.down"]
@@ -995,7 +999,11 @@ typedef NS_ENUM(NSInteger, AWECAVoiceSection) {
 }
 
 - (UIView *)aweca_panelRowWithIcon:(UIImage *)icon width:(CGFloat)rowW title:(NSString *)title subtitle:(NSString *)subtitle tap:(void(^)(void))tap {
+    // v0.4.64：行变成玻璃 chip（SLGlassCellColor + 连续圆角），跟音色库列表单元格同款。
     UIView *row = [[UIView alloc] initWithFrame:CGRectMake(0, 0, rowW, 52)];
+    row.backgroundColor = SLGlassCellColor();
+    row.layer.cornerRadius = 12;
+    row.layer.cornerCurve = kCACornerCurveContinuous;
     UIImageView *iv = [[UIImageView alloc] initWithFrame:CGRectMake(10, 11, 30, 30)];
     iv.image = icon; iv.tintColor = [UIColor labelColor]; iv.contentMode = UIViewContentModeCenter;
     [row addSubview:iv];
