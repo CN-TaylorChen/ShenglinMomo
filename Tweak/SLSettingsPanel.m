@@ -24,10 +24,36 @@
 #import "SLGlass.h"
 
 // v0.4.71：语速/音量改用右侧「数值 + 细轨滑块」，行高仍 44pt、跟开关同一列。
-// 系统 UISlider 轨道偏粗，这里压成 3pt，跟设置页的玻璃发丝边一个量级。
+// v0.4.72：系统 thumb 是 30pt 白圆，配 3pt 细轨太重、看着像浮在线上；
+// 换成自绘 22pt 白圆（0.5pt 发丝描边），轨道照旧压成 3pt。
+static UIImage *SLThinSliderThumb(void) {
+    static UIImage *img = nil;
+    if (img) return img;
+    CGFloat d = 22.0;
+    UIGraphicsImageRenderer *r = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(d, d)];
+    img = [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef c = ctx.CGContext;
+        [[UIColor whiteColor] setFill];
+        CGContextFillEllipseInRect(c, CGRectMake(0.5, 0.5, d - 1.0, d - 1.0));
+        [[UIColor colorWithWhite:0.0 alpha:0.12] setStroke];
+        CGContextSetLineWidth(c, 0.5);
+        CGContextStrokeEllipseInRect(c, CGRectMake(0.25, 0.25, d - 0.5, d - 0.5));
+    }];
+    return img;
+}
+
 @interface SLThinSlider : UISlider
 @end
 @implementation SLThinSlider
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        UIImage *thumb = SLThinSliderThumb();
+        [self setThumbImage:thumb forState:UIControlStateNormal];
+        [self setThumbImage:thumb forState:UIControlStateHighlighted];
+    }
+    return self;
+}
 - (CGRect)trackRectForBounds:(CGRect)bounds {
     CGRect r = [super trackRectForBounds:bounds];
     r.origin.y = (bounds.size.height - 3.0) / 2.0;
@@ -39,7 +65,7 @@
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.71"
+#define SLVersion @"0.4.72"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -582,7 +608,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 // v0.4.71：语速/音量 → 右侧「数值 + 细轨滑块」；点整行仍走 sl_editRatio 精修（要填 1.37 这种值时用）
 - (UIView *)sl_ratioAccessory:(BOOL)speed {
-    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 188, 32)];
+    // v0.4.72：宽度 188→192，是为了让轨道右端离卡片右缘多留 4pt（对齐其它行的右缘 16pt）。
+    UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 192, 32)];
 
     UILabel *val = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 52, 32)];
     val.font = [UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightRegular];
@@ -593,9 +620,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     [val addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(sl_ratioReset:)]];
     [box addSubview:val];
 
-    SLThinSlider *sl = [[SLThinSlider alloc] initWithFrame:CGRectMake(58, 0, 130, 32)];
-    sl.minimumValue = 0.5f;
-    sl.maximumValue = 2.0f;
+    // 滑块内部只走 0..1 的「位置」，倍率由 sl_ratioValueForPos: 对数换算（见下）。
+    SLThinSlider *sl = [[SLThinSlider alloc] initWithFrame:CGRectMake(62, 0, 126, 32)];
+    sl.minimumValue = 0.0f;
+    sl.maximumValue = 1.0f;
     sl.tag = speed ? 99211 : 99212;
     sl.minimumTrackTintColor = [UIColor labelColor];
     sl.maximumTrackTintColor = [UIColor tertiaryLabelColor];
@@ -609,7 +637,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     float cur = speed ? mgr.speedRatio : mgr.volumeRatio;
     if (cur < 0.5f) cur = 0.5f;
     if (cur > 2.0f) cur = 2.0f;
-    sl.value = cur;
+    sl.value = [self sl_ratioPosForValue:cur];   // 1.00x → 位置 0.5，正好落在轨道正中
     val.text = [NSString stringWithFormat:@"%.2fx", cur];
     return box;
 }
@@ -626,22 +654,35 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     val.text = [NSString stringWithFormat:@"%.2fx", v];
 }
 
+// v0.4.72：位置 p(0..1) 与倍率 v(0.5~2.0) 之间走对数映射 v = 2^(2p-1)。
+// 线性刻度下 1.00x 只占全长 1/3，手柄永远偏左；对数刻度让 1.00x 正好落在 p=0.5，
+// 且 0.5→1.0 与 1.0→2.0 的手感幅度对称（各一个八度）。
+- (float)sl_ratioValueForPos:(float)p {
+    if (p < 0.0f) p = 0.0f;
+    if (p > 1.0f) p = 1.0f;
+    return powf(2.0f, 2.0f * p - 1.0f);
+}
+
+- (float)sl_ratioPosForValue:(float)v {
+    if (v < 0.5f) v = 0.5f;
+    if (v > 2.0f) v = 2.0f;
+    return (log2f(v) + 1.0f) / 2.0f;
+}
+
 - (void)sl_ratioSliding:(UISlider *)sl {
     BOOL speed = (sl.tag == 99211);
-    float v = [self sl_ratioSnap:sl.value];
-    sl.value = v;
+    float v = [self sl_ratioValueForPos:sl.value];   // 拖动中不吸附档位，保证跟手顺滑
     AWECATTSManager *mgr = [AWECATTSManager shared];
-    if (speed) mgr.speedRatio = v; else mgr.volumeRatio = v;   // 拖动中只改内存，不写盘
+    if (speed) mgr.speedRatio = v; else mgr.volumeRatio = v;   // 只改内存，不写盘
     [self sl_ratioShowValue:sl value:v];
 }
 
 - (void)sl_ratioSettled:(UISlider *)sl {
     BOOL speed = (sl.tag == 99211);
-    float v = sl.value;
-    BOOL hitCenter = (fabsf(v - 1.0f) < 0.06f);
-    if (hitCenter) v = 1.0f;
-    v = [self sl_ratioSnap:v];
-    sl.value = v;
+    float raw = [self sl_ratioValueForPos:sl.value];
+    BOOL hitCenter = (fabsf(raw - 1.0f) < 0.06f);   // 靠近原声就吸回 1.00x
+    float v = hitCenter ? 1.0f : [self sl_ratioSnap:raw];
+    sl.value = [self sl_ratioPosForValue:v];        // 手柄落到吸附后的档位上
     AWECATTSManager *mgr = [AWECATTSManager shared];
     if (speed) mgr.speedRatio = v; else mgr.volumeRatio = v;
     [mgr saveConfig];
