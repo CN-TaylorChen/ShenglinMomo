@@ -20,9 +20,10 @@
 #define kSLFloatIconDefault @"brand"
 
 // v0.4.74：自定义图标动效。外圈（光晕 + 26% 状态底色）永远不动，
-// 四态差异全部由图标自身的运动表达，所以这里只存「图标怎么动」这一件事：
-//   0 = 关闭（和 v0.4.72 一模一样）
-//   1 = 律动（四态缩放，合成态用「泵动」：慢缩 → 急弹 → 缓落）
+// 四态差异全部由图标自身的运动表达。
+// v0.4.80：动效不再是可选项 —— 设置页里「图标动效」整段删掉，只要当前图标是
+// 自定义图片就默认走律动（四态缩放，合成态「泵动」：慢缩 → 急弹 → 缓落）。
+// 这个键 v0.4.80 起不再读写，留着只为旧版本存过的值不显得突兀。
 #define kSLFloatEffectKey @"SLFloatEffect"
 
 static NSString *SLFloatIconDir(void) {
@@ -78,20 +79,18 @@ static NSString *SLFloatIconValue(void) {
     return v;
 }
 
-// v0.4.74：越界值一律当「关闭」，以后换方案数值改了也不会出现脏状态
+// v0.4.80：没有「关闭」这一档了。只要图标是自定义图片就走律动，
+// 真正决定动不动的是 sl_updateIconMotion 里的「当前有没有图」——
+// 默认四杠形态本来就是自己那套逐根动画，不走这里。
 static NSInteger SLFloatEffectValue(void) {
-    NSInteger v = [[NSUserDefaults standardUserDefaults] integerForKey:kSLFloatEffectKey];
-    if (v < 0 || v > 1) return 0;
-    return v;
+    return 1;
 }
 
 NSString *SLFloatIconSummary(void) {
     NSString *v = SLFloatIconValue();
     NSString *base = @"默认";
     if ([v hasPrefix:@"image:"]) base = @"自定义图片";
-    // v0.4.74：正在试哪一档动效，设置页那行右侧一眼能看到
-    NSInteger fx = SLFloatEffectValue();
-    if (fx == 1) return [base stringByAppendingString:@" · 律动"];
+    // v0.4.80：动效固定随图片开启，右侧不再挂「· 律动」后缀
     return base;
 }
 
@@ -1237,38 +1236,28 @@ static UIImage *SLTransparentImage(void) {
 }
 
 // v0.4.46：松手贴边，贴哪条边由图标端决定（图标端就是收起后球的位置）。
-// v0.4.79：改成「离边 40pt 内才吸」，判定基准换成胶囊中心。
-// 垂直方向不吸附（上下位置保持用户放的样子），只把新球位记下来。
+// v0.4.80：回退 v0.4.79 的「离边 40pt 内才吸 / 中心判定 / 0.2s 无过冲」，
+// 恢复一律贴边 + 弹簧回弹。垂直方向不吸附（上下位置保持用户放的样子），
+// 只把新球位记下来。
 - (void)sl_settlePillToEdge {
     UIView *sv = self.superview;
     if (!sv) return;
     CGSize sz = sv.bounds.size;
     CGRect f = self.frame;
     static const CGFloat kEdgePad = 6.0;
-    // v0.4.79：只有离边 40pt 以内才吸过去。原来「松手一律贴边」，屏幕上不存在
-    // 「停在原地」这个结果 —— 拖 40pt 松手它自己滑回去、跨过中线就整条甩到对面，
-    // 手感就是「轻轻一拖跑很远」。
-    static const CGFloat kSnapZone = 40.0;
-
-    // v0.4.79：判定基准从「图标端」改成「胶囊中心」。图标端长在胶囊一头，
-    // 拖同样的距离它比中心跑得快一倍 —— 等于早半屏就判了换边，左右看着就不对称。
     CGFloat leftX = kEdgePad;
     CGFloat rightX = sz.width - kEdgePad - f.size.width;
     if (rightX < leftX) rightX = leftX;   // 胶囊比屏还宽时只保证左缘不越界
 
-    BOOL nearLeft  = ((f.origin.x - leftX) <= kSnapZone);
-    BOOL nearRight = ((rightX - f.origin.x) <= kSnapZone);
-
     BOOL wasMirrored = _mirrored;
+    // 图标端落在哪半屏就贴哪条边 —— 收起后球就长在图标端，看着是「球滑到最近的边」
+    CGFloat iconX = _mirrored ? (CGRectGetMaxX(f) - SLBallSide / 2.0)
+                              : (CGRectGetMinX(f) + SLBallSide / 2.0);
+    BOOL toLeft = (iconX < sz.width / 2.0);
+    _mirrored = !toLeft;
+
     CGRect nf = f;
-    if (nearLeft || nearRight) {
-        BOOL toLeft = nearLeft;
-        // 两头都进了吸附区（胶囊几乎占满屏）→ 退回按中心判
-        if (nearLeft && nearRight) toLeft = (CGRectGetMidX(f) < sz.width / 2.0);
-        _mirrored = !toLeft;
-        nf.origin.x = toLeft ? leftX : rightX;
-    }
-    // 没进吸附区就停在原地 —— 内部朝向沿用拖动中已经翻好的 _mirrored
+    nf.origin.x = toLeft ? leftX : rightX;
 
     if (_mirrored != wasMirrored) {
         // 先把内部翻好再滑动：两步都在一帧里完成，但顺序上「先确定面孔再挪位置」，
@@ -1277,14 +1266,11 @@ static UIImage *SLTransparentImage(void) {
         [self layoutIfNeeded];
     }
 
-    if (fabs(nf.origin.x - f.origin.x) > 0.5) {
-        // v0.4.79：不再用过冲弹簧。damping 0.86 会先冲过头再弹回，看着像「被甩」；
-        // 0.2s ease-out 到位即停，和拖动时 1:1 的手感接得上。
-        [UIView animateWithDuration:0.2 delay:0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
-                         animations:^{ self.frame = nf; }
-                         completion:nil];
-    }
+    [UIView animateWithDuration:0.22 delay:0
+         usingSpringWithDamping:0.86 initialSpringVelocity:0
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ self.frame = nf; }
+                     completion:nil];
 
     CGPoint c = CGPointMake(_mirrored ? (CGRectGetMaxX(nf) - SLBallSide / 2.0)
                                       : (CGRectGetMinX(nf) + SLBallSide / 2.0),
@@ -2516,29 +2502,23 @@ void SLStartEntryWatcher(void) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    return 2;   // v0.4.9：删掉表情预设，只留自定义图片；v0.4.74：多一段图标动效
+    // v0.4.9：删掉表情预设，只留自定义图片
+    // v0.4.80：删掉「图标动效」整段（关闭 / 律动 + 段尾说明）
+    return 1;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 1) return 2;   // 关闭 / 律动
+    (void)section;
     return 2;   // 从相册选择 / 恢复默认
 }
 
 - (NSString *)tableView:(UITableView *)tv titleForHeaderInSection:(NSInteger)section {
     (void)tv;
-    if (section == 1) return @"图标动效";
+    (void)section;
     return @"自定义图标";
 }
 
-// v0.4.74：把三种动效的差别写在段尾，省得逐个点着试
-- (NSString *)tableView:(UITableView *)tv titleForFooterInSection:(NSInteger)section {
-    (void)tv;
-    if (section != 1) return nil;
-    // v0.4.79：只留第一段。第二段「换成默认四杠…」讲的是默认图标的行为，
-    // 在这个页面（只列自定义图标的两个选项）里是多余的。
-    return @"只对自定义图片生效。外圈光晕与状态底色不变，不会多出额外的环。";
-}
 
 // v0.4.50：单元格底色统一刷玻璃片（表格透明后不刷就是纯灰行）
 - (void)tableView:(UITableView *)tv willDisplayCell:(UITableViewCell *)cell forRowAtIndexPath:(NSIndexPath *)ip {
@@ -2553,16 +2533,6 @@ void SLStartEntryWatcher(void) {
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.textLabel.font = [UIFont systemFontOfSize:16];
     cell.detailTextLabel.text = nil;
-
-    // v0.4.74：第 2 段 = 图标动效二选一
-    if (ip.section == 1) {
-        static NSArray *names = nil;
-        if (!names) names = @[@"关闭", @"律动"];
-        cell.textLabel.text = names[ip.row];
-        cell.accessoryType = (SLFloatEffectValue() == ip.row) ? UITableViewCellAccessoryCheckmark
-                                                             : UITableViewCellAccessoryNone;
-        return cell;
-    }
 
     NSString *cur = SLFloatIconValue();
     if (ip.row == 0) {
@@ -2581,15 +2551,6 @@ void SLStartEntryWatcher(void) {
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-
-    // v0.4.74：动效二选一。写完立刻刷球，不用退出设置就能看到变化。
-    if (ip.section == 1) {
-        [d setInteger:ip.row forKey:kSLFloatEffectKey];
-        [d synchronize];
-        [tv reloadData];
-        SLRefreshFloatButton();
-        return;
-    }
 
     if (ip.row == 0) {
         [self sl_pickPhoto];
