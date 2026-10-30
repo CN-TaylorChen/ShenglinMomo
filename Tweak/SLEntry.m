@@ -543,6 +543,12 @@ static UIImage *SLTransparentImage(void) {
     UIView *_ttsTrack;
     UIView *_ttsFill;
     UIView *_ttsStroke;          // 失败态的红色描边（正常态看不见）
+    // v0.4.92：合成内容的裁剪容器。遮罩和 _glassMask 用同一条胶囊路径、同一段动画 ——
+    // 玻璃长到哪儿，标题 / 计时 / 取消键才露到哪儿。
+    // v0.4.90 把 frame 一帧落到 196 之后，这四个控件在形变第一帧就按终态排好了，
+    // 而玻璃还要 0.26s 才长到头 —— 中间那 0.1s「取消」就浮在玻璃外面（用户 19:55 截图）。
+    UIView *_ttsClip;
+    CAShapeLayer *_ttsClipMask;
     NSTimer *_ttsTimer;
     CFTimeInterval _ttsStart;
     NSTimeInterval _ttsLimit;
@@ -726,6 +732,15 @@ static UIImage *SLTransparentImage(void) {
         [self addSubview:_readyDot];
 
         // ---- v0.4.82：合成态内容（默认全隐藏，只在 #tts 合成期间铺进胶囊）----
+        // v0.4.92：整组套进一个裁剪容器，遮罩 = 玻璃当前形状（见 layoutSubviews / sl_expand:）。
+        // 这样「内容在玻璃外面」这件事从结构上就不可能发生，不用再靠「等 0.16s 再淡入」去赌时序。
+        _ttsClip = [[UIView alloc] initWithFrame:CGRectZero];
+        _ttsClip.backgroundColor = [UIColor clearColor];
+        _ttsClipMask = [CAShapeLayer layer];
+        _ttsClipMask.fillColor = [UIColor blackColor].CGColor;
+        _ttsClip.layer.mask = _ttsClipMask;
+        [self addSubview:_ttsClip];
+
         _ttsTitle = [[UILabel alloc] initWithFrame:CGRectZero];
         _ttsTitle.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
         _ttsTitle.textColor = [UIColor labelColor];
@@ -733,7 +748,7 @@ static UIImage *SLTransparentImage(void) {
         _ttsTitle.lineBreakMode = NSLineBreakByTruncatingTail;
         _ttsTitle.hidden = YES;
         _ttsTitle.userInteractionEnabled = NO;
-        [self addSubview:_ttsTitle];
+        [_ttsClip addSubview:_ttsTitle];
 
         _ttsSub = [[UILabel alloc] initWithFrame:CGRectZero];
         _ttsSub.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
@@ -742,7 +757,7 @@ static UIImage *SLTransparentImage(void) {
         _ttsSub.lineBreakMode = NSLineBreakByTruncatingTail;
         _ttsSub.hidden = YES;
         _ttsSub.userInteractionEnabled = NO;
-        [self addSubview:_ttsSub];
+        [_ttsClip addSubview:_ttsSub];
 
         // 底部时间条：玻璃太透，用 2pt 实色条更清楚（不贴底，避开通胶囊的圆头）
         _ttsTrack = [[UIView alloc] initWithFrame:CGRectZero];
@@ -751,7 +766,7 @@ static UIImage *SLTransparentImage(void) {
         _ttsTrack.layer.masksToBounds = YES;
         _ttsTrack.hidden = YES;
         _ttsTrack.userInteractionEnabled = NO;
-        [self addSubview:_ttsTrack];
+        [_ttsClip addSubview:_ttsTrack];
 
         _ttsFill = [[UIView alloc] initWithFrame:CGRectZero];
         _ttsFill.backgroundColor = [UIColor systemBlueColor];
@@ -770,7 +785,7 @@ static UIImage *SLTransparentImage(void) {
         _ttsCancel.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
         _ttsCancel.hidden = YES;
         [_ttsCancel addTarget:self action:@selector(sl_ttsBtnTapped) forControlEvents:UIControlEventTouchUpInside];
-        [self addSubview:_ttsCancel];
+        [_ttsClip addSubview:_ttsCancel];
 
         // 失败态的红色勾边。挂独立一层而不是改 _hairline —— 那条是 0.8pt 白线，
         // 改色/改宽会把整套玻璃边的观感带偏。
@@ -781,7 +796,7 @@ static UIImage *SLTransparentImage(void) {
         _ttsStroke.layer.cornerRadius = SLBallSide / 2.0;
         _ttsStroke.hidden = YES;
         _ttsStroke.userInteractionEnabled = NO;
-        [self addSubview:_ttsStroke];
+        [_ttsClip addSubview:_ttsStroke];
 
         // 失败提示期间整条胶囊都可以点 = 重来一次合成（运行态隐藏，别挡住「取消」）
         _ttsTapArea = [[UIControl alloc] initWithFrame:CGRectZero];
@@ -1073,7 +1088,9 @@ static UIImage *SLTransparentImage(void) {
         fade.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
         [_bars.layer addAnimation:fade forKey:@"slFade"];
     }
-    _readyDot.hidden = (state != SLFloatStateReady);
+    // v0.4.92：合成期间一律不露这颗点 —— 它是「已装填」的徽标，说的是上一次的结论；
+    // 正在合成时挂在胶囊里，用户只会看成「胶囊里怎么有颗绿点」（19:54 录屏 2s 那帧）。
+    _readyDot.hidden = (state != SLFloatStateReady) || _ttsPhase != 0;
 
     // v0.4.57：光环描边是 CAShapeLayer 属性，UIView 动画块管不到，得单独做一条 0.26s 的过渡。
     // v0.4.91：顺序错了整整七个版本 —— 原来先改色、再调 sl_startBreath，
@@ -1290,6 +1307,7 @@ static UIImage *SLTransparentImage(void) {
     _hairline.path = hairTo;
     _haloIn.path = haloInTo;
     _haloOut.path = haloOutTo;
+    _ttsClipMask.path = maskTo;     // v0.4.92：内容裁剪框同玻璃
     [CATransaction commit];
 
     CAMediaTimingFunction *ease = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
@@ -1307,6 +1325,16 @@ static UIImage *SLTransparentImage(void) {
         a.timingFunction = ease;
         [layer removeAnimationForKey:@"slShape"];
         [layer addAnimation:a forKey:@"slShape"];
+    }
+    // v0.4.92：裁剪框和玻璃走同一组起止矩形（同坐标空间）
+    {
+        CABasicAnimation *ca = [CABasicAnimation animationWithKeyPath:@"path"];
+        ca.fromValue = (__bridge id)maskFrom;
+        ca.toValue = (__bridge id)maskTo;
+        ca.duration = dur;
+        ca.timingFunction = ease;
+        [_ttsClipMask removeAnimationForKey:@"slShape"];
+        [_ttsClipMask addAnimation:ca forKey:@"slShape"];
     }
     // v0.4.91：和 sl_expand 同一条规矩 —— 状态色的起点显式摆到 fromRect 上。
     // 镜像时 fromRect 是 (newW-oldW, 0, oldW, hh)（图标端贴右），若让 UIView 从「当前 model
@@ -1436,6 +1464,7 @@ static UIImage *SLTransparentImage(void) {
     _hairline.path = hairTo;
     _haloIn.path = haloInTo;
     _haloOut.path = haloOutTo;
+    _ttsClipMask.path = maskTo;     // v0.4.92：内容裁剪框和玻璃同一个终点
     [CATransaction commit];
 
     [_glassMask removeAnimationForKey:@"slShape"];
@@ -1456,6 +1485,16 @@ static UIImage *SLTransparentImage(void) {
         ha.duration = dur;
         ha.timingFunction = ease;
         [_hairline addAnimation:ha forKey:@"slShape"];
+
+        // v0.4.92：内容裁剪框跟着玻璃同一条曲线长 / 缩 —— 形变期间字和取消键
+        // 只会从胶囊里「露出来」，绝不会浮在玻璃外面。
+        CABasicAnimation *ca = [CABasicAnimation animationWithKeyPath:@"path"];
+        ca.fromValue = (__bridge id)maskFrom;
+        ca.toValue = (__bridge id)maskTo;
+        ca.duration = dur;
+        ca.timingFunction = ease;
+        [_ttsClipMask removeAnimationForKey:@"slShape"];
+        [_ttsClipMask addAnimation:ca forKey:@"slShape"];
 
         // 光环不在 _glassHost 里、遮罩裁不到，不跟一遍就会「球还在、外圈已经拉成胶囊」。
         // 注意：这两条动画必须在 sl_startBreath 之后才挂 —— 它开头会 removeAllAnimations，
@@ -1697,9 +1736,11 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
 
     // 0.26s 的形变里，前 0.12s 只长玻璃，剩下的时间字才浮上来 —— 两件事错开才有「先张开、
     // 内容再落进来」的次序。已经展开的情况没有形变可等，直接淡入。
-    // v0.4.90：形变改成「只由遮罩推」之后，内容更要晚一点才出来 ——
-    // 0.16s 时玻璃已经走过六成长度，字浮上来不会露在玻璃外面。0.12s 淡入到 0.28s 收尾。
-    [self sl_ttsFadeInContentAfter:(alreadyOpen ? 0.0 : 0.16)];
+    // v0.4.90：形变改成「只由遮罩推」之后，内容更要晚一点才出来。
+    // v0.4.92：0.16s 还是太早 —— 玻璃那一刻只走到七成，而内容已经按 196 排好位置，
+    // 「取消」就浮在玻璃右端外面（用户 19:55 那张截图）。改成等形变整段走完（0.26s）
+    // 再淡入，0.28s 起、0.12s 淡完。裁剪容器是第二道保险，两个一起上。
+    [self sl_ttsFadeInContentAfter:(alreadyOpen ? 0.0 : 0.28)];
 }
 
 /// v0.4.89：合成态四个控件一起淡入（0.14s）。
@@ -2080,9 +2121,13 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         _glassMask.path = maskPath;
+        _ttsClipMask.path = maskPath;   // v0.4.92：合成内容跟着玻璃同一个形状
         [CATransaction commit];
         CGPathRelease(maskPath);
     }
+    // v0.4.92：裁剪容器的坐标基准和 _glassHost 完全一致（都在 0,0），
+    // 所以上面那条 maskPath 可以直接复用，不用换算。
+    _ttsClip.frame = b;
     // 玻璃始终是最大尺寸，只靠 mask 露出当前形状，右对齐
     // v0.4.40：镜像开关。MX(x, wd) 把「距左 x」翻成「距右 x」，宽度不变的居中元素不要用它。
     BOOL mir = exp ? _mirrored : NO;
@@ -2162,7 +2207,15 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     _chev.frame = CGRectMake(18.5, (h - 11.0) / 2.0, 11.0, 11.0);
     _homeBtn.frame = exp ? CGRectMake(SLMX(0.0, 48.0), 0, 48.0, h) : CGRectZero;
     _homeHit.frame = _homeBtn.bounds;
-    _readyDot.frame = CGRectMake(mir ? 5.0 : (w - 14.0), 3.0, 9.0, 9.0);
+    // v0.4.92：小绿点钉在**图标那一端**（球心那一端），不再用 w-14 去贴胶囊远端。
+    // 原来贴的是「当前宽度」的右端：胶囊一铺开，点就跟着跑到 148 之外；收起时宽度先不动、
+    // 玻璃却已经缩成球，点就孤零零留在外面往里追（19:54 录屏最后两秒、用户第二张截图）。
+    // 图标端在展开 / 收起两种形态里都不动，钉在这里就永远不会跑出形状。
+    {
+        CGFloat iconMaxX = mir ? w : SLBallSide;
+        _readyDot.frame = CGRectMake(iconMaxX - 14.0, 3.0, 9.0, 9.0);
+        _readyDot.hidden = (self.slState != SLFloatStateReady) || _ttsPhase != 0;
+    }
 #undef SLMX
 
     // v0.4.90：显隐用**真实**展开态，不用上面那个被 _shapeLock 抬起来的 exp ——
