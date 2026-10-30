@@ -190,6 +190,14 @@ static CGPoint SLClampFloatPos(CGPoint c, CGSize size);
 static void SLStoreFloatPos(CGPoint c, CGSize size);
 static CGPoint SLLoadFloatPos(CGSize size);
 
+// v0.4.94：球贴边时左右留多少。
+// 原来只留 4pt —— 球本体确实在屏内，但呼吸光环是向外扩的（_haloIn +2.5 / _haloOut +7），
+// 贴边那一刻外圈有 3pt 被屏幕切平，看上去就是「球的边缘被遮住一点」，
+// 而且球本身离屏幕边只隔 4pt，视觉上也像压着边框。统一提到 10pt：
+// 外圈光环完整落在屏内（10 - 7 = 3），球体与屏幕之间也有一段干净的呼吸空间。
+// 所有「贴边」路径（拖动夹取 / 松手吸附 / 收起落位 / 展开改宽 / 恢复位置）都用这一个值。
+static const CGFloat kSLFloatEdgePad = 10.0;
+
 // v0.4.60：合成完成「落定」回弹的静音开关。
 // 试听面板那条路本身有卡片弹入动画，「完成」的信号已经给足了，球再缩一下就撞车；
 // 所以在面板路径上临时静音，只有「无面板直接就绪」才保留回弹。
@@ -1283,7 +1291,7 @@ static UIImage *SLTransparentImage(void) {
     if (_mirrored) f.origin.x = CGRectGetMaxX(f) - sz.width;
     f.size = sz;
     if (self.superview) {
-        CGFloat minX = 6.0, maxX = CGRectGetWidth(self.superview.bounds) - 6.0;
+        CGFloat minX = kSLFloatEdgePad, maxX = CGRectGetWidth(self.superview.bounds) - kSLFloatEdgePad;
         if (CGRectGetMaxX(f) > maxX) f.origin.x = maxX - sz.width;
         if (f.origin.x < minX) f.origin.x = minX;
     }
@@ -1398,7 +1406,7 @@ static UIImage *SLTransparentImage(void) {
         _mirrored = growLeft;
         if (growLeft) nf.origin.x = CGRectGetMaxX(f) - target.width;
         if (self.superview) {
-            CGFloat minX = 6.0, maxX = CGRectGetWidth(self.superview.bounds) - 6.0;
+            CGFloat minX = kSLFloatEdgePad, maxX = CGRectGetWidth(self.superview.bounds) - kSLFloatEdgePad;
             if (CGRectGetMaxX(nf) > maxX) nf.origin.x = maxX - target.width;
             if (nf.origin.x < minX) nf.origin.x = minX;
         }
@@ -1932,7 +1940,7 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
             CGRect f = self.frame;
             f.origin.x += t.x;
             f.origin.y += t.y;
-            CGFloat minX = 6.0, maxX = sz.width - 6.0 - f.size.width;
+            CGFloat minX = kSLFloatEdgePad, maxX = sz.width - kSLFloatEdgePad - f.size.width;
             if (maxX < minX) maxX = minX;
             if (f.origin.x < minX) f.origin.x = minX;
             if (f.origin.x > maxX) f.origin.x = maxX;
@@ -1963,7 +1971,7 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
         // 松手吸附到最近的一条边，避免球卡在屏幕中间挡住内容
         CGFloat half = SLBallSide / 2.0;
         CGPoint c = self.center;
-        c.x = (c.x < sz.width / 2.0) ? (half + 4.0) : (sz.width - half - 4.0);
+        c.x = (c.x < sz.width / 2.0) ? (half + kSLFloatEdgePad) : (sz.width - half - kSLFloatEdgePad);
         c = SLClampFloatPos(c, sz);
         [UIView animateWithDuration:0.22 delay:0
              usingSpringWithDamping:0.85 initialSpringVelocity:0
@@ -2004,7 +2012,9 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     if (!sv) return;
     CGSize sz = sv.bounds.size;
     CGRect f = self.frame;
-    static const CGFloat kEdgePad = 6.0;
+    // v0.4.94：6 → 10，光环不再被屏幕切。注意不能写 static const ——
+    // C 里 const 变量不是编译期常量，static 初始化会报 non-constant initializer。
+    const CGFloat kEdgePad = kSLFloatEdgePad;
     CGFloat leftX = kEdgePad;
     CGFloat rightX = sz.width - kEdgePad - f.size.width;
     if (rightX < leftX) rightX = leftX;   // 胶囊比屏还宽时只保证左缘不越界
@@ -3221,11 +3231,12 @@ void SLFloatTTSEnd(BOOL success, NSString *failText, void (^retryBlock)(void)) {
 
 // 把中心点夹在「不会被屏幕边缘切掉」的范围内。
 // 原来那版是「越界就重置」—— 拖到边上会突然跳回中间，而且重置值本身也可能越界。
+// v0.4.94：左右边距改用 kSLFloatEdgePad（原来是 4pt，光环贴着屏幕会被切）。
 static CGPoint SLClampFloatPos(CGPoint c, CGSize size) {
     if (size.width <= 0 || size.height <= 0) return c;
     CGFloat half = SLBallSide / 2.0;
-    CGFloat minX = half + 4.0;
-    CGFloat maxX = size.width - half - 4.0;
+    CGFloat minX = half + kSLFloatEdgePad;
+    CGFloat maxX = size.width - half - kSLFloatEdgePad;
     CGFloat minY = half + 56.0;                 // 让开状态栏 / 刘海
     CGFloat maxY = size.height - half - 34.0;   // 让开底部安全区
     if (maxX < minX) { c.x = size.width / 2.0; }
