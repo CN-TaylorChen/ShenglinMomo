@@ -286,6 +286,9 @@ static UIImage *SLTransparentImage(void) {
 /// v0.4.82：合成状态直接长在胶囊里（取代 v0.4.81 的独立进度卡片）
 - (void)sl_ttsBegin:(NSTimeInterval)limit cancel:(void (^)(void))cancelBlock;
 - (void)sl_ttsEnd:(BOOL)success failText:(NSString *)failText retry:(void (^)(void))retryBlock;
+/// v0.4.85：合成还没出结论。SLFloatSetState 拿它当闸门，合成中不接受「回灰」。
+- (BOOL)sl_ttsBusy;
+- (void)sl_ttsReveal;
 // 下面几个只在内部互相调用。全部提前声明，省得 clang 因「定义在调用点之后」
 // 报 instance method not found（-Werror 下会直接炸 CI）。
 - (NSString *)sl_ttsSubTextForElapsed:(NSTimeInterval)elapsed;
@@ -524,6 +527,9 @@ static UIImage *SLTransparentImage(void) {
     CFTimeInterval _ttsStart;
     NSTimeInterval _ttsLimit;
     NSInteger _ttsPhase;         // 0 = 关闭 / 1 = 合成中 / 2 = 失败提示中
+    // v0.4.85：胶囊是否已经铺开。合成开始后的前 3 秒不铺 —— 火山 1.2 秒就完了，
+    // 立刻铺开等于「刚展开就收起」，那一下蓝球根本看不见，球形状态白设计。
+    BOOL _ttsShown;
     void (^_ttsCancelBlock)(void);
     void (^_ttsRetryBlock)(void);
 }
@@ -1131,7 +1137,10 @@ static UIImage *SLTransparentImage(void) {
     // v0.4.79：窗口改成 146 - 54（图标侧）- 34.5（箭头侧）= 57.5pt，
     // 12.5pt 字号下四个汉字（50pt）能完整静止，五个字起才滚。
     // v0.4.82：合成态换一档宽 —— 要同时放两行字和「取消」键，146 不可能塞下。
-    if (_ttsPhase != 0) return CGSizeMake(SLTtsPillW, SLBallSide);
+    // v0.4.85：只有真的铺开了才吃这档宽。没铺开时（合成前 3 秒）它还是颗球，
+    // 这里若照样返回 218，一旦被别处（sl_resizePillForName / 手动展开）问一次，
+    // 球会瞬间被拉成一条空胶囊。
+    if (_ttsShown && _ttsPhase != 0) return CGSizeMake(SLTtsPillW, SLBallSide);
     _name.text = SLFloatPackName();
     return CGSizeMake(SLPillMinW, SLBallSide);
 }
@@ -1302,8 +1311,15 @@ static UIImage *SLTransparentImage(void) {
     _ttsTapArea.frame = b;
 }
 
+// v0.4.85：合成开始后多久才把胶囊铺开。
+// 火山实测 1.2 秒就完了，立刻铺开等于「刚展开就收起」，蓝球根本看不见；
+// Fish 慢的时候 3~12 秒，超过这个点才值得把进度条和取消键亮出来。
+// 定 3.0：快的全程只有球，慢的才等到胶囊。
+static const NSTimeInterval kSLTTSRevealDelay = 3.0;
+
 - (void)sl_ttsBegin:(NSTimeInterval)limit cancel:(void (^)(void))cancelBlock {
     _ttsPhase = 1;
+    _ttsShown = NO;   // v0.4.85：先当球，等 3 秒还没完再铺开
     _ttsLimit = (limit > 1.0) ? limit : 30.0;
     _ttsStart = CACurrentMediaTime();
     _ttsCancelBlock = [cancelBlock copy];
@@ -1315,10 +1331,12 @@ static UIImage *SLTransparentImage(void) {
     _ttsSub.text = [self sl_ttsSubTextForElapsed:0];
     _ttsFill.backgroundColor = [UIColor systemBlueColor];
 
-    _ttsTitle.hidden = NO;
-    _ttsSub.hidden = NO;
-    _ttsTrack.hidden = NO;
-    _ttsCancel.hidden = NO;
+    // v0.4.85：没铺开之前这些控件一律藏着 —— 球只有 48pt，塞两行字会溢到球外面。
+    // 到 sl_ttsReveal / 失败态才一起放出来。
+    _ttsTitle.hidden = YES;
+    _ttsSub.hidden = YES;
+    _ttsTrack.hidden = YES;
+    _ttsCancel.hidden = YES;
     _ttsStroke.hidden = YES;
     _ttsTapArea.hidden = YES;
 
@@ -1329,6 +1347,37 @@ static UIImage *SLTransparentImage(void) {
                                                selector:@selector(sl_ttsTick)
                                                userInfo:nil
                                                 repeats:YES];
+
+    // v0.4.85：延迟展开（3.0s）。这之前只有球在转 —— 合成够快的话用户只会看到
+    // 「蓝球转一下 → 绿」，胶囊全程不出现；真卡住了才把进度条和取消键铺出来。
+    // 例外：从失败态点「重试」时胶囊本来就开着，不能再等 3 秒，否则会先缩回球再长回来。
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsReveal) object:nil];
+    if (self.slExpanded) {
+        [self sl_ttsReveal];
+    } else {
+        [self performSelector:@selector(sl_ttsReveal) withObject:nil afterDelay:kSLTTSRevealDelay];
+    }
+    [self setNeedsLayout];
+}
+
+/// v0.4.85：合成还没出结论。SLFloatSetState 拿它当闸门，合成中不接受「回灰」。
+- (BOOL)sl_ttsBusy {
+    return _ttsPhase == 1;
+}
+
+/// v0.4.85：把合成态铺开成 218pt 胶囊。延迟到点、用户主动点球、或直接失败时调用。
+/// 重复调用无害（_ttsShown 挡住），取消时由 sl_ttsAutoCollapse 撤掉排队的这次。
+- (void)sl_ttsReveal {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsReveal) object:nil];
+    if (_ttsPhase == 0 || _ttsShown) return;
+    _ttsShown = YES;
+
+    _ttsTitle.hidden = NO;
+    _ttsSub.hidden = NO;
+    _ttsTrack.hidden = NO;
+    _ttsCancel.hidden = NO;
+    _ttsStroke.hidden = YES;
+    _ttsTapArea.hidden = YES;
 
     // 已经展开着（用户自己点开过）就不能再走 sl_expand: —— 那个方法见 slExpanded==YES 直接 return，
     // 宽度会停在 146，两行字和取消键全挤成一条。这里按名字那套 resize 逻辑重排一次。
@@ -1355,15 +1404,22 @@ static UIImage *SLTransparentImage(void) {
     if (!success && failText.length) {
         // 失败：原地转红停 2.6s，不走「先收球再弹一下」那条路 —— 收球会把提示也一起收掉。
         _ttsPhase = 2;
+        // v0.4.85：合成没撑到 3 秒就失败（网络直接 401 之类）时胶囊还没铺开，
+        // 这里必须立刻铺 —— 否则红字提示根本没地方显示，用户只看到球闪了一下。
+        _ttsShown = YES;
         _ttsRetryBlock = [retryBlock copy];
         _ttsTitle.text = failText;
         _ttsTitle.textColor = [UIColor systemRedColor];
         _ttsSub.textColor = [UIColor secondaryLabelColor];
         _ttsSub.text = @"已放回输入框 · 点此重试";
         _ttsFill.backgroundColor = [UIColor systemRedColor];
+        _ttsTitle.hidden = NO;
+        _ttsSub.hidden = NO;
+        _ttsTrack.hidden = NO;
         _ttsCancel.hidden = YES;
         _ttsStroke.hidden = NO;
         _ttsTapArea.hidden = NO;
+        if (!self.slExpanded) [self sl_expand:YES animated:YES];
         [self setNeedsLayout];
 
         [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsAutoCollapse) object:nil];
@@ -1375,9 +1431,11 @@ static UIImage *SLTransparentImage(void) {
 
 - (void)sl_ttsAutoCollapse {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsAutoCollapse) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsReveal) object:nil];
     [_ttsTimer invalidate];
     _ttsTimer = nil;
     _ttsPhase = 0;
+    _ttsShown = NO;   // v0.4.85：下次合成重新从「只有球」开始
     _ttsCancelBlock = nil;
     _ttsRetryBlock = nil;
     _ttsTitle.hidden = YES;
@@ -1545,6 +1603,12 @@ static UIImage *SLTransparentImage(void) {
     // v0.4.45：展开态点中间不做任何事 —— 用户要的是「点名字毫无反应，只有按住能拖」。
     // 收回成球只认图标那一端（_homeBtn → sl_homeTap）。
     if (self.slExpanded) return;
+    // v0.4.85：合成中球是「只有蓝球」那一档，点它就是「现在就想看进度」——
+    // 直接铺开，不用等满 3 秒。这一档不看语音包开关（关了包也会走 #tts 合成）。
+    if (_ttsPhase == 1) {
+        [self sl_ttsReveal];
+        return;
+    }
     // 关掉「启用语音包」后点球不展开，也不弹任何提示：想让球消失是用户的选择，
     // 不需要每次点都被告知一遍怎么打开设置。
     if (![SLVoicePack isEnabled]) return;
@@ -2471,6 +2535,14 @@ void SLFloatSetState(SLFloatState state) {
     }
     SLFloatButton *b = sSLFloatBtn;
     if (!b) return;
+    // v0.4.85：合成中不接受「回灰」。录音结束 / 发送成功 / 取消发送这三条收尾路径
+    // 各自会调一次 Idle —— 之前就是这么把合成中的蓝冲成灰的：用户按录制录一发，
+    // 待用状态当场消失，看着像「合成白干了」。合成还没出结论就一律保持蓝，
+    // 颜色由合成回调自己定（成功绿 / 失败红）。取消那条不用管：它先把相位清成 0 才回灰。
+    if (state == SLFloatStateIdle && [b sl_ttsBusy]) {
+        SLLog(@"idle suppressed: tts still synthesizing");
+        return;
+    }
     // v0.4.36：就绪不再 1.6 秒后自己退回空闲 —— 它要一直亮着，
     // 直到语音真正发出去（发送完成那一刻会走 Ready → Idle，顺带外扩一圈涟漪）。
     [b sl_applyState:state];

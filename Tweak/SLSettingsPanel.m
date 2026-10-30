@@ -65,7 +65,9 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 #define kSLFillShortKey @"SLFillShort"
-#define SLVersion @"0.4.84"
+// v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
+#define kSLKeepTextKey @"SLKeepTextOnFail"
+#define SLVersion @"0.4.85"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -212,7 +214,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     (void)tv;
     if (section == 0) return 4;   // 开关 + 引擎 + 语音包 + 悬浮球图标
     if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
-    if (section == 2) return 3;   // 合成口令 + 短录音补全 + 合成后先试听（v0.4.52 删掉语音包口令与直发）
+    if (section == 2) return 4;   // 合成口令 + 短录音补全 + 合成后先试听 + 失败时放回输入框
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
     if (section == 5) return 1;   // 运行日志（v0.4.54 去掉「动画预览」入口）
@@ -362,11 +364,21 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             [sw addTarget:self action:@selector(sl_fillChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        } else {
+        } else if (ip.row == 2) {
             cell.textLabel.text = @"合成后先试听";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             sw.on = [SLTTSAuditionPanel isEnabled];
             [sw addTarget:self action:@selector(sl_auditionChanged:) forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        } else {
+            // v0.4.85：合成失败 / 取消时把口令写回输入框（默认开）。
+            // 关掉就只复制到剪贴板 —— 有人嫌它会抢输入框、把刚打的字顶掉。
+            cell.textLabel.text = @"失败时放回输入框";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+            sw.on = [d objectForKey:kSLKeepTextKey] ? [d boolForKey:kSLKeepTextKey] : YES;
+            [sw addTarget:self action:@selector(sl_keepTextChanged:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         }
@@ -712,6 +724,13 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:kSLFillShortKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
     [AWECAUtils showToast:sw.on ? @"短录音会补全 AI 语音" : @"只发录到的那一段" duration:1.5];
+}
+
+// v0.4.85：关掉后合成失败只复制到剪贴板，不再动陌陌的输入框。
+- (void)sl_keepTextChanged:(UISwitch *)sw {
+    [[NSUserDefaults standardUserDefaults] setBool:sw.on forKey:kSLKeepTextKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    [AWECAUtils showToast:sw.on ? @"失败时把口令放回输入框" : @"失败时只复制到剪贴板" duration:1.5];
 }
 
 - (void)sl_engineChanged:(UISegmentedControl *)seg {

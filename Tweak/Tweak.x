@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.84"
+#define SLVersion @"0.4.85"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -268,35 +268,82 @@ static BOOL SLApplyInputBarsText(NSString *text) {
 #pragma clang diagnostic pop
     if (kw && ![wins containsObject:kw]) [wins insertObject:kw atIndex:0];
 
-    NSInteger hit = 0;
+    // v0.4.85：一趟 BFS 同时收两样东西 ——
+    //   bars：认得出的输入栏（优先写它：能连带触发陌陌自己的 delegate 和布局）
+    //   tvs ：全窗口所有「可编辑」的 UITextView（兜底）
+    // v0.4.84 的致命毛病是「只有 looksBar 成立才去写」：认不出类名就等于整趟白跑，
+    // 日志里的 hit=0 就是这么来的 —— 输入栏明明是别的类，我们连碰都没碰过它。
+    // 每个视图单独 try：v0.4.83 把整趟包在一个 try 里，一条 NSUnknownKeyException
+    // 就能把整窗扫描连结果一起丢掉。
+    NSMutableArray<UIView *> *bars = [NSMutableArray array];
+    NSMutableArray<UITextView *> *tvs = [NSMutableArray array];
+    Class c1 = NSClassFromString(@"MDChatInputBar");
+    Class c2 = NSClassFromString(@"MDNewInputTextBar");
+    Class c3 = NSClassFromString(@"MDChatUniverseInputBar");
+
     for (UIWindow *win in wins) {
         NSMutableArray *q = [NSMutableArray arrayWithObject:win];
         while (q.count) {
             UIView *v = q.firstObject; [q removeObjectAtIndex:0];
-            // v0.4.84：**每个视图单独判断、单独 try**。
-            // v0.4.83 是把整趟 BFS 包在一个 @try 里，只要撞上一条认不出
-            // inputTextView 的输入栏（valueForKey: 抛 NSUnknownKeyException），
-            // 异常直接把整趟扫描连窗口一起丢掉 —— 结果就是一个字都没写进去，
-            // 日志却照样打「text restored to input box」。
-            NSString *cn = NSStringFromClass([v class]);
-            BOOL looksBar = [cn hasSuffix:@"InputBar"] || [cn hasSuffix:@"InputTextBar"] ||
-                            [cn hasSuffix:@"TextInputBar"] || [cn hasSuffix:@"ChatInputBar"];
-            if (!looksBar) {
-                Class c1 = NSClassFromString(@"MDChatInputBar");
-                Class c2 = NSClassFromString(@"MDNewInputTextBar");
-                Class c3 = NSClassFromString(@"MDChatUniverseInputBar");
-                looksBar = (c1 && [v isKindOfClass:c1]) || (c2 && [v isKindOfClass:c2]) || (c3 && [v isKindOfClass:c3]);
-            }
-            if (looksBar && SLWriteTextToBar(v, text)) hit++;
+            @try {
+                if ([v isKindOfClass:[UITextView class]]) {
+                    UITextView *t = (UITextView *)v;
+                    if (t.isEditable) [tvs addObject:t];
+                } else {
+                    NSString *cn = NSStringFromClass([v class]);
+                    BOOL looksBar = [cn hasSuffix:@"InputBar"] || [cn hasSuffix:@"InputTextBar"] ||
+                                    [cn hasSuffix:@"TextInputBar"] || [cn hasSuffix:@"ChatInputBar"];
+                    if (!looksBar) {
+                        looksBar = (c1 && [v isKindOfClass:c1]) || (c2 && [v isKindOfClass:c2]) ||
+                                   (c3 && [v isKindOfClass:c3]);
+                    }
+                    if (looksBar) [bars addObject:v];
+                }
+            } @catch (NSException *e) { }
             for (UIView *s in v.subviews) [q addObject:s];
         }
     }
-    // 扫描没命中就退回上次成功写过的那个框（页面重建前的引用一般还活着）
-    if (hit == 0 && text.length && sSLLastInputTextView && sSLLastInputTextView.window) {
-        if (SLWriteTextToBar((UIView *)sSLLastInputTextView, text)) hit++;
+
+    // 兜底顺序：正拿着焦点的那个最可能就是用户刚用的框；其次面积最大的
+    //（输入栏切到语音模式时文本框会被收成 0 尺寸，这些排在最后）。
+    // 参数写成 id：NSComparator 的签名就是 (id, id)，写具体类型会撞
+    //「incompatible block pointer types」，-Werror 下直接挂。
+    [tvs sortUsingComparator:^NSComparisonResult(id a, id b) {
+        UITextView *va = (UITextView *)a;
+        UITextView *vb = (UITextView *)b;
+        BOOL fa = va.isFirstResponder, fb = vb.isFirstResponder;
+        if (fa != fb) return fa ? NSOrderedAscending : NSOrderedDescending;
+        CGFloat sa = CGRectGetWidth(va.bounds) * CGRectGetHeight(va.bounds);
+        CGFloat sb = CGRectGetWidth(vb.bounds) * CGRectGetHeight(vb.bounds);
+        if (sa > sb) return NSOrderedAscending;
+        if (sa < sb) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    NSInteger hit = 0;
+    for (UIView *bar in bars) {
+        if (SLWriteTextToBar(bar, text)) { hit++; break; }
     }
-    SLLog(@"input bar %@: %@ (%lu chars) hit=%ld", text.length ? @"restore" : @"clear",
-          hit ? @"ok" : @"MISS", (unsigned long)text.length, (long)hit);
+    // v0.4.85：全窗口兜底只用于「回填」。清空（text=nil）必须保守 ——
+    // 同一个窗口里还有搜索框、备注框，乱清一气比清不掉更糟。
+    if (hit == 0 && text.length) {
+        for (UITextView *t in tvs) {
+            if (SLFillTextView(t, text)) { hit++; break; }
+        }
+    }
+    // 扫描没命中就退回上次成功写过的那个框（页面重建前的引用一般还活着）。
+    // 注意这条只在真写成功过之后才有值 —— 首次就是 MISS 的话它救不了场，
+    // 所以主力必须是上面那条全窗口兜底。
+    if (hit == 0 && text.length) {
+        UITextView *last = sSLLastInputTextView;   // __weak 先落成强引用再传参
+        if (last && last.window && SLFillTextView(last, text)) hit++;
+    }
+    // v0.4.85：日志带全计数。只有 hit 一个数字的话，「没扫到」和「扫到了写不进」
+    // 打出的是同一行字，没法定位。
+    SLLog(@"input bar %@: %@ (%lu chars) hit=%ld wins=%lu bars=%lu tvs=%lu",
+          text.length ? @"restore" : @"clear", hit ? @"ok" : @"MISS",
+          (unsigned long)text.length, (long)hit,
+          (unsigned long)wins.count, (unsigned long)bars.count, (unsigned long)tvs.count);
     return hit > 0;
 }
 
@@ -628,6 +675,9 @@ static BOOL gSLDrained = NO;            // 本次录音是否已经补喂过（�
 // 这些字节是我们塞进去的，encodePcm: 钩子必须原样放行（按字节数记账，异步也准）。
 static NSUInteger gSLForcePassBytes = 0;
 #define kSLFillShortKey @"SLFillShort"   // 短录音补全开关（默认开）
+// v0.4.85：合成失败/取消时把口令原文放回输入框（默认开）。
+// 关掉就只复制到剪贴板，不碰陌陌的输入框 —— 有人嫌它抢输入框焦点。
+#define kSLKeepTextKey @"SLKeepTextOnFail"
 static NSMutableSet *gSLDrainHooked = nil;
 static NSTimeInterval gSLArmedAt = 0;   // #tts 装填时刻（锁定“本次录音刚写的文件”）
 static int gSLRecDump = 0;
@@ -1207,6 +1257,9 @@ static BOOL SLArmPackAutoQuiet(void) {
     return YES;
 }
 
+// v0.4.85：开关定义在文件后半段（跟 SLFillShortEnabled 放一起），这里先声明。
+static BOOL SLKeepTextOnFail(void);
+
 // v0.4.82：胶囊里只有一行位置放失败原因，而 pipeline 给的 msg 常带冒号后的细节
 //（"网络错误: 无法连接服务器。"），截到冒号为止，够用且不会被省略号啃掉。
 static NSString *SLShortFailReason(NSString *msg) {
@@ -1237,8 +1290,26 @@ static void SLArmTTS(id handler,
     // v0.4.84：回填改成有返回值 —— 写不进去的时候至少别把口令弄丢（退到剪贴板）。
     BOOL (^restoreText)(void) = ^{
         if (!rawText.length) return NO;
+        // v0.4.85：设置里关掉「失败时放回输入框」就只留剪贴板，不去碰陌陌的框。
+        if (!SLKeepTextOnFail()) {
+            UIPasteboard.generalPasteboard.string = rawText;
+            SLLog(@"keep-text off：只复制到剪贴板（%lu chars）", (unsigned long)rawText.length);
+            return NO;
+        }
         BOOL ok = inputView ? SLSetTextInView(inputView, rawText) : SLRestoreInputBarsText(rawText);
-        if (!ok) {
+        if (ok) {
+            // v0.4.85：写完 0.35 秒再回头看一眼。陌陌自己的发送收尾可能比我们晚一拍，
+            // 把刚写进去的字又清掉 —— 用户看到的就是「还是没进框」。
+            UITextView *tv = sSLLastInputTextView;
+            if (tv) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    if (tv.window && tv.text.length == 0) {
+                        if (SLFillTextView(tv, rawText)) SLLog(@"restore re-applied after 0.35s");
+                    }
+                });
+            }
+        } else {
             UIPasteboard.generalPasteboard.string = rawText;
             SLLog(@"restore text MISS，已复制到剪贴板");
             [AWECAUtils showToast:@"没写回输入框，原文已复制" duration:2.5];
@@ -1274,9 +1345,11 @@ static void SLArmTTS(id handler,
         if (settled) return;
         settled = YES;
         SLLog(@"tts timeout at 30s capsule limit");
-        SLFloatSetState(SLFloatStateIdle);
         restoreText();
+        // v0.4.85：先落失败态（相位 2）再回灰。反过来的话 Idle 会被
+        //「合成中不接受回灰」那道闸拦掉，球停在蓝、胶囊却在报失败，状态对不上。
         SLFloatTTSEnd(NO, @"合成超时", retryBlock);
+        SLFloatSetState(SLFloatStateIdle);
         SLReleaseClaim();
     });
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
@@ -1288,10 +1361,11 @@ static void SLArmTTS(id handler,
                 // v0.4.82：失败反馈整体挪进胶囊（红字 + 「口令已放回输入框」），不再弹 toast；
                 // 同时主动把原文写回输入框 —— 陌陌在这之前已经清过框了。
                 SLLog(@"tts failed: %@", msg.length ? msg : @"(无信息)");
-                SLFloatSetState(SLFloatStateIdle);
                 restoreText();
                 NSString *why = SLShortFailReason(msg);
                 SLFloatTTSEnd(NO, why.length ? [NSString stringWithFormat:@"合成失败 · %@", why] : @"合成失败", retryBlock);
+                // v0.4.85：同上 —— 红字先出，再让球落灰
+                SLFloatSetState(SLFloatStateIdle);
                 SLReleaseClaim();
                 return;
             }
@@ -1557,6 +1631,13 @@ static BOOL SLFillShortEnabled(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if ([d objectForKey:kSLFillShortKey] == nil) return YES;
     return [d boolForKey:kSLFillShortKey];
+}
+
+// v0.4.85：合成失败 / 取消时要不要主动把口令写回输入框。默认开。
+static BOOL SLKeepTextOnFail(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d objectForKey:kSLKeepTextKey] == nil) return YES;
+    return [d boolForKey:kSLKeepTextKey];
 }
 
 static void SLDrainRemainingPCM(NSString *why) {
