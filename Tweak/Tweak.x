@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.87"
+#define SLVersion @"0.4.88"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -1274,7 +1274,9 @@ static NSString *SLShortFailReason(NSString *msg) {
     if (r2.location != NSNotFound && (r1.location == NSNotFound || r2.location < r1.location)) r = r2;
     if (r.location != NSNotFound && r.location > 0) s = [s substringToIndex:r.location];
     s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (s.length > 8) s = [[s substringToIndex:8] stringByAppendingString:@"…"];
+    // v0.4.88：8 → 6。失败原因现在挪到副标行（84pt 宽），8 个 11pt 汉字是 88pt，
+    // 刚好撑破一点点就再被截一次，变成「网络连接超时…」这种两头都截的怪样子。
+    if (s.length > 6) s = [[s substringToIndex:6] stringByAppendingString:@"…"];
     return s;
 }
 

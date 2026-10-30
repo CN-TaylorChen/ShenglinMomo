@@ -231,7 +231,12 @@ static BOOL sSLFloatSettleMuted = NO;
 // v0.4.82：合成中的胶囊要装「两行字 + 取消键」，146 塞不下，单独一档更宽。
 // 不跟名字走（名字那档由 sl_pillSize 决定），所以合成结束收起时不会有第二段宽度跳变。
 // v0.4.84：跟毛玻璃最大宽取同一个数，两者必须相等，否则就会出现「玻璃没铺满」的深色缺口。
-#define SLTtsPillW SLPillMaxW
+// v0.4.88：218 → 196。218 是从「文字 108 + 取消键 46」凑出来的，文字还左对齐，
+// 视觉重心偏左 35pt，看着又长又不居中。196 的分配是刚性的：
+//   球 48 | 8 | 文字 84 | 8 | 按钮 40 | 8 = 196
+// 文字区中心 = 56 + 42 = 98 = 胶囊几何中心，镜像/非镜像都不动位置，天然居中。
+// 比 SLPillMaxW(218) 窄，玻璃层照样完整包住（多出的 22pt 溢出被 mask 裁掉，不会有缺口）。
+#define SLTtsPillW 196.0
 // 语音包列表卡片的最小宽：跟胶囊宽度挂钩，但别跟着毛玻璃最大值一起涨。
 #define SLMenuMinW 196.0
 
@@ -295,6 +300,8 @@ static UIImage *SLTransparentImage(void) {
 - (void)sl_ttsLayout;
 - (void)sl_ttsTick;
 - (void)sl_ttsAutoCollapse;
+// v0.4.88：取消与重试共用同一个按钮，按相位分派
+- (void)sl_ttsBtnTapped;
 - (void)sl_ttsCancelTapped;
 - (void)sl_ttsRetryTapped;
 @end
@@ -701,6 +708,7 @@ static UIImage *SLTransparentImage(void) {
         _ttsTitle = [[UILabel alloc] initWithFrame:CGRectZero];
         _ttsTitle.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
         _ttsTitle.textColor = [UIColor labelColor];
+        _ttsTitle.textAlignment = NSTextAlignmentCenter;   // v0.4.88：文字区居中，别再贴左边
         _ttsTitle.lineBreakMode = NSLineBreakByTruncatingTail;
         _ttsTitle.hidden = YES;
         _ttsTitle.userInteractionEnabled = NO;
@@ -709,6 +717,7 @@ static UIImage *SLTransparentImage(void) {
         _ttsSub = [[UILabel alloc] initWithFrame:CGRectZero];
         _ttsSub.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
         _ttsSub.textColor = [UIColor secondaryLabelColor];
+        _ttsSub.textAlignment = NSTextAlignmentCenter;
         _ttsSub.lineBreakMode = NSLineBreakByTruncatingTail;
         _ttsSub.hidden = YES;
         _ttsSub.userInteractionEnabled = NO;
@@ -728,16 +737,18 @@ static UIImage *SLTransparentImage(void) {
         [_ttsTrack addSubview:_ttsFill];
 
         _ttsCancel = [UIButton buttonWithType:UIButtonTypeCustom];
-        _ttsCancel.layer.cornerRadius = 15.0;
+        _ttsCancel.layer.cornerRadius = 14.0;
         _ttsCancel.layer.masksToBounds = YES;
         _ttsCancel.layer.borderWidth = 1.0;
         _ttsCancel.layer.borderColor = SLGlassHairlineColor().CGColor;
         _ttsCancel.backgroundColor = SLGlassPillFillColor();
+        // v0.4.88：同一个按钮换标题 —— 合成中「取消」、失败「重试」。
+        // 位置和尺寸完全一致，切状态不会出现按钮位移；代价是 target 要按相位分派。
         [_ttsCancel setTitle:@"取消" forState:UIControlStateNormal];
         [_ttsCancel setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
         _ttsCancel.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
         _ttsCancel.hidden = YES;
-        [_ttsCancel addTarget:self action:@selector(sl_ttsCancelTapped) forControlEvents:UIControlEventTouchUpInside];
+        [_ttsCancel addTarget:self action:@selector(sl_ttsBtnTapped) forControlEvents:UIControlEventTouchUpInside];
         [self addSubview:_ttsCancel];
 
         // 失败态的红色勾边。挂独立一层而不是改 _hairline —— 那条是 0.8pt 白线，
@@ -1266,13 +1277,15 @@ static UIImage *SLTransparentImage(void) {
 
 #pragma mark - v0.4.82：合成态（进度 / 取消长在胶囊里）
 
-// 「已等 12s · 上限 30s」，11pt 下约 92pt 宽，正好塞进 108pt 的文字区。
+// v0.4.88：「12s / 30s」。原来是「已等 12s · 上限 30s」，11pt 下约 100pt，
+// 而文字区只有 84pt —— 一直被截成「已等 12s · 上…」，等于每帧都在报错。
+// 上限是固定 30s，用户看两次就记住了，不必每帧重复「上限」二字。
 - (NSString *)sl_ttsSubTextForElapsed:(NSTimeInterval)elapsed {
     NSInteger e = (NSInteger)floor(elapsed);
     NSInteger lim = (NSInteger)ceil(_ttsLimit);
     if (e < 0) e = 0;
     if (e > lim) e = lim;
-    return [NSString stringWithFormat:@"已等 %lds · 上限 %lds", (long)e, (long)lim];
+    return [NSString stringWithFormat:@"%lds / %lds", (long)e, (long)lim];
 }
 
 - (void)sl_ttsLayout {
@@ -1281,17 +1294,26 @@ static UIImage *SLTransparentImage(void) {
     CGFloat h = SLBallSide;
     BOOL mir = _mirrored;
 
+    // v0.4.88：胶囊收窄到 196，各段是硬分配 —— 球 48 / 8 / 文字 84 / 8 / 按钮 40 / 8。
+    // 文字区中心固定在 98pt（= 196/2），镜像只换按钮站哪一端，不改变文字位置，
+    // 所以两行字永远落在视觉中轴上，不会再出现「三个字贴在左边」。
+    CGFloat btnW = 40.0, btnH = 28.0;
     // 取消键跟图标换边：胶囊向左长（球贴右）时图标在右端，取消就得挪到左端。
-    CGFloat cancelW = 46.0, cancelH = 30.0;
-    _ttsCancel.frame = CGRectMake(mir ? 8.0 : (w - cancelW - 8.0), (h - cancelH) / 2.0, cancelW, cancelH);
+    _ttsCancel.frame = CGRectMake(mir ? 8.0 : (w - btnW - 8.0), (h - btnH) / 2.0, btnW, btnH);
 
-    // 文字区两侧对称留白，镜像时只换方向、不动位置 —— 文本始终落在视觉中轴上。
-    // 失败态「取消」已经隐藏，右边不用再让 46pt，把那块空间还给「合成失败 · 网络错误」。
-    CGFloat textX = mir ? 56.0 : 54.0;
-    CGFloat rightPad = (_ttsPhase == 2) ? 14.0 : 56.0;
-    CGFloat textW = MAX(0.0, w - 54.0 - rightPad);
+    // 文字区左右对称留白（球侧 8、按钮侧 8）。
+    // 失败态不再隐藏按钮（改成「重试」），所以两种相位的文字区完全一样宽 ——
+    // 从「合成中」切到「合成失败」不会有宽度跳变。
+    CGFloat textX = 56.0;
+    CGFloat textW = MAX(0.0, w - 56.0 - 8.0 - btnW - 8.0);
+    if (textW > 84.0) textW = 84.0;
     _ttsTitle.frame = CGRectMake(textX, 8.0, textW, 17.0);
     _ttsSub.frame = CGRectMake(textX, 24.0, textW, 14.0);
+    // 失败但没有具体原因时副标是空的，只剩一行标题 —— 那一行要自己垂直居中，
+    // 否则会贴着胶囊上沿，下面空出一大片（原来看起来像「文字浮着」）。
+    if (_ttsSub.hidden && _ttsPhase == 2) {
+        _ttsTitle.frame = CGRectMake(textX, (h - 17.0) / 2.0 - 2.0, textW, 17.0);
+    }
 
     // 时间条跟文字同宽、贴在胶囊下缘往上 7pt：贴到最底会被圆头切掉一截。
     CGFloat trackY = h - 7.0;
@@ -1318,8 +1340,13 @@ static UIImage *SLTransparentImage(void) {
 static const NSTimeInterval kSLTTSRevealDelay = 3.0;
 
 - (void)sl_ttsBegin:(NSTimeInterval)limit cancel:(void (^)(void))cancelBlock {
+    // v0.4.88：正在开着胶囊时（从失败态点「重试」）不能再走 `_ttsShown = NO` 那条路。
+    // 那一刻 sl_pillSize 会按 phase 回到 146，形变 + 再展开 = 胶囊先缩一下又长回来，
+    // 宽度其实一直是 196，肉眼看到的却是闪。直接沿用「已铺开」状态，一次形变都不做。
+    BOOL stayOpen = self.slExpanded;
+
     _ttsPhase = 1;
-    _ttsShown = NO;   // v0.4.85：先当球，等 3 秒还没完再铺开
+    _ttsShown = stayOpen;   // v0.4.85：先当球，等 3 秒还没完再铺开；重试时保持铺开
     _ttsLimit = (limit > 1.0) ? limit : 30.0;
     _ttsStart = CACurrentMediaTime();
     _ttsCancelBlock = [cancelBlock copy];
@@ -1330,6 +1357,8 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     _ttsSub.textColor = [UIColor secondaryLabelColor];
     _ttsSub.text = [self sl_ttsSubTextForElapsed:0];
     _ttsFill.backgroundColor = [UIColor systemBlueColor];
+    // 从失败态点「重试」进来时按钮还写着「重试」，这里必须切回「取消」
+    [_ttsCancel setTitle:@"取消" forState:UIControlStateNormal];
 
     // v0.4.85：没铺开之前这些控件一律藏着 —— 球只有 48pt，塞两行字会溢到球外面。
     // 到 sl_ttsReveal / 失败态才一起放出来。
@@ -1341,7 +1370,7 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     _ttsTapArea.hidden = YES;
 
     [_ttsTimer invalidate];
-    // 0.1s 一档足够了：进度条 108pt 宽，30s 上限下 0.1s 只走 0.36pt，肉眼看是连续的。
+    // 0.1s 一档足够了：进度条 84pt 宽，30s 上限下 0.1s 只走 0.28pt，肉眼看是连续的。
     _ttsTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
                                                  target:self
                                                selector:@selector(sl_ttsTick)
@@ -1350,10 +1379,16 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
 
     // v0.4.85：延迟展开（3.0s）。这之前只有球在转 —— 合成够快的话用户只会看到
     // 「蓝球转一下 → 绿」，胶囊全程不出现；真卡住了才把进度条和取消键铺出来。
-    // 例外：从失败态点「重试」时胶囊本来就开着，不能再等 3 秒，否则会先缩回球再长回来。
+    // 例外：从失败态点「重试」时胶囊本来就开着，不能等 3 秒，也不能缩一次再长回来。
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsReveal) object:nil];
-    if (self.slExpanded) {
-        [self sl_ttsReveal];
+    if (stayOpen) {
+        _ttsTitle.hidden = NO;
+        _ttsSub.hidden = NO;
+        _ttsTrack.hidden = NO;
+        _ttsCancel.hidden = NO;
+        _ttsStroke.hidden = YES;
+        [self sl_resizePillForName];
+        [self setNeedsLayout];
     } else {
         [self performSelector:@selector(sl_ttsReveal) withObject:nil afterDelay:kSLTTSRevealDelay];
     }
@@ -1365,7 +1400,7 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     return _ttsPhase == 1;
 }
 
-/// v0.4.85：把合成态铺开成 218pt 胶囊。延迟到点、用户主动点球、或直接失败时调用。
+/// v0.4.85：把合成态铺开成 196pt 胶囊。延迟到点、用户主动点球、或直接失败时调用。
 /// 重复调用无害（_ttsShown 挡住），取消时由 sl_ttsAutoCollapse 撤掉排队的这次。
 - (void)sl_ttsReveal {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsReveal) object:nil];
@@ -1408,17 +1443,28 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
         // 这里必须立刻铺 —— 否则红字提示根本没地方显示，用户只看到球闪了一下。
         _ttsShown = YES;
         _ttsRetryBlock = [retryBlock copy];
-        _ttsTitle.text = failText;
+        // v0.4.88：调用方传的是「合成失败 · 网络错误」一整串，17 个字挤在 84pt 里必然截断。
+        // 这里按「 · 」拆成两行：标题只留结论，原因挪到副标。拆不开就整串当标题、副标空着。
+        NSString *title = failText;
+        NSString *detail = nil;
+        NSRange sp = [failText rangeOfString:@" · "];
+        if (sp.location != NSNotFound && sp.location > 0 && sp.location + sp.length < failText.length) {
+            title = [failText substringToIndex:sp.location];
+            detail = [failText substringFromIndex:sp.location + sp.length];
+        }
+        _ttsTitle.text = title;
         _ttsTitle.textColor = [UIColor systemRedColor];
         _ttsSub.textColor = [UIColor secondaryLabelColor];
-        _ttsSub.text = @"已放回输入框 · 点此重试";
+        _ttsSub.text = detail;   // 没原因就不显示，别再填「已放回输入框」这种废话
         _ttsFill.backgroundColor = [UIColor systemRedColor];
         _ttsTitle.hidden = NO;
-        _ttsSub.hidden = NO;
+        _ttsSub.hidden = (detail.length == 0);
         _ttsTrack.hidden = NO;
-        _ttsCancel.hidden = YES;
+        // 同一个按钮换标题：右端不再空出一块，也不用整条胶囊可点（那会跟拖动手势打架）。
+        [_ttsCancel setTitle:@"重试" forState:UIControlStateNormal];
+        _ttsCancel.hidden = NO;
         _ttsStroke.hidden = NO;
-        _ttsTapArea.hidden = NO;
+        _ttsTapArea.hidden = YES;
         if (!self.slExpanded) [self sl_expand:YES animated:YES];
         [self setNeedsLayout];
 
@@ -1448,6 +1494,13 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     [self setNeedsLayout];
 }
 
+/// v0.4.88：右侧那个按钮在两个相位下含义不同 —— 合成中取消，失败重试。
+/// 位置尺寸完全一样，只是换了标题，所以入口在这里按相位分派。
+- (void)sl_ttsBtnTapped {
+    if (_ttsPhase == 1) [self sl_ttsCancelTapped];
+    else if (_ttsPhase == 2) [self sl_ttsRetryTapped];
+}
+
 - (void)sl_ttsCancelTapped {
     if (_ttsPhase != 1) return;
     void (^cb)(void) = _ttsCancelBlock;
@@ -1461,9 +1514,11 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     void (^rb)(void) = _ttsRetryBlock;
     _ttsRetryBlock = nil;
     // 不先收球：原地退回「合成中」再由 sl_ttsBegin 重铺。收球再展开会缩一下又长回来，
-    // 宽度明明一样（218），肉眼却像闪了一下。
+    // 宽度明明一样（196），肉眼却像闪了一下。
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsAutoCollapse) object:nil];
-    _ttsPhase = 0;
+    // v0.4.88：这里**不清** _ttsPhase。清成 0 之后 sl_pillSize 会按「没合成」返回 146，
+    // 万一在 rb() 之前插进一次 layout，胶囊就缩成 146 再长回 196 —— 又是一次闪。
+    // 保持相位 2（宽度 196 不变），紧接着 sl_ttsBegin 会把它推到 1。
     _ttsCancelBlock = nil;
     _ttsTitle.hidden = YES;
     _ttsSub.hidden = YES;
