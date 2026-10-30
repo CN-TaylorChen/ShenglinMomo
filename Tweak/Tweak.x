@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.83"
+#define SLVersion @"0.4.84"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -244,49 +244,64 @@ static NSString *SLDumpPropsOnce(id arg) {
 // 命中 #tts 后清空输入栏（避免原文本残留）
 // v0.4.82：加了「写回」分支 —— 合成失败 / 用户取消时要把口令原样放回输入框。
 // 陌陌自己在调 sendTextMessage: 之前就已经把框清空了，不补这一步，所谓的「留在输入框」是空的。
-static void SLSetTextInView(UIView *v, NSString *text);
+// v0.4.84：v0.4.83 的回填实际一次都没成功过（见 SLApplyInputBarsText 注释），整段重写。
+static BOOL SLSetTextInView(UIView *v, NSString *text);
+static BOOL SLWriteTextToBar(UIView *bar, NSString *text);
 
-static void SLApplyInputBarsText(NSString *text) {
+// v0.4.84：最近一次成功写过的输入框。输入栏被换成语音模式 / 页面重建时，
+// 窗口里可能一时扫不到它，留一手兜底。
+static __weak UITextView *sSLLastInputTextView = nil;
+
+static BOOL SLApplyInputBarsText(NSString *text) {
+    NSMutableArray<UIWindow *> *wins = [NSMutableArray array];
     @try {
-        NSArray *classes = @[NSClassFromString(@"MDChatInputBar"),
-                              NSClassFromString(@"MDNewInputTextBar"),
-                              NSClassFromString(@"MDChatUniverseInputBar")];
-        UIWindow *win = nil;
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
-                if ([sc isKindOfClass:[UIWindowScene class]] &&
-                    ((UIWindowScene *)sc).activationState == UISceneActivationStateForegroundActive) {
-                    win = ((UIWindowScene *)sc).windows.firstObject;
-                    break;
-                }
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes) {
+            if (![sc isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+                if (w && !w.hidden && ![wins containsObject:w]) [wins addObject:w];
             }
         }
-        if (!win) {
+    } @catch (NSException *e) { }
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            win = [UIApplication sharedApplication].keyWindow;
+    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
 #pragma clang diagnostic pop
-        }
-        if (!win) return;
+    if (kw && ![wins containsObject:kw]) [wins insertObject:kw atIndex:0];
+
+    NSInteger hit = 0;
+    for (UIWindow *win in wins) {
         NSMutableArray *q = [NSMutableArray arrayWithObject:win];
         while (q.count) {
             UIView *v = q.firstObject; [q removeObjectAtIndex:0];
-            for (NSString *cn in classes) {
-                if (cn && [v isKindOfClass:NSClassFromString(cn)]) {
-                    id tv = [v valueForKey:@"inputTextView"];
-                    if ([tv isKindOfClass:[UITextView class]]) {
-                        if (text.length) SLSetTextInView((UIView *)tv, text);
-                        else ((UITextView *)tv).text = @"";
-                    }
-                }
+            // v0.4.84：**每个视图单独判断、单独 try**。
+            // v0.4.83 是把整趟 BFS 包在一个 @try 里，只要撞上一条认不出
+            // inputTextView 的输入栏（valueForKey: 抛 NSUnknownKeyException），
+            // 异常直接把整趟扫描连窗口一起丢掉 —— 结果就是一个字都没写进去，
+            // 日志却照样打「text restored to input box」。
+            NSString *cn = NSStringFromClass([v class]);
+            BOOL looksBar = [cn hasSuffix:@"InputBar"] || [cn hasSuffix:@"InputTextBar"] ||
+                            [cn hasSuffix:@"TextInputBar"] || [cn hasSuffix:@"ChatInputBar"];
+            if (!looksBar) {
+                Class c1 = NSClassFromString(@"MDChatInputBar");
+                Class c2 = NSClassFromString(@"MDNewInputTextBar");
+                Class c3 = NSClassFromString(@"MDChatUniverseInputBar");
+                looksBar = (c1 && [v isKindOfClass:c1]) || (c2 && [v isKindOfClass:c2]) || (c3 && [v isKindOfClass:c3]);
             }
+            if (looksBar && SLWriteTextToBar(v, text)) hit++;
             for (UIView *s in v.subviews) [q addObject:s];
         }
-    } @catch (NSException *e) {}
+    }
+    // 扫描没命中就退回上次成功写过的那个框（页面重建前的引用一般还活着）
+    if (hit == 0 && text.length && sSLLastInputTextView && sSLLastInputTextView.window) {
+        if (SLWriteTextToBar((UIView *)sSLLastInputTextView, text)) hit++;
+    }
+    SLLog(@"input bar %@: %@ (%lu chars) hit=%ld", text.length ? @"restore" : @"clear",
+          hit ? @"ok" : @"MISS", (unsigned long)text.length, (long)hit);
+    return hit > 0;
 }
 
-static void SLClearInputBars(void) { SLApplyInputBarsText(nil); }
-static void SLRestoreInputBarsText(NSString *text) { SLApplyInputBarsText(text); }
+static BOOL SLClearInputBars(void) { return SLApplyInputBarsText(nil); }
+static BOOL SLRestoreInputBarsText(NSString *text) { return SLApplyInputBarsText(text); }
 
 // v0.4.52：安全取字符串 getter —— 先确认方法返回类型是对象（'@'）再调。
 // 0.4.52 闪退根因：对「返回结构体/基本类型」的属性盲调 getter，arm64 上返回值 ABI 不匹配，直接崩。
@@ -442,31 +457,87 @@ static void SLClearTextInView(UIView *v) {
 // v0.4.82：把口令写回输入框。
 // v0.4.81 只做了「失败不清空」，但陌陌的发送顺序是「取文本 → 建 message → 清空输入框 →
 // 调 sendTextMessage:」，我们 hook 在最后一环，框早就空了 —— 所以必须主动回填。
-// 光设 text 不够：输入栏的高度和右侧发送键都挂在 textViewDidChange: 上，
-// 不通知它，文字会显示出来但气泡高度还是原来的单行。
-static void SLSetTextInView(UIView *v, NSString *text) {
-    if (!text.length) return;
+// v0.4.84：真正往 UITextView 里写字，写完读回校验（text 全空也走这里 = 清空）。
+static BOOL SLFillTextView(UITextView *tv, NSString *text) {
+    if (!tv) return NO;
+    NSString *want = text.length ? text : @"";
     @try {
-        if ([v isKindOfClass:[UITextView class]]) {
-            UITextView *tv = (UITextView *)v;
-            tv.text = text;
-            id<UITextViewDelegate> d = tv.delegate;
-            if (d && [d respondsToSelector:@selector(textViewDidChange:)]) {
-                @try { [d textViewDidChange:tv]; } @catch (NSException *e) { }
-            }
-            // v0.4.83：UITextView 不是 UIControl，没有 sendActionsForControlEvents:（v0.4.82
-            // 就是这么炸的 CI）。广播文本变更通知 —— UIKit 内部以及陌陌监听输入栏的那套都收这个。
-            [[NSNotificationCenter defaultCenter] postNotificationName:UITextViewTextDidChangeNotification
-                                                                object:tv];
-            if (text.length <= tv.text.length) {
-                tv.selectedRange = NSMakeRange(text.length, 0);   // 光标落到末尾，接着改口令就行
-            }
-        } else if ([v isKindOfClass:[UITextField class]]) {
-            UITextField *tf = (UITextField *)v;
-            tf.text = text;
-            [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+        tv.text = want;
+        // 光设 text 不够：输入栏的高度和右侧发送键都挂在 textViewDidChange: 上，
+        // 不通知它，字有了但气泡高度还是原来那一行。
+        id<UITextViewDelegate> d = tv.delegate;
+        if (d && [d respondsToSelector:@selector(textViewDidChange:)]) {
+            @try { [d textViewDidChange:tv]; } @catch (NSException *e) { }
+        }
+        // v0.4.83：UITextView 不是 UIControl，没有 sendActionsForControlEvents:（v0.4.82
+        // 就是这么炸的 CI）。广播文本变更通知 —— UIKit 内部以及陌陌监听输入栏的那套都收这个。
+        [[NSNotificationCenter defaultCenter] postNotificationName:UITextViewTextDidChangeNotification
+                                                            object:tv];
+        if (want.length && want.length <= tv.text.length) {
+            tv.selectedRange = NSMakeRange(want.length, 0);   // 光标落到末尾，接着改口令就行
+        }
+        if ([tv.text isEqualToString:want]) {
+            sSLLastInputTextView = tv;
+            return YES;
         }
     } @catch (NSException *e) { }
+    return NO;
+}
+
+// v0.4.84：往一条输入栏里写字。
+// 先按常见 KVC 名找文本框（陌陌几套输入栏命名不统一），找不到就把这棵子树扫一遍，
+// 认「可编辑、有宽度」的第一个 UITextView —— 比死认属性名可靠。
+// 每一步都单独 @try：valueForKey: 遇到不存在的 key 会抛 NSUnknownKeyException，
+// 这就是 v0.4.83 扫描整个被吞掉、一个字也没写进去的直接原因。
+static BOOL SLWriteTextToBar(UIView *bar, NSString *text) {
+    if (!bar) return NO;
+    if ([bar isKindOfClass:[UITextView class]]) return SLFillTextView((UITextView *)bar, text);
+    NSArray *keys = @[@"inputTextView", @"textView", @"inputTextView_",
+                      @"expandingTextView", @"textInputView", @"inputField"];
+    for (NSString *k in keys) {
+        id o = nil;
+        @try { o = [bar valueForKey:k]; } @catch (NSException *e) { o = nil; }
+        if (!o) continue;
+        if ([o isKindOfClass:[UITextView class]]) {
+            if (SLFillTextView((UITextView *)o, text)) return YES;
+        } else if ([o isKindOfClass:[UITextField class]]) {
+            UITextField *tf = (UITextField *)o;
+            @try {
+                tf.text = text.length ? text : @"";
+                [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+                if ([tf.text isEqualToString:(text.length ? text : @"")]) return YES;
+            } @catch (NSException *e) { }
+        }
+    }
+    // 兜底：把这棵子树扫一遍。优先挑「有宽度」的（真正在用的那个），
+    // 一个都没有就把第一个可编辑的也算上 —— 输入栏切到语音模式时文本框会被收成 0 尺寸，
+    // 但把字写进去，切回文字模式依然能看到。
+    UITextView *fallback = nil;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:bar];
+    while (q.count) {
+        UIView *v = q.firstObject; [q removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UITextView class]]) {
+            UITextView *t = (UITextView *)v;
+            if (t.isEditable) {
+                if (CGRectGetWidth(t.bounds) > 8.0) {
+                    if (SLFillTextView(t, text)) return YES;
+                } else if (!fallback) {
+                    fallback = t;
+                }
+            }
+        }
+        for (UIView *s in v.subviews) [q addObject:s];
+    }
+    if (fallback) return SLFillTextView(fallback, text);
+    return NO;
+}
+
+static BOOL SLSetTextInView(UIView *v, NSString *text) {
+    if (!text.length) return NO;
+    if ([v isKindOfClass:[UITextView class]]) {
+        if (SLFillTextView((UITextView *)v, text)) return YES;
+    }
+    return SLWriteTextToBar(v, text);
 }
 
 #pragma mark - 找能发语音的 handler
@@ -1163,10 +1234,16 @@ static void SLArmTTS(id handler,
     // 后到的回调一律丢掉。原来只有 cancelled，超时后 pipeline 迟到的成功回调仍会装填。
     __block BOOL settled = NO;
 
-    void (^restoreText)(void) = ^{
-        if (!rawText.length) return;
-        if (inputView) SLSetTextInView(inputView, rawText);
-        else SLRestoreInputBarsText(rawText);
+    // v0.4.84：回填改成有返回值 —— 写不进去的时候至少别把口令弄丢（退到剪贴板）。
+    BOOL (^restoreText)(void) = ^{
+        if (!rawText.length) return NO;
+        BOOL ok = inputView ? SLSetTextInView(inputView, rawText) : SLRestoreInputBarsText(rawText);
+        if (!ok) {
+            UIPasteboard.generalPasteboard.string = rawText;
+            SLLog(@"restore text MISS，已复制到剪贴板");
+            [AWECAUtils showToast:@"没写回输入框，原文已复制" duration:2.5];
+        }
+        return ok;
     };
     void (^clearOnSuccess)(void) = ^{
         if (inputView) SLClearTextInView(inputView);

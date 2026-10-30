@@ -221,11 +221,19 @@ static BOOL sSLFloatSettleMuted = NO;
 // 就绪不再自动回空闲，发出去的那一刻外扩一圈涟漪再回空闲。
 
 #define SLBallSide 48.0
-#define SLPillMaxW 196.0
-#define SLPillMinW 146.0   // v0.4.77：展开态定宽，就是 146 / 196 里最短的那一档
+// v0.4.84：196 → 218。「最大尺寸」的语义是「毛玻璃层固定多大」，而 v0.4.82 的
+// 合成态胶囊做到了 218 —— 比毛玻璃还宽 22pt。那 22pt 没有 blur、也没有 _haze 底色，
+// 只剩半透明状态色压着聊天背景，所以左端看起来是半截深色，跟右边硬切开。
+// 把毛玻璃的最大宽抬到 218（= 最宽的胶囊），所有形态（48 / 146 / 218）都被完整包住。
+// 尺寸一旦恒定，就不会出现「blur 改宽后右端留白圆残影」那个老问题。
+#define SLPillMaxW 218.0
+#define SLPillMinW 146.0   // v0.4.77：展开态定宽，就是 146 / 218 里最短的那一档
 // v0.4.82：合成中的胶囊要装「两行字 + 取消键」，146 塞不下，单独一档更宽。
 // 不跟名字走（名字那档由 sl_pillSize 决定），所以合成结束收起时不会有第二段宽度跳变。
-#define SLTtsPillW 218.0
+// v0.4.84：跟毛玻璃最大宽取同一个数，两者必须相等，否则就会出现「玻璃没铺满」的深色缺口。
+#define SLTtsPillW SLPillMaxW
+// 语音包列表卡片的最小宽：跟胶囊宽度挂钩，但别跟着毛玻璃最大值一起涨。
+#define SLMenuMinW 196.0
 
 // v0.4.44：下压留白改成 0。
 // 之前留 14pt 是为了让搜索栏不压圆角，但导航栏是透明的 —— 那 14pt 成了整张卡片上
@@ -1611,6 +1619,8 @@ static UIImage *SLTransparentImage(void) {
     // v0.4.40：镜像开关。MX(x, wd) 把「距左 x」翻成「距右 x」，宽度不变的居中元素不要用它。
     BOOL mir = exp ? _mirrored : NO;
 #define SLMX(x, wd) (mir ? (w - (x) - (wd)) : (x))
+    // v0.4.84：SLPillMaxW 已经 ≥ 所有胶囊宽度，这里两个方向都必然覆盖整条
+    //（非镜像 w-218 ≤ 0，镜像 0 起），不用再按镜像右对齐。
     _chrome.frame = CGRectMake(mir ? 0 : (w - SLPillMaxW), 0, SLPillMaxW, h);
 
     // v0.4.39：左图标与球态同尺寸（22pt，不再缩水到 18），头像 32 → 42
@@ -1816,7 +1826,7 @@ static NSMutableSet<NSString *> *SLExpandedFolderSet(void) {
     // v0.4.76：胶囊宽度改成跟名字走、最窄 146。列表不跟着缩 ——
     // 行内固定占掉 88pt（试听键 48 + 间距 8 + 右侧圈 18 + 内边距），
     // 卡片再跟着收到 146，名字只剩 58pt，滚起来也读不下去。
-    if (cardW < SLPillMaxW) cardW = SLPillMaxW;
+    if (cardW < SLMenuMinW) cardW = SLMenuMinW;
     _cardW = cardW;
 
     _card = [[UIView alloc] initWithFrame:[self sl_cardFrameForAnchor:anchor width:cardW height:120.0]];
