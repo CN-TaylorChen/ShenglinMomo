@@ -67,7 +67,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.4.94"
+#define SLVersion @"0.4.95"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -128,8 +128,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     CGFloat H = 32.0;
     UIView *box = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 100, H)];
 
+    // v0.4.95：22 → 24。22pt 里四根条只剩 2.2pt 宽，配 32 高的胶囊也偏矮一截；
+    // 24 上下各留 4，和右边「完成」胶囊视觉齐平。
     UIImageView *icon = [[UIImageView alloc] initWithImage:SLBrandIconImage(44)];
-    icon.frame = CGRectMake(0, (H - 22) / 2.0, 22, 22);
+    icon.frame = CGRectMake(0, (H - 24) / 2.0, 24, 24);
     icon.contentMode = UIViewContentModeScaleAspectFit;
     [box addSubview:icon];
 
@@ -149,7 +151,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     CGFloat padX = 10.0, gap = 5.0;
     CGFloat innerW = name.frame.size.width + gap + ver.frame.size.width;
     CGFloat pillW = innerW + padX * 2.0;
-    CGFloat pillX = 28.0;
+    CGFloat pillX = 30.0;   // v0.4.95：图标 24 + 6pt 间隙
     UIVisualEffectView *pill = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial]];
     pill.frame = CGRectMake(pillX, 0, pillW, H);
     pill.layer.cornerRadius = H / 2.0;

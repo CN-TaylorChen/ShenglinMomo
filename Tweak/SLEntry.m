@@ -96,6 +96,17 @@ NSString *SLFloatIconSummary(void) {
 
 // 品牌图形：黑底圆 + 六根圆角条。100 单位为画布基准，跟设计稿一一对应，
 // 线条宽度、间距、条高都按比例缩放，48pt 球和 20pt 标题栏图标是同一张图。
+// v0.4.95：品牌四杠的唯一几何。100 单位为画布基准，短长长短，
+// 左两淡 = 被替换的原声，右两实 = 合成声。
+//
+// 标题栏原先走的是另一套六杠（条宽 6u、间距 4u），可它在标题栏只显示 22pt，
+// 折下来条宽 1.32pt、前三根还是 30% 白 —— 3x 屏上就是 4px 的灰雾，
+// 跟球的四条看不出是同一个标志。现在两处引用同一份数组，不再分叉。
+static const CGFloat kSLBrandBarX[4] = {12, 34, 56, 78};
+static const CGFloat kSLBrandBarH[4] = {24, 46, 40, 28};
+static const CGFloat kSLBrandBarA[4] = {0.30, 0.30, 1.0, 1.0};
+static const CGFloat kSLBrandBarW = 10.0;
+
 static UIImage *SLBrandIcon(CGFloat side, UIColor *bg) {
     if (side <= 0) side = 96;
     UIColor *base = bg ?: [UIColor blackColor];
@@ -107,14 +118,11 @@ static UIImage *SLBrandIcon(CGFloat side, UIColor *bg) {
         CGContextSetFillColorWithColor(c, base.CGColor);
         CGContextFillEllipseInRect(c, CGRectMake(0, 0, side, side));
         CGFloat u = side / 100.0;
-        CGFloat xs[6] = {20, 30, 40, 54, 64, 74};
-        CGFloat hs[6] = {16, 26, 20, 22, 32, 24};
-        CGFloat as[6] = {0.30, 0.30, 0.30, 1.0, 1.0, 1.0};
-        for (int i = 0; i < 6; i++) {
-            CGFloat w = 6.0 * u;
-            CGFloat h = hs[i] * u;
-            CGRect bar = CGRectMake(xs[i] * u, (side - h) / 2.0, w, h);
-            [[UIColor colorWithWhite:1.0 alpha:as[i]] setFill];
+        CGFloat w = kSLBrandBarW * u;
+        for (int i = 0; i < 4; i++) {
+            CGFloat h = kSLBrandBarH[i] * u;
+            CGRect bar = CGRectMake(kSLBrandBarX[i] * u, (side - h) / 2.0, w, h);
+            [[UIColor colorWithWhite:1.0 alpha:kSLBrandBarA[i]] setFill];
             [[UIBezierPath bezierPathWithRoundedRect:bar cornerRadius:w / 2.0] fill];
         }
     }];
@@ -140,15 +148,12 @@ static UIImage *SLBrandGlyphCompact(CGFloat side, UIColor *color) {
     return [r imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
         (void)ctx;
         CGFloat u = side / 100.0;
-        CGFloat xs[4] = {12, 34, 56, 78};   // 12..88，整体居中
-        // v0.4.47：条高改 短长长短（原 短长短长）。左两淡=原声，右两实=合成声，分组不变。
-        CGFloat hs[4] = {24, 46, 40, 28};
-        CGFloat as[4] = {0.30, 0.30, 1.0, 1.0};
+        // v0.4.95：几何统一走 kSLBrandBar*，与标题栏图标同一份
+        CGFloat w = kSLBrandBarW * u;
         for (int i = 0; i < 4; i++) {
-            CGFloat w = 10.0 * u;
-            CGFloat h = hs[i] * u;
-            CGRect bar = CGRectMake(xs[i] * u, (side - h) / 2.0, w, h);
-            [[c colorWithAlphaComponent:as[i]] setFill];
+            CGFloat h = kSLBrandBarH[i] * u;
+            CGRect bar = CGRectMake(kSLBrandBarX[i] * u, (side - h) / 2.0, w, h);
+            [[c colorWithAlphaComponent:kSLBrandBarA[i]] setFill];
             [[UIBezierPath bezierPathWithRoundedRect:bar cornerRadius:w / 2.0] fill];
         }
     }];
@@ -903,19 +908,17 @@ static UIImage *SLTransparentImage(void) {
     CGFloat side = CGRectGetWidth(_bars.bounds);
     if (side <= 0.0) return;
     CGFloat u = side / 100.0;
-    static const CGFloat xs[4] = {12, 34, 56, 78};
-    static const CGFloat hs[4] = {24, 46, 40, 28};
-    static const CGFloat as[4] = {0.30, 0.30, 1.0, 1.0};
+    // v0.4.95：条宽 / 位置 / 高度 / 透明度全部走 kSLBrandBar*，与两个图标函数同源
     UIColor *c = _glyph.tintColor ?: [UIColor labelColor];
+    CGFloat w = kSLBrandBarW * u;
     for (int i = 0; i < 4; i++) {
-        CGFloat w = 10.0 * u;
-        CGFloat hh = hs[i] * u;
+        CGFloat hh = kSLBrandBarH[i] * u;
         UIView *bar = _barCell[i];
         bar.bounds = CGRectMake(0, 0, w, hh);
-        bar.center = CGPointMake((xs[i] * u) + w / 2.0, side / 2.0);
+        bar.center = CGPointMake((kSLBrandBarX[i] * u) + w / 2.0, side / 2.0);
         bar.layer.cornerRadius = w / 2.0;
         bar.layer.cornerCurve = kCACornerCurveContinuous;
-        bar.backgroundColor = [c colorWithAlphaComponent:as[i]];
+        bar.backgroundColor = [c colorWithAlphaComponent:kSLBrandBarA[i]];
     }
 }
 
