@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.86"
+#define SLVersion @"0.4.87"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -1320,8 +1320,22 @@ static void SLArmTTS(id handler,
         return ok;
     };
     void (^clearOnSuccess)(void) = ^{
-        if (inputView) SLClearTextInView(inputView);
-        else SLClearInputBars();
+        if (inputView) { SLClearTextInView(inputView); return; }
+        // v0.4.87：清「回填时写进去的那个框」，别再盲扫。
+        // 原来这里走 SLClearInputBars()，而清空分支要求 text.length 非空才去扫全窗口，
+        // 传 nil 就只剩 bars 白名单 —— 你单聊的输入栏不在白名单里（bars=0），
+        // 所以日志里 input bar clear 全是 MISS，一次都没真清掉。失败重试成功后
+        // 框里还留着「tts 测试」，手滑再点一次发送就又起一个合成。
+        UITextView *last = sSLLastInputTextView;   // __weak 先落成强引用
+        if (last && last.window) {
+            NSUInteger before = last.text.length;
+            if (SLFillTextView(last, nil)) {
+                SLLog(@"input bar cleared via remembered tv (had %lu chars)", (unsigned long)before);
+                return;
+            }
+            SLLog(@"clear via remembered tv failed, fallback to bars");
+        }
+        SLClearInputBars();
     };
     void (^retryBlock)(void) = ^{
         SLArmTTS(nil, content, rawText, inputView);

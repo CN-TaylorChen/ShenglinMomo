@@ -2535,12 +2535,14 @@ void SLFloatSetState(SLFloatState state) {
     }
     SLFloatButton *b = sSLFloatBtn;
     if (!b) return;
-    // v0.4.85：合成中不接受「回灰」。录音结束 / 发送成功 / 取消发送这三条收尾路径
-    // 各自会调一次 Idle —— 之前就是这么把合成中的蓝冲成灰的：用户按录制录一发，
-    // 待用状态当场消失，看着像「合成白干了」。合成还没出结论就一律保持蓝，
-    // 颜色由合成回调自己定（成功绿 / 失败红）。取消那条不用管：它先把相位清成 0 才回灰。
-    if (state == SLFloatStateIdle && [b sl_ttsBusy]) {
-        SLLog(@"idle suppressed: tts still synthesizing");
+    // v0.4.87：合成期间球**只许是蓝的**。v0.4.85 只拦了 Idle，结果录音开场那句
+    // SLFloatSetState(Recording) 照样能把蓝刷成红，而录音结束的 Idle 又被拦 ——
+    // 球就卡在红里直到 30s 超时（日志 17:26:21 点亮录音态 → 17:26:22 idle suppressed）。
+    // 只堵出口不堵入口，等于没堵。现在反过来：合成没出结论时，除「合成中」以外
+    // 一切状态（Recording / Idle / Ready）都不接受，颜色完全由合成回调决定
+    //（成功绿 / 失败红）。取消路径不受影响：它先把相位清成 0 才回灰。
+    if ([b sl_ttsBusy] && state != SLFloatStateSynthesizing) {
+        SLLog(@"state %ld suppressed: tts still synthesizing", (long)state);
         return;
     }
     // v0.4.36：就绪不再 1.6 秒后自己退回空闲 —— 它要一直亮着，
@@ -2680,13 +2682,19 @@ void SLRefreshFloatButton(void) {
     SLApplyFloatIcon(btn);
     // v0.4.40：装填了就亮成蓝的、撤销了回空闲 —— 名字（sl_loadIcon）和颜色一起走，
     // 否则会出现「名字写原声、球还是蓝的」这种自相矛盾。
-    if (btn) [btn sl_applyState:([SLVoicePack isOneShotPending] ? SLFloatStateReady : SLFloatStateIdle)];
+    // v0.4.87：合成中只换图标、颜色不动。这条是直接调 sl_applyState，绕开了
+    // SLFloatSetState 的闸门 —— 合成时进设置页调个外观，蓝球就会被刷成灰或绿。
+    if (btn && ![btn sl_ttsBusy]) {
+        [btn sl_applyState:([SLVoicePack isOneShotPending] ? SLFloatStateReady : SLFloatStateIdle)];
+    }
 }
 
 #pragma mark - v0.4.82：合成态桥接（进度条直接长在胶囊里）
 
 void SLFloatTTSBegin(NSTimeInterval limitSec, void (^cancelBlock)(void)) {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // v0.4.87：已在主线程就直接执行 —— 见 SLFloatTTSEnd 里的说明，异步排队会让
+    // 调用方紧跟着写的那句同步状态设置抢在前面。
+    void (^work)(void) = ^{
         SLFloatButton *btn = sSLFloatBtn;
         if (!btn) {
             UIWindow *w = SLKeyWindow();
@@ -2696,11 +2704,18 @@ void SLFloatTTSBegin(NSTimeInterval limitSec, void (^cancelBlock)(void)) {
         [btn sl_ttsBegin:limitSec cancel:cancelBlock];
         // 胶囊可能刚从球展开，铺到顶层免得被面板压住
         [btn.superview bringSubviewToFront:btn];
-    });
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_async(dispatch_get_main_queue(), work);
 }
 
 void SLFloatTTSEnd(BOOL success, NSString *failText, void (^retryBlock)(void)) {
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // v0.4.87：同样改成「主线程就直接跑」。
+    // 原来无条件 dispatch_async，而 Tweak.x 里「先 SLFloatTTSEnd 再 SLFloatSetState(Idle)」
+    // 是同步连着写的 —— Idle 抢在 TTSEnd 前面执行，那一刻相位还是 1，被闸门拦掉，
+    // 结果球停在蓝、胶囊却在报失败（日志 17:26:30 tts timeout 之后紧跟的那行
+    // 「idle suppressed」就是它）。改顺序没用，得让 TTSEnd 真的先落地。
+    void (^work)(void) = ^{
         SLFloatButton *btn = sSLFloatBtn;
         if (!btn) {
             UIWindow *w = SLKeyWindow();
@@ -2708,7 +2723,9 @@ void SLFloatTTSEnd(BOOL success, NSString *failText, void (^retryBlock)(void)) {
         }
         if (!btn) return;
         [btn sl_ttsEnd:success failText:failText retry:retryBlock];
-    });
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_async(dispatch_get_main_queue(), work);
 }
 
 // 把中心点夹在「不会被屏幕边缘切掉」的范围内。
