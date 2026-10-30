@@ -1075,16 +1075,33 @@ static UIImage *SLTransparentImage(void) {
     }
     _readyDot.hidden = (state != SLFloatStateReady);
 
-    // v0.4.57：光环描边是 CAShapeLayer 属性，UIView 动画块管不到，单独用 CATransaction 交叉淡出。
-    // 必须放在 sl_startBreath 之后：后者会 removeAllAnimations，提前加的描边动画会被清掉。
+    // v0.4.57：光环描边是 CAShapeLayer 属性，UIView 动画块管不到，得单独做一条 0.26s 的过渡。
+    // v0.4.91：顺序错了整整七个版本 —— 原来先改色、再调 sl_startBreath，
+    // 而它开头 removeAllAnimations 会把这条颜色过渡连同形变的 path 动画一起清掉。
+    // 结果就是：填充按 0.26s 渐变换色，描边却「啪」地瞬间跳色。用户两张截图里
+    // 「绿底配蓝框（展开）」「蓝底配绿框（收起）」全是这一条造成的。
+    // 现在先把呼吸挂好，再单独给 strokeColor 挂一条和 UIView 块同时长、同曲线的动画。
+    [self sl_startBreath:state];
     UIColor *halo = accent ?: [UIColor colorWithWhite:0.55 alpha:1.0];
-    [CATransaction begin];
-    [CATransaction setAnimationDuration:0.26];
-    [CATransaction setAnimationTimingFunction:[CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut]];
+    CGColorRef oldIn = (CGColorRef)CFRetain(_haloIn.strokeColor ?: halo.CGColor);
+    CGColorRef oldOut = (CGColorRef)CFRetain(_haloOut.strokeColor ?: halo.CGColor);
     _haloIn.strokeColor = halo.CGColor;
     _haloOut.strokeColor = halo.CGColor;
-    [CATransaction commit];
-    [self sl_startBreath:state];
+    CAMediaTimingFunction *haloEase = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    CABasicAnimation *hcIn = [CABasicAnimation animationWithKeyPath:@"strokeColor"];
+    hcIn.fromValue = (__bridge id)oldIn;
+    hcIn.toValue = (__bridge id)halo.CGColor;
+    hcIn.duration = 0.26;
+    hcIn.timingFunction = haloEase;
+    [_haloIn addAnimation:hcIn forKey:@"slColor"];
+    CABasicAnimation *hcOut = [CABasicAnimation animationWithKeyPath:@"strokeColor"];
+    hcOut.fromValue = (__bridge id)oldOut;
+    hcOut.toValue = (__bridge id)halo.CGColor;
+    hcOut.duration = 0.26;
+    hcOut.timingFunction = haloEase;
+    [_haloOut addAnimation:hcOut forKey:@"slColor"];
+    CFRelease(oldIn);
+    CFRelease(oldOut);
     // v0.4.41：状态一变就重读名字。原来只改颜色不改文字，发完那一发胶囊还挂着
     // 刚才的包名 —— 用户以为没发出去，实际问题只是字没刷新。
     _name.text = SLFloatPackName();
@@ -1093,8 +1110,11 @@ static UIImage *SLTransparentImage(void) {
 }
 
 - (void)sl_startBreath:(SLFloatState)state {
-    [_haloIn removeAllAnimations];
-    [_haloOut removeAllAnimations];
+    // v0.4.91：只清「breath」这一条，别 removeAllAnimations。
+    // 全清会把两条顺手带走：① 形变中正在插值的 path（slShape）；② 刚挂上的换色（slColor）。
+    // 被清掉之后 CAShapeLayer 直接跳到 model 值 —— 光环瞬间变成终点形状、颜色硬切。
+    [_haloIn removeAnimationForKey:@"breath"];
+    [_haloOut removeAnimationForKey:@"breath"];
 
     // 半周期时长：一轮完整呼吸 = 2 倍
     CGFloat half = 1.4;      // 空闲 2.8s
@@ -1288,8 +1308,16 @@ static UIImage *SLTransparentImage(void) {
         [layer removeAnimationForKey:@"slShape"];
         [layer addAnimation:a forKey:@"slShape"];
     }
+    // v0.4.91：和 sl_expand 同一条规矩 —— 状态色的起点显式摆到 fromRect 上。
+    // 镜像时 fromRect 是 (newW-oldW, 0, oldW, hh)（图标端贴右），若让 UIView 从「当前 model
+    // 值 (0,0,oldW,hh)」开始，右边缘会跟着往右长，而玻璃是靠左边缘往左长的 —— 两条边反向错开。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _tint.frame = fromRect;
+    _tint.layer.cornerRadius = hh / 2.0;
+    [CATransaction commit];
     [UIView animateWithDuration:dur delay:0
-                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
+                        options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
         self->_tint.frame = toRect;
         self->_tint.layer.cornerRadius = hh / 2.0;
@@ -1435,8 +1463,18 @@ static UIImage *SLTransparentImage(void) {
 
         // 状态色也不在 _glassHost 里，必须跟玻璃走同一条边 —— 否则颜色比玻璃早到 / 晚走，
         // 就是那两层套在一起的胶囊。
+        // v0.4.91：起点必须显式摆到 fromRect 上。原来这里直接动画到 toRect，UIView 拿的是
+        // 当前 model 值 —— 球态 tint 铺满 48 宽的 bounds，也就是 (0,0,48,48)，永远贴左；
+        // 而镜像展开时遮罩是从 (148,0,48,48) 往左长的。一个从左长、一个从右长，
+        // 中途就是「绿块和蓝框各错开一个球宽」（用户 19:36 录屏 0.933s 那帧）。
+        // 去掉 BeginFromCurrentState：起点由我们指定，不再跟着上一帧的呈现值跑。
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        _tint.frame = fromRect;
+        _tint.layer.cornerRadius = hh / 2.0;
+        [CATransaction commit];
         [UIView animateWithDuration:dur delay:0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
+                            options:UIViewAnimationOptionCurveEaseOut
                          animations:^{
             self->_tint.frame = toRect;
             self->_tint.layer.cornerRadius = hh / 2.0;
@@ -1750,7 +1788,9 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     [_ttsTimer invalidate];
     _ttsTimer = nil;
     _ttsPhase = 0;
-    _ttsShown = NO;   // v0.4.85：下次合成重新从「只有球」开始
+    // v0.4.91：_ttsShown 不能在这里清。清掉之后 layoutSubviews 里 showChrome 立刻变真，
+    // 语音包名字会趁「内容淡出 0.10s」这段空档冒出来，和还没淡完的「合成中 / 2s·30s」
+    // 叠成一团（用户第二张截图里三个词组同时可见）。挪到 sl_ttsCollapseShape，和收缩同帧清。
     _ttsCancelBlock = nil;
     _ttsRetryBlock = nil;
     // v0.4.89：先让内容跟着一起收（0.08s 淡出），再走 0.18s 的收缩形变。
@@ -1773,6 +1813,10 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
 /// v0.4.90：内容淡完之后的收缩（拆出来只是为了能延时调用）。
 - (void)sl_ttsCollapseShape {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsCollapseShape) object:nil];
+    // v0.4.91：见到这里才允许名字回来 —— 此刻合成内容已经淡完（0.10s），
+    // 而且紧接着 sl_expand:NO 会把 slExpanded 置 NO，layout 下一次跑的时候
+    // showChrome 已经是假，名字不会冒出来。
+    _ttsShown = NO;
     [self sl_expand:NO animated:YES];
 }
 
