@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.88"
+#define SLVersion @"0.4.89"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -1262,6 +1262,9 @@ static BOOL SLArmPackAutoQuiet(void) {
 
 // v0.4.85：开关定义在文件后半段（跟 SLFillShortEnabled 放一起），这里先声明。
 static BOOL SLKeepTextOnFail(void);
+// v0.4.89：收尾该落哪个静止态。定义在文件后半段（录音收尾那段），这里先声明 ——
+// 合成收尾的三条路径（取消 / 超时 / 失败）都在它前面。
+static SLFloatState SLRestingState(void);
 
 // v0.4.82：胶囊里只有一行位置放失败原因，而 pipeline 给的 msg 常带冒号后的细节
 //（"网络错误: 无法连接服务器。"），截到冒号为止，够用且不会被省略号啃掉。
@@ -1345,7 +1348,9 @@ static void SLArmTTS(id handler,
 
     void (^cancelBlock)(void) = ^{
         settled = YES;
-        SLFloatSetState(SLFloatStateIdle);   // 球回落灰
+        // v0.4.89：取消只表示「这次不合成」，不代表槽位空了。选了语音包时它还在，
+        // 球应该停在 Ready 绿；原来这里硬写 Idle，包还在也变灰。
+        SLFloatSetState(SLRestingState());
         restoreText();                       // v0.4.82：取消也要回填，别指望陌陌留着
         SLReleaseClaim();                    // 释放去重锁，允许直接在输入框里重发
         SLLog(@"tts cancelled by user, text restored to input box");
@@ -1368,7 +1373,8 @@ static void SLArmTTS(id handler,
         // v0.4.85：先落失败态（相位 2）再回灰。反过来的话 Idle 会被
         //「合成中不接受回灰」那道闸拦掉，球停在蓝、胶囊却在报失败，状态对不上。
         SLFloatTTSEnd(NO, @"合成超时", retryBlock);
-        SLFloatSetState(SLFloatStateIdle);
+        // v0.4.89：超时只是这次没合成出来，槽位里的旧包还在 —— 按「有没有装填」落态
+        SLFloatSetState(SLRestingState());
         SLReleaseClaim();
     });
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
@@ -1383,8 +1389,9 @@ static void SLArmTTS(id handler,
                 restoreText();
                 NSString *why = SLShortFailReason(msg);
                 SLFloatTTSEnd(NO, why.length ? [NSString stringWithFormat:@"合成失败 · %@", why] : @"合成失败", retryBlock);
-                // v0.4.85：同上 —— 红字先出，再让球落灰
-                SLFloatSetState(SLFloatStateIdle);
+                // v0.4.85：同上 —— 红字先出，再落静止态。
+                // v0.4.89：这次没合成出来，但槽位里的旧包可能还在，按「有没有装填」判绿/灰。
+                SLFloatSetState(SLRestingState());
                 SLReleaseClaim();
                 return;
             }

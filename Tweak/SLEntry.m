@@ -248,6 +248,13 @@ static BOOL sSLFloatSettleMuted = NO;
 // 只向内收 5.5pt，而按钮/搜索胶囊距左右边缘 12~16pt —— 不会压到弧线。
 static const CGFloat kSLPanelTopPad = 0.0;
 
+// v0.4.89：胶囊 / 球的轮廓路径。高度就是直径，圆角恒为高的一半 ——
+// 球是 48×48（圆角 24 正好是正圆），胶囊是 196×48（圆角 24 就是胶囊），
+// 同一条公式覆盖两种形态，形变动画才能在两者之间插值。
+static CGPathRef SLCapsulePath(CGRect r, CGFloat h) {
+    return CGPathCreateWithRoundedRect(r, h / 2.0, h / 2.0, NULL);
+}
+
 // v0.4.43：1×1 全透明图。
 // 老写法 setBackgroundImage:[UIImage new] 传的是 0×0 的空图，UIKit 会**当没设**，
 // 于是回落到系统默认的导航栏背景图 —— 那张图是「顶部纯白 → 向下渐隐 + 底部 0.5pt 线」，
@@ -304,6 +311,10 @@ static UIImage *SLTransparentImage(void) {
 - (void)sl_ttsBtnTapped;
 - (void)sl_ttsCancelTapped;
 - (void)sl_ttsRetryTapped;
+// v0.4.89：合成态内容的进出（统一管理 hidden / alpha / transform）
+- (void)sl_ttsFadeInContentAfter:(NSTimeInterval)delay;
+- (void)sl_ttsHideContent;
+- (void)sl_ttsHideContentDelayed;
 @end
 
 // v0.4.36：胶囊下方展开的语音包列表（点胶囊右端才出现）。
@@ -1255,16 +1266,80 @@ static UIImage *SLTransparentImage(void) {
         }
     }
 
-    // 直接换尺寸，不做插值：形变过程中玻璃层会被系统重新采样，反而留残影。
-    // 手感靠文字淡入补回来。
-    self.frame = nf;
-    [self setNeedsLayout];
-    [self layoutIfNeeded];
+    // v0.4.89：形变改成真动画（展开 0.26s / 收起 0.18s）。
+    // 当年那句「不做插值，否则玻璃重新采样留残影」针对的是旧结构 —— 那时 _chrome 跟着胶囊
+    // 一起改宽，UIVisualEffectView 被拉宽要重新模糊，才会在右端留一块白圆。
+    // 现在 _chrome 恒定 SLPillMaxW、可见形状全靠 _glassMask 的 path 裁，改形状时 blur 层
+    // 尺寸一动不动，根本不存在重采样。所以 frame / 遮罩 path / 描边 path / 状态色四样一起动就行。
+    CGFloat hh = SLBallSide;
+    CGFloat dur = expanded ? 0.26 : 0.18;
+    CGRect tb = CGRectMake(0, 0, nf.size.width, nf.size.height);
+    // path 的坐标是各自 layer 的局部坐标，而胶囊是「球那一端不动、另一端长出去」——
+    // 镜像展开时新 layer 原点比旧的小 148pt，直接拿旧 path 当起点会画到左边去。
+    // 补一个两端 origin 之差，起点就落在球真正待着的那个位置。
+    CGFloat dx = CGRectGetMinX(f) - CGRectGetMinX(nf);
+    CGAffineTransform shift = CGAffineTransformMakeTranslation(dx, 0);
+
+    CGPathRef oldMask = CGPathRetain(_glassMask.path);
+    CGPathRef oldHair = CGPathRetain(_hairline.path);
+    CGPathRef maskFrom = oldMask ? CGPathCreateCopyByTransformingPath(oldMask, &shift) : NULL;
+    CGPathRef hairFrom = oldHair ? CGPathCreateCopyByTransformingPath(oldHair, &shift) : NULL;
+    CGPathRef maskTo = SLCapsulePath(tb, hh);
+    CGPathRef hairTo = SLCapsulePath(CGRectInset(tb, 0.4, 0.4), hh - 0.8);
+
+    // model 值先落到终态，动画只负责「看起来怎么过来」。layoutSubviews 随后会写入同一个
+    // path，值相同不会打断正在跑的动画。
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _glassMask.path = maskTo;
+    _hairline.path = hairTo;
+    [CATransaction commit];
+
+    if (animated) {
+        CAMediaTimingFunction *ease = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        if (maskFrom) {
+            CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"path"];
+            a.fromValue = (__bridge id)maskFrom;
+            a.toValue = (__bridge id)maskTo;
+            a.duration = dur;
+            a.timingFunction = ease;
+            [_glassMask addAnimation:a forKey:@"slShape"];
+        }
+        if (hairFrom) {
+            CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"path"];
+            a.fromValue = (__bridge id)hairFrom;
+            a.toValue = (__bridge id)hairTo;
+            a.duration = dur;
+            a.timingFunction = ease;
+            [_hairline addAnimation:a forKey:@"slShape"];
+        }
+        // 玻璃容器不再需要在这里改宽 —— layoutSubviews 把它固定成最大宽，
+        // 形状全交给遮罩，两种方向的形变都只是 mask 在插值。
+        [UIView animateWithDuration:dur delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
+                         animations:^{
+            self.frame = nf;
+            // 状态色和描边不经过玻璃遮罩，必须自己跟一遍，否则颜色比玻璃先到
+            self->_tint.frame = tb;
+            self->_tint.layer.cornerRadius = hh / 2.0;
+            self->_hairline.frame = tb;
+        } completion:nil];
+        // 子控件位置由 layoutSubviews 按终态排；这里只标脏，不抢先 layout
+        [self setNeedsLayout];
+    } else {
+        self.frame = nf;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    }
+    if (maskFrom) CGPathRelease(maskFrom);
+    if (hairFrom) CGPathRelease(hairFrom);
+    CGPathRelease(maskTo);
+    CGPathRelease(hairTo);
 
     if (animated) {
         _name.alpha = 0.0;
         _chev.alpha = 0.0;
-        [UIView animateWithDuration:0.15 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        [UIView animateWithDuration:dur delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
             self->_name.alpha = 1.0;
             self->_chev.alpha = 1.0;
         } completion:nil];
@@ -1361,13 +1436,8 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     [_ttsCancel setTitle:@"取消" forState:UIControlStateNormal];
 
     // v0.4.85：没铺开之前这些控件一律藏着 —— 球只有 48pt，塞两行字会溢到球外面。
-    // 到 sl_ttsReveal / 失败态才一起放出来。
-    _ttsTitle.hidden = YES;
-    _ttsSub.hidden = YES;
-    _ttsTrack.hidden = YES;
-    _ttsCancel.hidden = YES;
-    _ttsStroke.hidden = YES;
-    _ttsTapArea.hidden = YES;
+    // 到 sl_ttsReveal / 失败态才一起放出来。v0.4.89 起顺带复位 alpha / transform。
+    [self sl_ttsHideContent];
 
     [_ttsTimer invalidate];
     // 0.1s 一档足够了：进度条 84pt 宽，30s 上限下 0.1s 只走 0.28pt，肉眼看是连续的。
@@ -1382,13 +1452,19 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     // 例外：从失败态点「重试」时胶囊本来就开着，不能等 3 秒，也不能缩一次再长回来。
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsReveal) object:nil];
     if (stayOpen) {
+        // 重试：胶囊本来开着，没有形变要等，直接让内容淡回来
         _ttsTitle.hidden = NO;
         _ttsSub.hidden = NO;
         _ttsTrack.hidden = NO;
         _ttsCancel.hidden = NO;
         _ttsStroke.hidden = YES;
+        _ttsTitle.alpha = 0.0;
+        _ttsSub.alpha = 0.0;
+        _ttsTrack.alpha = 0.0;
+        _ttsCancel.alpha = 0.0;
         [self sl_resizePillForName];
         [self setNeedsLayout];
+        [self sl_ttsFadeInContentAfter:0.0];
     } else {
         [self performSelector:@selector(sl_ttsReveal) withObject:nil afterDelay:kSLTTSRevealDelay];
     }
@@ -1406,19 +1482,56 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsReveal) object:nil];
     if (_ttsPhase == 0 || _ttsShown) return;
     _ttsShown = YES;
+    _ttsStroke.hidden = YES;
+    _ttsTapArea.hidden = YES;
 
+    // v0.4.89：内容先摆好位置但透明 —— 等胶囊长到一半再浮出来。
+    // 原来这里是 hidden = NO + 立刻 sl_expand，四个控件「啪」地出现在刚长出来的胶囊上，
+    // 跟玻璃的形变一点关系都没有，看着就是硬贴上去的。
+    // 只用 alpha 淡入、不做位移：这几个控件在 sl_ttsLayout 里是按 frame 排的，
+    // 带非单位 transform 再设 frame 属于未定义行为（会跳位）。
+    BOOL alreadyOpen = self.slExpanded;
     _ttsTitle.hidden = NO;
     _ttsSub.hidden = NO;
     _ttsTrack.hidden = NO;
     _ttsCancel.hidden = NO;
-    _ttsStroke.hidden = YES;
-    _ttsTapArea.hidden = YES;
+    _ttsTitle.alpha = 0.0;
+    _ttsSub.alpha = 0.0;
+    _ttsTrack.alpha = 0.0;
+    _ttsCancel.alpha = 0.0;
 
     // 已经展开着（用户自己点开过）就不能再走 sl_expand: —— 那个方法见 slExpanded==YES 直接 return，
     // 宽度会停在 146，两行字和取消键全挤成一条。这里按名字那套 resize 逻辑重排一次。
-    if (self.slExpanded) [self sl_resizePillForName];
+    if (alreadyOpen) [self sl_resizePillForName];
     else [self sl_expand:YES animated:YES];
     [self setNeedsLayout];
+
+    // 0.26s 的形变里，前 0.12s 只长玻璃，剩下的时间字才浮上来 —— 两件事错开才有「先张开、
+    // 内容再落进来」的次序。已经展开的情况没有形变可等，直接淡入。
+    [self sl_ttsFadeInContentAfter:(alreadyOpen ? 0.0 : 0.12)];
+}
+
+/// v0.4.89：合成态四个控件一起淡入（0.14s）。
+- (void)sl_ttsFadeInContentAfter:(NSTimeInterval)delay {
+    for (UIView *v in @[_ttsTitle, _ttsSub, _ttsTrack, _ttsCancel]) {
+        [UIView animateWithDuration:0.14 delay:delay
+                            options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{
+            v.alpha = 1.0;
+        } completion:nil];
+    }
+}
+
+/// v0.4.89：统一收掉合成态内容。alpha 一并复位 —— 只 hidden 不复位的话，
+/// 下次展开会带着上一次淡入被打断时留下的半透明值出来。
+- (void)sl_ttsHideContent {
+    for (UIView *v in @[_ttsTitle, _ttsSub, _ttsTrack, _ttsCancel]) {
+        [v.layer removeAllAnimations];
+        v.hidden = YES;
+        v.alpha = 1.0;
+    }
+    _ttsStroke.hidden = YES;
+    _ttsTapArea.hidden = YES;
 }
 
 - (void)sl_ttsTick {
@@ -1457,6 +1570,9 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
         _ttsSub.textColor = [UIColor secondaryLabelColor];
         _ttsSub.text = detail;   // 没原因就不显示，别再填「已放回输入框」这种废话
         _ttsFill.backgroundColor = [UIColor systemRedColor];
+        // v0.4.89：先复位 alpha / transform（可能正卡在淡入中途），再按失败态摆出来 ——
+        // 否则红字会以半透明或带 3pt 位移的样子停在那里。
+        [self sl_ttsHideContent];
         _ttsTitle.hidden = NO;
         _ttsSub.hidden = (detail.length == 0);
         _ttsTrack.hidden = NO;
@@ -1484,14 +1600,24 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     _ttsShown = NO;   // v0.4.85：下次合成重新从「只有球」开始
     _ttsCancelBlock = nil;
     _ttsRetryBlock = nil;
-    _ttsTitle.hidden = YES;
-    _ttsSub.hidden = YES;
-    _ttsTrack.hidden = YES;
-    _ttsCancel.hidden = YES;
-    _ttsStroke.hidden = YES;
-    _ttsTapArea.hidden = YES;
+    // v0.4.89：先让内容跟着一起收（0.08s 淡出），再走 0.18s 的收缩形变。
+    // 原来内容是一帧消失、胶囊一帧缩回，两件事同时硬切。现在至少有个「收」的过程。
+    for (UIView *v in @[_ttsTitle, _ttsSub, _ttsTrack, _ttsCancel]) {
+        if (v.hidden) continue;
+        [UIView animateWithDuration:0.08 delay:0
+                            options:UIViewAnimationOptionCurveEaseIn | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{ v.alpha = 0.0; }
+                         completion:nil];
+    }
+    [self sl_ttsHideContentDelayed];
     [self sl_expand:NO animated:YES];
     [self setNeedsLayout];
+}
+
+/// v0.4.89：给淡出留出 0.08s，再把控件真正藏起来（否则 hidden 会立刻掐掉正在跑的淡出）。
+- (void)sl_ttsHideContentDelayed {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsHideContent) object:nil];
+    [self performSelector:@selector(sl_ttsHideContent) withObject:nil afterDelay:0.09];
 }
 
 /// v0.4.88：右侧那个按钮在两个相位下含义不同 —— 合成中取消，失败重试。
@@ -1520,12 +1646,9 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     // 万一在 rb() 之前插进一次 layout，胶囊就缩成 146 再长回 196 —— 又是一次闪。
     // 保持相位 2（宽度 196 不变），紧接着 sl_ttsBegin 会把它推到 1。
     _ttsCancelBlock = nil;
-    _ttsTitle.hidden = YES;
-    _ttsSub.hidden = YES;
-    _ttsTrack.hidden = YES;
-    _ttsCancel.hidden = YES;
-    _ttsStroke.hidden = YES;
-    _ttsTapArea.hidden = YES;
+    // 重试前先把上一轮的内容收干净（alpha / transform 一并复位），紧接着 rb() 会用
+    // sl_ttsBegin 从「已铺开」的状态重新淡回来
+    [self sl_ttsHideContent];
     if (rb) rb();
 }
 
@@ -1729,18 +1852,32 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     CGFloat h = SLBallSide;
     BOOL exp = self.slExpanded;
 
-    _glassHost.frame = b;
+    // v0.4.89：玻璃容器固定成最大宽，不再跟着 bounds 走。
+    // 收起动画时 bounds 已经是 48，若容器也缩成 48，遮罩里那条还在收缩的胶囊会被裁在
+    // 48 宽内 —— 等于「一帧变球」，动画白做。容器给足宽度，形状完全由遮罩决定，
+    // 溢出的部分被遮罩裁掉，看不见。userInteractionEnabled 是 NO，不影响触摸。
+    _glassHost.frame = CGRectMake(0, 0, MAX(SLPillMaxW, w), h);
     _glassHost.layer.cornerRadius = h / 2.0;
     // v0.4.76：去掉 cornerCurve = continuous。描边曾经走连续曲率、遮罩走正圆，
     // 两条曲线在圆头两端差 0.3~0.5pt，正是「白线只剩中间一段」的另一半原因。
-    _glassMask.path = [UIBezierPath bezierPathWithRoundedRect:b cornerRadius:h / 2.0].CGPath;
+    // v0.4.89：遮罩路径统一走 SLCapsulePath —— 形变动画是在两条 path 之间
+    // 插值，起点和终点必须由同一个函数生成（UIBezierPath 与 CGPathCreateWithRoundedRect
+    // 的元素序列不保证一致，序列不一致时 CoreAnimation 会直接跳到终点，动画等于没有）。
+    CGPathRef maskPath = SLCapsulePath(b, h);
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _glassMask.path = maskPath;
+    [CATransaction commit];
+    CGPathRelease(maskPath);
     // 玻璃始终是最大尺寸，只靠 mask 露出当前形状，右对齐
     // v0.4.40：镜像开关。MX(x, wd) 把「距左 x」翻成「距右 x」，宽度不变的居中元素不要用它。
     BOOL mir = exp ? _mirrored : NO;
 #define SLMX(x, wd) (mir ? (w - (x) - (wd)) : (x))
     // v0.4.84：SLPillMaxW 已经 ≥ 所有胶囊宽度，这里两个方向都必然覆盖整条
     //（非镜像 w-218 ≤ 0，镜像 0 起），不用再按镜像右对齐。
-    _chrome.frame = CGRectMake(mir ? 0 : (w - SLPillMaxW), 0, SLPillMaxW, h);
+    // v0.4.89：干脆钉死在 [0, SLPillMaxW]，别再按 w 算 —— 形变动画期间 w 已经是终态，
+    // 按 w 算会让模糊层在收起时先缩到左边 48，右端那条还没收完的胶囊就没有玻璃了。
+    _chrome.frame = CGRectMake(0, 0, SLPillMaxW, h);
 
     // v0.4.39：左图标与球态同尺寸（22pt，不再缩水到 18），头像 32 → 42
     _glyph.frame = exp ? CGRectMake(SLMX(13.0, 22.0), (h - 22.0) / 2.0, 22.0, 22.0)
@@ -1763,8 +1900,10 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     // 现在一律画整圈圆角矩形；_hairline 排在 _thumb 之下，左端那半圈被照片吃掉，
     // 只露出照片外面 0.4pt 那一环 —— 既不会白线压脸，也不会有断头。
     _hairline.frame = b;
-    _hairline.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, 0.4, 0.4)
-                                                cornerRadius:MAX(0.0, h / 2.0 - 0.4)].CGPath;
+    // v0.4.89：同 _glassMask，描边 path 也走统一生成函数，才能和形变动画的起点插值
+    CGPathRef hairPath = SLCapsulePath(CGRectInset(b, 0.4, 0.4), h - 0.8);
+    _hairline.path = hairPath;
+    CGPathRelease(hairPath);
     [CATransaction commit];
     // v0.4.75：色晕跟玻璃同尺寸铺满（球态被 _glassMask 裁成圆）。
     // v0.4.78：色晕必须铺满整块玻璃（196），不能只铺「可见的那 146」。
