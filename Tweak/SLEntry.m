@@ -315,6 +315,8 @@ static UIImage *SLTransparentImage(void) {
 - (void)sl_ttsFadeInContentAfter:(NSTimeInterval)delay;
 - (void)sl_ttsHideContent;
 - (void)sl_ttsHideContentDelayed;
+// v0.4.90：内容淡完之后的收缩（单独拆出来好延时）
+- (void)sl_ttsCollapseShape;
 @end
 
 // v0.4.36：胶囊下方展开的语音包列表（点胶囊右端才出现）。
@@ -550,6 +552,14 @@ static UIImage *SLTransparentImage(void) {
     BOOL _ttsShown;
     void (^_ttsCancelBlock)(void);
     void (^_ttsRetryBlock)(void);
+    // v0.4.90：形变动画锁。动画期间：
+    //   1) layoutSubviews 不许写 _glassMask / _hairline / _tint / halo 的路径与尺寸 ——
+    //      一旦按 bounds 重写，model 值就跳回「终态」或「旧态」，动画当场被掐断；
+    //   2) 内容一律按展开态排 —— 收起时 frame 还没落（宽度仍是 196），若按球态排，
+    //      自定义头像会被瞬间拉成 196 宽的长条。
+    BOOL _shapeLock;
+    // 世代号：快速连点展开/收起时，只让最后一次的 completion 生效。
+    NSUInteger _shapeGen;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1215,6 +1225,7 @@ static UIImage *SLTransparentImage(void) {
     CGSize sz = [self sl_pillSize];
     CGRect f = self.frame;
     if (fabs(sz.width - CGRectGetWidth(f)) < 0.5) return;
+    CGSize oldSize = f.size;
     if (_mirrored) f.origin.x = CGRectGetMaxX(f) - sz.width;
     f.size = sz;
     if (self.superview) {
@@ -1222,10 +1233,77 @@ static UIImage *SLTransparentImage(void) {
         if (CGRectGetMaxX(f) > maxX) f.origin.x = maxX - sz.width;
         if (f.origin.x < minX) f.origin.x = minX;
     }
-    [UIView animateWithDuration:0.22 delay:0
+
+    // v0.4.90：宽度变化也走「frame 一帧落终态、形状只由遮罩推」——
+    // 原来 frame 用 0.22s 补间、遮罩却被 layout 一帧写成终态，玻璃会比胶囊先探出右端一截。
+    // 图标端固定（镜像时贴右、非镜像贴左），所以旧矩形在新坐标里只要对齐那一端。
+    CGFloat hh = SLBallSide;
+    CGFloat dur = 0.22;
+    CGFloat oldW = oldSize.width, newW = sz.width;
+    CGRect fromRect = _mirrored ? CGRectMake(newW - oldW, 0, oldW, hh) : CGRectMake(0, 0, oldW, hh);
+    CGRect toRect = CGRectMake(0, 0, newW, hh);
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    self.frame = f;
+    [CATransaction commit];
+
+    _shapeLock = YES;
+    NSUInteger gen = ++_shapeGen;
+
+    CGPathRef maskFrom = SLCapsulePath(fromRect, hh);
+    CGPathRef maskTo   = SLCapsulePath(toRect, hh);
+    CGPathRef hairFrom = SLCapsulePath(CGRectInset(fromRect, 0.4, 0.4), hh - 0.8);
+    CGPathRef hairTo   = SLCapsulePath(CGRectInset(toRect, 0.4, 0.4), hh - 0.8);
+    CGPathRef haloInFrom  = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(fromRect, -2.5, -2.5)
+                                                       cornerRadius:(hh + 5.0) / 2.0].CGPath;
+    CGPathRef haloInTo    = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(toRect, -2.5, -2.5)
+                                                       cornerRadius:(hh + 5.0) / 2.0].CGPath;
+    CGPathRef haloOutFrom = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(fromRect, -7.0, -7.0)
+                                                       cornerRadius:(hh + 14.0) / 2.0].CGPath;
+    CGPathRef haloOutTo   = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(toRect, -7.0, -7.0)
+                                                       cornerRadius:(hh + 14.0) / 2.0].CGPath;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _glassMask.path = maskTo;
+    _hairline.path = hairTo;
+    _haloIn.path = haloInTo;
+    _haloOut.path = haloOutTo;
+    [CATransaction commit];
+
+    CAMediaTimingFunction *ease = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    NSArray *layers = @[_glassMask, _hairline, _haloIn, _haloOut];
+    NSArray *froms = @[(__bridge id)maskFrom, (__bridge id)hairFrom,
+                       (__bridge id)haloInFrom, (__bridge id)haloOutFrom];
+    NSArray *tos = @[(__bridge id)maskTo, (__bridge id)hairTo,
+                     (__bridge id)haloInTo, (__bridge id)haloOutTo];
+    for (NSUInteger i = 0; i < layers.count; i++) {
+        CAShapeLayer *layer = layers[i];
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"path"];
+        a.fromValue = froms[i];
+        a.toValue = tos[i];
+        a.duration = dur;
+        a.timingFunction = ease;
+        [layer removeAnimationForKey:@"slShape"];
+        [layer addAnimation:a forKey:@"slShape"];
+    }
+    [UIView animateWithDuration:dur delay:0
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
-                     animations:^{ self.frame = f; }
-                     completion:nil];
+                     animations:^{
+        self->_tint.frame = toRect;
+        self->_tint.layer.cornerRadius = hh / 2.0;
+    } completion:^(BOOL finished) {
+        if (self->_shapeGen != gen) return;
+        self->_shapeLock = NO;
+        [self setNeedsLayout];
+        [self layoutIfNeeded];
+    }];
+    CGPathRelease(maskFrom);
+    CGPathRelease(maskTo);
+    CGPathRelease(hairFrom);
+    CGPathRelease(hairTo);
+    [self setNeedsLayout];
 }
 
 - (void)sl_expand:(BOOL)expanded animated:(BOOL)animated {
@@ -1256,7 +1334,9 @@ static UIImage *SLTransparentImage(void) {
         // 向左长（镜像）的胶囊图标在右端，直接缩 origin.x 会让球无视觉地跳到左边去。
         [SLPackMenu sl_dismissCurrent];   // 球都收了，旁边还挂着列表很怪
         if (wasMirrored) nf.origin.x = CGRectGetMaxX(f) - SLBallSide;
-        _mirrored = NO;
+        // v0.4.90：这里**不**立刻把 _mirrored 归零 —— 收起动画期间 frame 还是展开态、
+        // 内容仍按镜像排（图标在右端）。提前归零会让自定义头像瞬移到左边，
+        // 而玻璃这时候才收到一半。归零挪到动画结束、frame 落下去的那一刻。
         if (self.superview) {
             CGPoint c = SLClampFloatPos(CGPointMake(CGRectGetMidX(nf), CGRectGetMidY(nf)),
                                         self.superview.bounds.size);
@@ -1266,80 +1346,136 @@ static UIImage *SLTransparentImage(void) {
         }
     }
 
-    // v0.4.89：形变改成真动画（展开 0.26s / 收起 0.18s）。
-    // 当年那句「不做插值，否则玻璃重新采样留残影」针对的是旧结构 —— 那时 _chrome 跟着胶囊
-    // 一起改宽，UIVisualEffectView 被拉宽要重新模糊，才会在右端留一块白圆。
-    // 现在 _chrome 恒定 SLPillMaxW、可见形状全靠 _glassMask 的 path 裁，改形状时 blur 层
-    // 尺寸一动不动，根本不存在重采样。所以 frame / 遮罩 path / 描边 path / 状态色四样一起动就行。
+    // ===== v0.4.90：一次形变只让**一套坐标**推动 =====
+    // v0.4.89 让 frame 和遮罩 path 一起动，结果两者各推了一遍：
+    //   展开 —— frame.origin.x 从 338 走到 190、宽度 48 加到 196，同时 mask 又从「球」往左长。
+    //          中段就是「玻璃已经铺满、整条还停在右边」：右端局部 196 映射到屏幕 460，直接顶出
+    //          屏幕被裁平（录屏 2.15s / 2.23s 那两帧），里层状态色还只长到一半，成了两层胶囊。
+    //   收起 —— frame 在往 338 走，遮罩却从「旧 path 平移 -196」得到 -196..0 的负坐标，
+    //          被 _glassHost 左边界整段裁掉，于是「一帧变球」；tint 终点写的是局部 0（左端），
+    //          绿球先落在胶囊左段、再横滑 148pt 回右端，外面还挂着没消失的「取消 / 合成中」。
+    //
+    // 现在分工锁死：
+    //   展开 —— frame 一帧落终态（内容全就位，图标端本来就不动），只有 mask / 描边 / 状态色
+    //          从「球矩形」插值到「整条矩形」。局部坐标固定，右端永远钉在球原位，不可能出屏。
+    //   收起 —— frame 完全不动（坐标系不变，路径全正），mask / 状态色从整条收到球端；
+    //          0.18s 后才把 frame 落到球上 —— 那一刻的屏幕坐标与动画末帧完全相同，看不出切换。
+    //（当年「不做插值否则玻璃重采样留残影」那句针对的是 _chrome 跟着改宽的旧结构；
+    //  现在 blur 层恒定 SLPillMaxW、形状全靠 mask，不存在重采样。）
     CGFloat hh = SLBallSide;
     CGFloat dur = expanded ? 0.26 : 0.18;
-    CGRect tb = CGRectMake(0, 0, nf.size.width, nf.size.height);
-    // path 的坐标是各自 layer 的局部坐标，而胶囊是「球那一端不动、另一端长出去」——
-    // 镜像展开时新 layer 原点比旧的小 148pt，直接拿旧 path 当起点会画到左边去。
-    // 补一个两端 origin 之差，起点就落在球真正待着的那个位置。
-    CGFloat dx = CGRectGetMinX(f) - CGRectGetMinX(nf);
-    CGAffineTransform shift = CGAffineTransformMakeTranslation(dx, 0);
 
-    CGPathRef oldMask = CGPathRetain(_glassMask.path);
-    CGPathRef oldHair = CGPathRetain(_hairline.path);
-    CGPathRef maskFrom = oldMask ? CGPathCreateCopyByTransformingPath(oldMask, &shift) : NULL;
-    CGPathRef hairFrom = oldHair ? CGPathCreateCopyByTransformingPath(oldHair, &shift) : NULL;
-    CGPathRef maskTo = SLCapsulePath(tb, hh);
-    CGPathRef hairTo = SLCapsulePath(CGRectInset(tb, 0.4, 0.4), hh - 0.8);
+    _shapeLock = animated;
+    NSUInteger gen = ++_shapeGen;
 
-    // model 值先落到终态，动画只负责「看起来怎么过来」。layoutSubviews 随后会写入同一个
-    // path，值相同不会打断正在跑的动画。
+    // 动画期间的坐标基准：展开用终态 frame，收起用当前（旧）frame。
+    CGFloat baseX = expanded ? CGRectGetMinX(nf) : CGRectGetMinX(f);
+    CGFloat baseW = expanded ? CGRectGetWidth(nf) : CGRectGetWidth(f);
+    // 球在旧坐标系里的屏幕位置：展开前就是球本身；收起时球要落在图标端（镜像在右端）。
+    CGFloat orbScreenX = expanded
+        ? CGRectGetMinX(f)
+        : (wasMirrored ? CGRectGetMaxX(f) - SLBallSide : CGRectGetMinX(f));
+    CGRect orbRect  = CGRectMake(orbScreenX - baseX, 0, SLBallSide, hh);
+    CGRect fullRect = CGRectMake(0, 0, baseW, hh);
+    CGRect fromRect = expanded ? orbRect : fullRect;
+    CGRect toRect   = expanded ? fullRect : orbRect;
+
+    // 展开：先把 frame 落到终态（不动动画，避免又推一遍形变）
+    if (expanded) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        self.frame = nf;
+        [CATransaction commit];
+    }
+
+    CGPathRef maskFrom = SLCapsulePath(fromRect, hh);
+    CGPathRef maskTo   = SLCapsulePath(toRect, hh);
+    CGPathRef hairFrom = SLCapsulePath(CGRectInset(fromRect, 0.4, 0.4), hh - 0.8);
+    CGPathRef hairTo   = SLCapsulePath(CGRectInset(toRect, 0.4, 0.4), hh - 0.8);
+    CGPathRef haloInFrom  = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(fromRect, -2.5, -2.5)
+                                                      cornerRadius:(hh + 5.0) / 2.0].CGPath;
+    CGPathRef haloInTo    = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(toRect, -2.5, -2.5)
+                                                      cornerRadius:(hh + 5.0) / 2.0].CGPath;
+    CGPathRef haloOutFrom = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(fromRect, -7.0, -7.0)
+                                                      cornerRadius:(hh + 14.0) / 2.0].CGPath;
+    CGPathRef haloOutTo   = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(toRect, -7.0, -7.0)
+                                                      cornerRadius:(hh + 14.0) / 2.0].CGPath;
+
+    // model 值先落终点。_shapeLock 期间 layoutSubviews 不会重写这几样，动画不会被写回打断。
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _glassMask.path = maskTo;
     _hairline.path = hairTo;
+    _haloIn.path = haloInTo;
+    _haloOut.path = haloOutTo;
     [CATransaction commit];
+
+    [_glassMask removeAnimationForKey:@"slShape"];
+    [_hairline removeAnimationForKey:@"slShape"];
 
     if (animated) {
         CAMediaTimingFunction *ease = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-        if (maskFrom) {
-            CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"path"];
-            a.fromValue = (__bridge id)maskFrom;
-            a.toValue = (__bridge id)maskTo;
-            a.duration = dur;
-            a.timingFunction = ease;
-            [_glassMask addAnimation:a forKey:@"slShape"];
-        }
-        if (hairFrom) {
-            CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"path"];
-            a.fromValue = (__bridge id)hairFrom;
-            a.toValue = (__bridge id)hairTo;
-            a.duration = dur;
-            a.timingFunction = ease;
-            [_hairline addAnimation:a forKey:@"slShape"];
-        }
-        // 玻璃容器不再需要在这里改宽 —— layoutSubviews 把它固定成最大宽，
-        // 形状全交给遮罩，两种方向的形变都只是 mask 在插值。
+        CABasicAnimation *ma = [CABasicAnimation animationWithKeyPath:@"path"];
+        ma.fromValue = (__bridge id)maskFrom;
+        ma.toValue = (__bridge id)maskTo;
+        ma.duration = dur;
+        ma.timingFunction = ease;
+        [_glassMask addAnimation:ma forKey:@"slShape"];
+
+        CABasicAnimation *ha = [CABasicAnimation animationWithKeyPath:@"path"];
+        ha.fromValue = (__bridge id)hairFrom;
+        ha.toValue = (__bridge id)hairTo;
+        ha.duration = dur;
+        ha.timingFunction = ease;
+        [_hairline addAnimation:ha forKey:@"slShape"];
+
+        // 光环不在 _glassHost 里、遮罩裁不到，不跟一遍就会「球还在、外圈已经拉成胶囊」。
+        // 注意：这两条动画必须在 sl_startBreath 之后才挂 —— 它开头会 removeAllAnimations，
+        // 提前挂的 path 动画会被一起清掉，光环直接跳到胶囊形状（所以见函数末尾）。
+
+        // 状态色也不在 _glassHost 里，必须跟玻璃走同一条边 —— 否则颜色比玻璃早到 / 晚走，
+        // 就是那两层套在一起的胶囊。
         [UIView animateWithDuration:dur delay:0
                             options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
                          animations:^{
-            self.frame = nf;
-            // 状态色和描边不经过玻璃遮罩，必须自己跟一遍，否则颜色比玻璃先到
-            self->_tint.frame = tb;
+            self->_tint.frame = toRect;
             self->_tint.layer.cornerRadius = hh / 2.0;
-            self->_hairline.frame = tb;
-        } completion:nil];
-        // 子控件位置由 layoutSubviews 按终态排；这里只标脏，不抢先 layout
+        } completion:^(BOOL finished) {
+            if (self->_shapeGen != gen) return;   // 期间又被切换过，交给后来者收尾
+            self->_shapeLock = NO;
+            if (!expanded) {
+                // 到位后再落 frame：屏幕坐标与动画末帧一致，看不见切换
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                _mirrored = NO;
+                self.frame = nf;
+                [CATransaction commit];
+            }
+            [self setNeedsLayout];
+            [self layoutIfNeeded];
+        }];
         [self setNeedsLayout];
     } else {
+        if (!expanded) _mirrored = NO;
         self.frame = nf;
+        _tint.frame = toRect;
+        _tint.layer.cornerRadius = hh / 2.0;
+        _shapeLock = NO;
         [self setNeedsLayout];
         [self layoutIfNeeded];
     }
-    if (maskFrom) CGPathRelease(maskFrom);
-    if (hairFrom) CGPathRelease(hairFrom);
+    CGPathRelease(maskFrom);
     CGPathRelease(maskTo);
+    CGPathRelease(hairFrom);
     CGPathRelease(hairTo);
+    // 上面四个 halo path 来自 [UIBezierPath CGPath]（非持有），不能 release。
 
     if (animated) {
         _name.alpha = 0.0;
         _chev.alpha = 0.0;
-        [UIView animateWithDuration:dur delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
+        [UIView animateWithDuration:dur * 0.75 delay:dur * 0.35
+                            options:UIViewAnimationOptionCurveEaseOut
+                         animations:^{
             self->_name.alpha = 1.0;
             self->_chev.alpha = 1.0;
         } completion:nil];
@@ -1348,6 +1484,21 @@ static UIImage *SLTransparentImage(void) {
         _chev.alpha = 1.0;
     }
     [self sl_startBreath:self.slState];
+
+    // v0.4.90：光环的形变动画必须挂在这里 —— sl_startBreath 开头会 removeAllAnimations，
+    // 提前挂的话会被一起清掉，光环直接跳到胶囊形状（「球还在、外圈已经拉长」）。
+    if (animated) {
+        CAMediaTimingFunction *easeHalo = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        for (int i = 0; i < 2; i++) {
+            CAShapeLayer *layer = (i == 0) ? _haloIn : _haloOut;
+            CABasicAnimation *hb = [CABasicAnimation animationWithKeyPath:@"path"];
+            hb.fromValue = (__bridge id)(i == 0 ? haloInFrom : haloOutFrom);
+            hb.toValue = (__bridge id)(i == 0 ? haloInTo : haloOutTo);
+            hb.duration = dur;
+            hb.timingFunction = easeHalo;
+            [layer addAnimation:hb forKey:@"slShape"];
+        }
+    }
 }
 
 #pragma mark - v0.4.82：合成态（进度 / 取消长在胶囊里）
@@ -1508,13 +1659,15 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
 
     // 0.26s 的形变里，前 0.12s 只长玻璃，剩下的时间字才浮上来 —— 两件事错开才有「先张开、
     // 内容再落进来」的次序。已经展开的情况没有形变可等，直接淡入。
-    [self sl_ttsFadeInContentAfter:(alreadyOpen ? 0.0 : 0.12)];
+    // v0.4.90：形变改成「只由遮罩推」之后，内容更要晚一点才出来 ——
+    // 0.16s 时玻璃已经走过六成长度，字浮上来不会露在玻璃外面。0.12s 淡入到 0.28s 收尾。
+    [self sl_ttsFadeInContentAfter:(alreadyOpen ? 0.0 : 0.16)];
 }
 
 /// v0.4.89：合成态四个控件一起淡入（0.14s）。
 - (void)sl_ttsFadeInContentAfter:(NSTimeInterval)delay {
     for (UIView *v in @[_ttsTitle, _ttsSub, _ttsTrack, _ttsCancel]) {
-        [UIView animateWithDuration:0.14 delay:delay
+        [UIView animateWithDuration:0.12 delay:delay
                             options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
                          animations:^{
             v.alpha = 1.0;
@@ -1610,8 +1763,17 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
                          completion:nil];
     }
     [self sl_ttsHideContentDelayed];
-    [self sl_expand:NO animated:YES];
+    // v0.4.90：先把字淡掉，再收形状。原来两件事同时开始 —— 玻璃已经在往里缩，字还挂在外面，
+    // 录屏 3.85s 那帧「绿球落在左段 + 取消 / 合成中 的残影」就是它。0.10s 淡完再收，总 0.28s。
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsCollapseShape) object:nil];
+    [self performSelector:@selector(sl_ttsCollapseShape) withObject:nil afterDelay:0.10];
     [self setNeedsLayout];
+}
+
+/// v0.4.90：内容淡完之后的收缩（拆出来只是为了能延时调用）。
+- (void)sl_ttsCollapseShape {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsCollapseShape) object:nil];
+    [self sl_expand:NO animated:YES];
 }
 
 /// v0.4.89：给淡出留出 0.08s，再把控件真正藏起来（否则 hidden 会立刻掐掉正在跑的淡出）。
@@ -1850,7 +2012,10 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     CGRect b = self.bounds;
     CGFloat w = CGRectGetWidth(b);
     CGFloat h = SLBallSide;
-    BOOL exp = self.slExpanded;
+    // v0.4.90：形变动画期间内容一律按展开态排。
+    // 收起时 frame 还没落（宽度仍是 196），若按球态排，_thumb 会被瞬间拉成 196 宽的圆角长条、
+    // 名字和箭头也会提前归位 —— 而玻璃这时候才刚开始往里收。锁定成展开态就没有这一下。
+    BOOL exp = self.slExpanded || _shapeLock;
 
     // v0.4.89：玻璃容器固定成最大宽，不再跟着 bounds 走。
     // 收起动画时 bounds 已经是 48，若容器也缩成 48，遮罩里那条还在收缩的胶囊会被裁在
@@ -1863,12 +2028,17 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     // v0.4.89：遮罩路径统一走 SLCapsulePath —— 形变动画是在两条 path 之间
     // 插值，起点和终点必须由同一个函数生成（UIBezierPath 与 CGPathCreateWithRoundedRect
     // 的元素序列不保证一致，序列不一致时 CoreAnimation 会直接跳到终点，动画等于没有）。
-    CGPathRef maskPath = SLCapsulePath(b, h);
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    _glassMask.path = maskPath;
-    [CATransaction commit];
-    CGPathRelease(maskPath);
+    // v0.4.90：形状四样（遮罩 / 描边 / 状态色 / 光环）在形变动画期间一律不碰 ——
+    // 按 bounds 重写会把 model 值改回「终态或旧态」，正在跑的 path 动画当场被掐断。
+    // 动画结束后 completion 会解除锁并立刻重排一次，那时候写进去的就是最终值。
+    if (!_shapeLock) {
+        CGPathRef maskPath = SLCapsulePath(b, h);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        _glassMask.path = maskPath;
+        [CATransaction commit];
+        CGPathRelease(maskPath);
+    }
     // 玻璃始终是最大尺寸，只靠 mask 露出当前形状，右对齐
     // v0.4.40：镜像开关。MX(x, wd) 把「距左 x」翻成「距右 x」，宽度不变的居中元素不要用它。
     BOOL mir = exp ? _mirrored : NO;
@@ -1901,9 +2071,11 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     // 只露出照片外面 0.4pt 那一环 —— 既不会白线压脸，也不会有断头。
     _hairline.frame = b;
     // v0.4.89：同 _glassMask，描边 path 也走统一生成函数，才能和形变动画的起点插值
-    CGPathRef hairPath = SLCapsulePath(CGRectInset(b, 0.4, 0.4), h - 0.8);
-    _hairline.path = hairPath;
-    CGPathRelease(hairPath);
+    if (!_shapeLock) {
+        CGPathRef hairPath = SLCapsulePath(CGRectInset(b, 0.4, 0.4), h - 0.8);
+        _hairline.path = hairPath;
+        CGPathRelease(hairPath);
+    }
     [CATransaction commit];
     // v0.4.75：色晕跟玻璃同尺寸铺满（球态被 _glassMask 裁成圆）。
     // v0.4.78：色晕必须铺满整块玻璃（196），不能只铺「可见的那 146」。
@@ -1914,8 +2086,10 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
 
     // v0.4.37：状态色铺满整条胶囊。原来展开态只盖左侧 48pt 圆，
     // 球是蓝的、胶囊还是白玻璃，中间像被切断。
-    _tint.frame = b;
-    _tint.layer.cornerRadius = h / 2.0;
+    if (!_shapeLock) {
+        _tint.frame = b;
+        _tint.layer.cornerRadius = h / 2.0;
+    }
 
     // v0.4.40：两端各一块 48pt 热区，中间 100pt 给名字（居中）。
     // 镜像时两端互换、中间不动 —— 图标端跟着球走，箭头端永远在远端。
@@ -1947,10 +2121,16 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     _readyDot.frame = CGRectMake(mir ? 5.0 : (w - 14.0), 3.0, 9.0, 9.0);
 #undef SLMX
 
-    _nameClip.hidden = !exp;
-    _midBtn.hidden = !exp;
-    _menuBtn.hidden = !exp;
-    _homeBtn.hidden = !exp;
+    // v0.4.90：显隐用**真实**展开态，不用上面那个被 _shapeLock 抬起来的 exp ——
+    // 收起动画期间 exp 还是 YES（为了别让内容跳位），但名字和箭头这时候必须已经消失，
+    // 否则会挂在正在收缩的玻璃外面。
+    // _ttsShown 也要算进去：合成结束到真正开始收缩之间有 0.10s 的空档，
+    // 那段时间 _ttsPhase 已经是 0、名字会趁虚冒出来。
+    BOOL showChrome = self.slExpanded && !_ttsShown;
+    _nameClip.hidden = !showChrome;
+    _midBtn.hidden = !showChrome;
+    _menuBtn.hidden = !showChrome;
+    _homeBtn.hidden = !showChrome;
     // v0.4.82：合成态把「名字 + 箭头 + 两端热区」整套让出来，胶囊里只留进度和取消。
     // 这里必须放在上面四行之后 —— 否则那四行会把 hidden 改回去，合成态里同时冒出名字和取消键。
     if (exp && _ttsPhase != 0) {
@@ -1962,10 +2142,13 @@ static const NSTimeInterval kSLTTSRevealDelay = 3.0;
     }
 
     // 光晕路径：胶囊就是「圆角 = 高一半」的矩形，球是它的特例
-    _haloIn.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -2.5, -2.5)
-                                              cornerRadius:(h + 5.0) / 2.0].CGPath;
-    _haloOut.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -7.0, -7.0)
-                                               cornerRadius:(h + 14.0) / 2.0].CGPath;
+    // v0.4.90：形变期间交给动画，这里不能重写（否则外圈会在第一帧就跳成胶囊）
+    if (!_shapeLock) {
+        _haloIn.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -2.5, -2.5)
+                                                  cornerRadius:(h + 5.0) / 2.0].CGPath;
+        _haloOut.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -7.0, -7.0)
+                                                   cornerRadius:(h + 14.0) / 2.0].CGPath;
+    }
 }
 
 @end
