@@ -272,6 +272,21 @@ static UIImage *SLTransparentImage(void) {
     return img;
 }
 
+// v0.4.93：只做裁剪、自己不吃触摸的容器。
+// _ttsClip 铺满整颗球（48×48），按普通 UIView 参与 hitTest 时，点击会落在它身上 ——
+// 事件再也到不了 SLFloatButton 这个 UIControl，touchUpInside 不触发，球就点不开了
+// （v0.4.92 加裁剪容器时踩的）。这里把「命中的是我自己」翻译成 nil（穿透），
+// 只有真正落在子视图（取消 / 重试键）上才放行。
+@interface SLClipPassthroughView : UIView
+@end
+
+@implementation SLClipPassthroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *v = [super hitTest:point withEvent:event];
+    return (v == self) ? nil : v;
+}
+@end
+
 @interface SLFloatButton : UIButton
 @property (nonatomic, assign) BOOL slExpanded;
 @property (nonatomic, assign) SLFloatState slState;
@@ -734,7 +749,9 @@ static UIImage *SLTransparentImage(void) {
         // ---- v0.4.82：合成态内容（默认全隐藏，只在 #tts 合成期间铺进胶囊）----
         // v0.4.92：整组套进一个裁剪容器，遮罩 = 玻璃当前形状（见 layoutSubviews / sl_expand:）。
         // 这样「内容在玻璃外面」这件事从结构上就不可能发生，不用再靠「等 0.16s 再淡入」去赌时序。
-        _ttsClip = [[UIView alloc] initWithFrame:CGRectZero];
+        // v0.4.93：容器本身必须穿透触摸（见 SLClipPassthroughView），否则球态铺满 48pt 的它
+        // 会把单击整个吞掉，SLFloatButton 的 touchUpInside 收不到 —— 球点不开。
+        _ttsClip = [[SLClipPassthroughView alloc] initWithFrame:CGRectZero];
         _ttsClip.backgroundColor = [UIColor clearColor];
         _ttsClipMask = [CAShapeLayer layer];
         _ttsClipMask.fillColor = [UIColor blackColor].CGColor;
