@@ -11,8 +11,9 @@ LIBRARY_NAME = ShenglinMomo
 ShenglinMomo_FILES = Tweak/Tweak.x \
 	Tweak/SLGlass.m \
 	Tweak/SLSettingsPanel.m \
-	Tweak/SLPipeline.m \
-	Tweak/SLEntry.m \
+Tweak/SLPipeline.m \
+	Tweak/SLTTSProgressCard.m \
+Tweak/SLEntry.m \
 	Tweak/SLAMREncoder.m \
 	Tweak/SLPCMTool.m \
 	Tweak/SLLog.m \

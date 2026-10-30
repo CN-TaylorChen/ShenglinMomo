@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.80"
+#define SLVersion @"0.4.81"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -188,14 +188,20 @@ static BOOL SLInstallOneObjectHook(Class cls, SEL sel, IMP imp) {
 }
 
 // 同一条文本短时间内只处理一次（防多个钩子重复命中）
+static NSString *gSLClaimLast = nil;
+static NSTimeInterval gSLClaimLastT = 0;
 static BOOL SLClaimText(NSString *text) {
-    static NSString *last = nil;
-    static NSTimeInterval lastT = 0;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-    if (text.length && last && [last isEqualToString:text] && (now - lastT) < 5.0) return NO;
-    last = [text copy];
-    lastT = now;
+    if (text.length && gSLClaimLast && [gSLClaimLast isEqualToString:text] && (now - gSLClaimLastT) < 5.0) return NO;
+    gSLClaimLast = [text copy];
+    gSLClaimLastT = now;
     return YES;
+}
+
+// 合成失败 / 用法错误时释放去重锁，允许用户在输入框里重试同一条口令
+static void SLReleaseClaim(void) {
+    gSLClaimLast = nil;
+    gSLClaimLastT = 0;
 }
 
 #pragma mark - 文本解析
@@ -1092,22 +1098,36 @@ static BOOL SLArmPackAutoQuiet(void) {
 
 static void SLArmTTS(id handler,
                      NSString *content,
-                     void (^fallback)(void)) {
+                     void (^clearOnSuccess)(void)) {
     (void)handler;
+    __block BOOL cancelled = NO;
+    void (^cancelBlock)(void) = ^{
+        cancelled = YES;
+        SLFloatSetState(SLFloatStateIdle);   // 球回落灰
+        SLHideTTSProgress();
+        SLReleaseClaim();                     // 释放去重锁，允许直接在输入框里重发
+        SLLog(@"tts cancelled by user, text kept in input box");
+    };
 
     // v0.4.52.5：语音包已改走独立口令（默认 yyb），这里只负责合成，两者不再互相抢。
     SLFloatSetState(SLFloatStateSynthesizing);   // v0.4.52：球变蓝、弧线转圈
-    [AWECAUtils showToast:@"合成中..." duration:2.0];
+    SLShowTTSProgress(60.0, cancelBlock);        // v0.4.81：常驻进度卡片（时间条 + 倒计时 + 取消）
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (cancelled) { SLHideTTSProgress(); return; }   // v0.4.81：取消后忽略后续回调
             if (!ok || !outPath.length) {
+                // v0.4.81：合成失败绝不再把口令文本当普通消息发出去（旧版失败兜底会调 orig，把口令当普通消息漏给对面）。
+                // 改为留在输入框、提示、并释放去重锁放行重试。
                 NSString *m = msg.length ? msg : @"合成失败";
                 SLLog(@"tts failed: %@", m);
-                [AWECAUtils showToast:m duration:2.5];
+                SLHideTTSProgress();   // v0.4.81：先收掉进度卡片
+                [AWECAUtils showToast:[NSString stringWithFormat:@"%@，已放回输入框", m] duration:2.5];
                 SLFloatSetState(SLFloatStateIdle);
-                if (fallback) fallback();
+                SLReleaseClaim();
                 return;
             }
+            // v0.4.81：合成成功，先收掉进度卡片，再装填
+            SLHideTTSProgress();
             // 「录音替换」模式：合成后只“装填”，不自动发。
             // 等用户真实录音，audioRecorder 钩子会把录音文件覆盖成这份 AI 音频。
             gSLTTSAudioPath = [outPath copy];
@@ -1118,6 +1138,8 @@ static void SLArmTTS(id handler,
             [SLVoicePack setOneShotPending:YES];
             [SLVoicePack setArmedSource:SLArmedSourceAI];
             SLLog(@"armed tts path=%@ dur=%.2f — 等待用户录音替换", outPath, dur);
+            // v0.4.81：合成成功才清输入框（失败分支不清除，口令留在框里等重试）。
+            if (clearOnSuccess) clearOnSuccess();
             // v0.4.59：这里不再先落灰。原来先设 Idle（灰），紧接着同步解码 PCM（约 0.2–0.4s），
             // 等试听面板弹出后才设 Ready（绿）—— 录屏里就是「蓝 → 灰 → 绿」闪一下，看着像顿住。
             // 现在保持蓝：开着试听就走下面 present 完成时转绿，关掉试听走 else 分支转绿；只有取消才回灰。
@@ -1187,7 +1209,7 @@ static void SLArmTTS(id handler,
                 }
                                                  onRetry:^{
                     SLLog(@"tts audition retry");
-                    SLArmTTS(nil, content, fallback);
+                    SLArmTTS(nil, content, clearOnSuccess);
                 }];
             } else {
                 // v0.4.52：没开试听面板时合成完就是直接可用，这里补上就绪蓝
@@ -1228,8 +1250,8 @@ static void SLSendText(id self, SEL _cmd) {
     NSString *content = SLTextAfterCommand(text);
     if (!content.length) {
         [AWECAUtils showToast:[NSString stringWithFormat:@"用法：%@ 要转成语音的话", SLCommand()] duration:2.5];
-        if (orig) orig(self, _cmd);
-        return;
+        SLReleaseClaim();
+        return;   // 不放回也不发：口令本就在输入框
     }
 
     SLLog(@"#tts hit via %@ -sendText, text=%@", NSStringFromClass([self class]), SLShorten(text, 40));
@@ -1243,19 +1265,16 @@ static void SLSendText(id self, SEL _cmd) {
         Class uh = NSClassFromString(@"MDChatUniverseHandler");
         if (ub && uh && [self isKindOfClass:ub]) {
             SLLog(@"Universe 输入栏：响应链未命中 handler，但仍装填（录音由全局编码器接管替换）");
-            SLArmTTS(self, content, ^{ if (orig) orig(self, _cmd); });
-            SLClearTextInView(tv);
+            SLArmTTS(self, content, ^{ SLClearTextInView(tv); });
             return;
         }
-        SLLog(@"no audio handler near input bar -> fallback to text");
-        // v0.4.52：不再静默退回文本，给个可见提示。
-        [AWECAUtils showToast:@"没找到语音发送入口，这条按文字发了" duration:2.0];
-        if (orig) orig(self, _cmd);
+        SLLog(@"no audio handler near input bar -> 留在输入框，不发送");
+        [AWECAUtils showToast:@"没找到语音发送入口，已放回输入框" duration:2.0];
+        SLReleaseClaim();
         return;
     }
 
-    SLArmTTS(handler, content, ^{ if (orig) orig(self, _cmd); });
-    SLClearTextInView(tv);
+    SLArmTTS(handler, content, ^{ SLClearTextInView(tv); });
     return;
 }
 
@@ -1289,13 +1308,12 @@ static void SLSendTextMessage(id self, SEL _cmd, id arg) {
     NSString *content = SLTextAfterCommand(text);
     if (!content.length) {
         [AWECAUtils showToast:[NSString stringWithFormat:@"用法：%@ 要转成语音的话", SLCommand()] duration:2.5];
-        if (orig) orig(self, _cmd, arg);
+        SLReleaseClaim();
         return;
     }
 
     SLLog(@"#tts hit via %@ -sendTextMessage:", NSStringFromClass([self class]));
-    SLArmTTS(self, content, ^{ if (orig) orig(self, _cmd, arg); });
-    SLClearInputBars();
+    SLArmTTS(self, content, ^{ SLClearInputBars(); });
     return;
 }
 
@@ -1316,12 +1334,11 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
     if (!SLClaimText(str)) return;
     NSString *content = SLTextAfterCommand(str);
     if (!content.length) {
-        if (orig) orig(self, _cmd, text, targetID, isSingle);
+        SLReleaseClaim();
         return;
     }
     SLLog(@"#tts hit via MMCommonServiceImpl");
-    SLArmTTS(self, content, ^{ if (orig) orig(self, _cmd, text, targetID, isSingle); });
-    SLClearInputBars();
+    SLArmTTS(self, content, ^{ SLClearInputBars(); });
     return;
 }
 
@@ -2569,14 +2586,13 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
     NSString *content = SLTextAfterCommand(full);
     if (!content.length) {
         [AWECAUtils showToast:[NSString stringWithFormat:@"用法：%@ 要转成语音的话", SLCommand()] duration:2.5];
-        orig(self, _cmd, arg);
+        SLReleaseClaim();
         return;
     }
 
     SLLog(@"#tts hit via %@ -sendContent:, text=%@", NSStringFromClass([self class]), SLShorten(full, 40));
-    // 拦下文字、装填 AI 语音；只有合成失败才退回原样发送
-    SLArmTTS(self, content, ^{ orig(self, _cmd, arg); });
-    SLClearInputBars();
+    // v0.4.81：合成失败不再退回原样发送（会漏口令），而是留在输入框；只有成功才清。
+    SLArmTTS(self, content, ^{ SLClearInputBars(); });
 }
 
 static void SLInstallHooks(void) {

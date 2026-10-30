@@ -100,7 +100,9 @@ static NSString *SLASRCodeHint(NSString *code) {
                    dispatch_get_main_queue(), ^{
         if (done) return;
         done = YES;
-        if (completion) completion(NO, nil, origDuration, @"处理超时，已保留原声");
+        // v0.4.81：音频路径（语音转语音）超时不保留原声 —— 改为放弃本次发送。
+        // 调用方在 completion(NO) 时应中止发送，不要把用户原始人声发出去。
+        if (completion) completion(NO, nil, origDuration, @"处理超时，已放弃发送");
     });
 
     NSString *wavPath = [path stringByAppendingString:@".sl16k.wav"];
@@ -111,7 +113,7 @@ static NSString *SLASRCodeHint(NSString *code) {
             if (done) return;
             if (!text.length) {
                 done = YES;
-                if (completion) completion(NO, nil, origDuration, err.length ? err : @"识别失败，已保留原声");
+                if (completion) completion(NO, nil, origDuration, err.length ? err : @"识别失败，已放弃发送");
                 return;
             }
             [AWECAUtils showToast:@"正在合成..." duration:2.0];
@@ -119,7 +121,7 @@ static NSString *SLASRCodeHint(NSString *code) {
                 if (done) return;
                 if (!success2 || !audioPath.length) {
                     done = YES;
-                    if (completion) completion(NO, nil, origDuration, ttsError.length ? ttsError : @"合成失败，已保留原声");
+                    if (completion) completion(NO, nil, origDuration, ttsError.length ? ttsError : @"合成失败，已放弃发送");
                     return;
                 }
                 // 输出合成音频给调用方：由 Tweak 侧决定如何写回陌陌的原路径

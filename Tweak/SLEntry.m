@@ -5,6 +5,7 @@
 #import "AWECAUtils.h"
 #import "SLLog.h"
 #import "SLGlass.h"
+#import "SLTTSProgressCard.h"
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
 #include <stdlib.h>   // v0.4.75：SLHazeImage 里的 calloc/free
@@ -2338,6 +2339,46 @@ void SLRefreshFloatButton(void) {
     // v0.4.40：装填了就亮成蓝的、撤销了回空闲 —— 名字（sl_loadIcon）和颜色一起走，
     // 否则会出现「名字写原声、球还是蓝的」这种自相矛盾。
     if (btn) [btn sl_applyState:([SLVoicePack isOneShotPending] ? SLFloatStateReady : SLFloatStateIdle)];
+}
+
+#pragma mark - v0.4.81：合成进度卡片桥接
+
+static __weak SLTTSProgressCard *sSLTTSProgressCard = nil;
+
+void SLShowTTSProgress(NSTimeInterval timeout, void (^cancel)(void)) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (sSLTTSProgressCard) { [sSLTTSProgressCard dismiss]; sSLTTSProgressCard = nil; }
+        UIWindow *w = SLKeyWindow();
+        if (!w) return;
+        SLTTSProgressCard *card = [SLTTSProgressCard cardWithTimeout:timeout cancel:cancel];
+        // 贴在浮球上方；没有球就退到右下角上方
+        CGRect bf = sSLFloatBtn ? sSLFloatBtn.frame : CGRectZero;
+        CGSize ws = w.bounds.size;
+        CGFloat cw = card.bounds.size.width, ch = card.bounds.size.height;
+        CGFloat cx, cy;
+        if (bf.size.width > 0) {
+            cx = bf.origin.x + (bf.size.width - cw) / 2.0;
+            cy = bf.origin.y - ch - 12.0;
+            if (cy < 56.0) cy = bf.origin.y + bf.size.height + 12.0;   // 球靠顶就放到下方
+        } else {
+            cx = ws.width - cw - 16.0;
+            cy = ws.height - ch - 100.0;
+        }
+        cx = MAX(8.0, MIN(cx, ws.width - cw - 8.0));
+        cy = MAX(56.0, MIN(cy, ws.height - ch - 8.0));
+        card.frame = CGRectMake(cx, cy, cw, ch);
+        [w addSubview:card];
+        [w bringSubviewToFront:card];
+        sSLTTSProgressCard = card;
+    });
+}
+
+void SLHideTTSProgress(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        SLTTSProgressCard *c = sSLTTSProgressCard;
+        sSLTTSProgressCard = nil;
+        [c dismiss];
+    });
 }
 
 // 把中心点夹在「不会被屏幕边缘切掉」的范围内。

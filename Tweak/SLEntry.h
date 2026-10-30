@@ -33,6 +33,12 @@ void SLFloatSetState(SLFloatState state);
 // 试听面板呈现时用这个：面板自己有弹入动画，球再缩一下会撞车。
 void SLFloatSetStateQuiet(SLFloatState state);
 
+// v0.4.81：合成进度卡片（#tts 文字路径 ≤60s / 语音转语音增强 ≤120s 共用）。
+// 显示「正在合成 AI 语音」+ 时间进度条 + 倒计时 + 取消按钮。
+// cancel 块由调用方提供；约定「取消后保留输入框文字、球回落灰、不发送」。
+void SLShowTTSProgress(NSTimeInterval timeout, void (^cancel)(void));
+void SLHideTTSProgress(void);
+
 // v0.4.34：设置 / 语音包都装在浮窗里，内部是子控制器，
 // 点「完成」要先向上找到真正的呈现者，否则 dismiss 自己什么也不会发生。
 void SLCloseHostingPanel(UIViewController *vc);
