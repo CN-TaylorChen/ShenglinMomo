@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.81"
+#define SLVersion @"0.4.82"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -242,7 +242,11 @@ static NSString *SLDumpPropsOnce(id arg) {
 }
 
 // 命中 #tts 后清空输入栏（避免原文本残留）
-static void SLClearInputBars(void) {
+// v0.4.82：加了「写回」分支 —— 合成失败 / 用户取消时要把口令原样放回输入框。
+// 陌陌自己在调 sendTextMessage: 之前就已经把框清空了，不补这一步，所谓的「留在输入框」是空的。
+static void SLSetTextInView(UIView *v, NSString *text);
+
+static void SLApplyInputBarsText(NSString *text) {
     @try {
         NSArray *classes = @[NSClassFromString(@"MDChatInputBar"),
                               NSClassFromString(@"MDNewInputTextBar"),
@@ -270,13 +274,19 @@ static void SLClearInputBars(void) {
             for (NSString *cn in classes) {
                 if (cn && [v isKindOfClass:NSClassFromString(cn)]) {
                     id tv = [v valueForKey:@"inputTextView"];
-                    if ([tv isKindOfClass:[UITextView class]]) ((UITextView *)tv).text = @"";
+                    if ([tv isKindOfClass:[UITextView class]]) {
+                        if (text.length) SLSetTextInView((UIView *)tv, text);
+                        else ((UITextView *)tv).text = @"";
+                    }
                 }
             }
             for (UIView *s in v.subviews) [q addObject:s];
         }
     } @catch (NSException *e) {}
 }
+
+static void SLClearInputBars(void) { SLApplyInputBarsText(nil); }
+static void SLRestoreInputBarsText(NSString *text) { SLApplyInputBarsText(text); }
 
 // v0.4.52：安全取字符串 getter —— 先确认方法返回类型是对象（'@'）再调。
 // 0.4.52 闪退根因：对「返回结构体/基本类型」的属性盲调 getter，arm64 上返回值 ABI 不匹配，直接崩。
@@ -426,6 +436,33 @@ static void SLClearTextInView(UIView *v) {
     @try {
         if ([v isKindOfClass:[UITextView class]]) ((UITextView *)v).text = @"";
         else if ([v isKindOfClass:[UITextField class]]) ((UITextField *)v).text = @"";
+    } @catch (NSException *e) { }
+}
+
+// v0.4.82：把口令写回输入框。
+// v0.4.81 只做了「失败不清空」，但陌陌的发送顺序是「取文本 → 建 message → 清空输入框 →
+// 调 sendTextMessage:」，我们 hook 在最后一环，框早就空了 —— 所以必须主动回填。
+// 光设 text 不够：输入栏的高度和右侧发送键都挂在 textViewDidChange: 上，
+// 不通知它，文字会显示出来但气泡高度还是原来的单行。
+static void SLSetTextInView(UIView *v, NSString *text) {
+    if (!text.length) return;
+    @try {
+        if ([v isKindOfClass:[UITextView class]]) {
+            UITextView *tv = (UITextView *)v;
+            tv.text = text;
+            id<UITextViewDelegate> d = tv.delegate;
+            if (d && [d respondsToSelector:@selector(textViewDidChange:)]) {
+                @try { [d textViewDidChange:tv]; } @catch (NSException *e) { }
+            }
+            [tv sendActionsForControlEvents:UIControlEventEditingChanged];
+            if (text.length <= tv.text.length) {
+                tv.selectedRange = NSMakeRange(text.length, 0);   // 光标落到末尾，接着改口令就行
+            }
+        } else if ([v isKindOfClass:[UITextField class]]) {
+            UITextField *tf = (UITextField *)v;
+            tf.text = text;
+            [tf sendActionsForControlEvents:UIControlEventEditingChanged];
+        }
     } @catch (NSException *e) { }
 }
 
@@ -1096,38 +1133,90 @@ static BOOL SLArmPackAutoQuiet(void) {
     return YES;
 }
 
+// v0.4.82：胶囊里只有一行位置放失败原因，而 pipeline 给的 msg 常带冒号后的细节
+//（"网络错误: 无法连接服务器。"），截到冒号为止，够用且不会被省略号啃掉。
+static NSString *SLShortFailReason(NSString *msg) {
+    if (!msg.length) return nil;
+    NSString *s = msg;
+    NSRange r1 = [s rangeOfString:@":"];
+    NSRange r2 = [s rangeOfString:@"："];
+    NSRange r = r1;
+    if (r2.location != NSNotFound && (r1.location == NSNotFound || r2.location < r1.location)) r = r2;
+    if (r.location != NSNotFound && r.location > 0) s = [s substringToIndex:r.location];
+    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (s.length > 8) s = [[s substringToIndex:8] stringByAppendingString:@"…"];
+    return s;
+}
+
+// v0.4.82：rawText = 输入框里的原文（含口令前缀），inputView = 那个输入框（拿不到就传 nil）。
+// 失败 / 取消时把 rawText 原样写回去 —— 陌陌在调 sendTextMessage: 之前就把框清了，
+// 不主动回填的话「留在输入框」只是一句空话（v0.4.81 的日志证实过）。
 static void SLArmTTS(id handler,
                      NSString *content,
-                     void (^clearOnSuccess)(void)) {
+                     NSString *rawText,
+                     UIView *inputView) {
     (void)handler;
-    __block BOOL cancelled = NO;
+    // v0.4.82：统一成「已经出结论」标志 —— 成功 / 失败 / 取消 / 超时，谁先到算谁，
+    // 后到的回调一律丢掉。原来只有 cancelled，超时后 pipeline 迟到的成功回调仍会装填。
+    __block BOOL settled = NO;
+
+    void (^restoreText)(void) = ^{
+        if (!rawText.length) return;
+        if (inputView) SLSetTextInView(inputView, rawText);
+        else SLRestoreInputBarsText(rawText);
+    };
+    void (^clearOnSuccess)(void) = ^{
+        if (inputView) SLClearTextInView(inputView);
+        else SLClearInputBars();
+    };
+    void (^retryBlock)(void) = ^{
+        SLArmTTS(nil, content, rawText, inputView);
+    };
+
     void (^cancelBlock)(void) = ^{
-        cancelled = YES;
+        settled = YES;
         SLFloatSetState(SLFloatStateIdle);   // 球回落灰
-        SLHideTTSProgress();
-        SLReleaseClaim();                     // 释放去重锁，允许直接在输入框里重发
-        SLLog(@"tts cancelled by user, text kept in input box");
+        restoreText();                       // v0.4.82：取消也要回填，别指望陌陌留着
+        SLReleaseClaim();                    // 释放去重锁，允许直接在输入框里重发
+        SLLog(@"tts cancelled by user, text restored to input box");
     };
 
     // v0.4.52.5：语音包已改走独立口令（默认 yyb），这里只负责合成，两者不再互相抢。
     SLFloatSetState(SLFloatStateSynthesizing);   // v0.4.52：球变蓝、弧线转圈
-    SLShowTTSProgress(60.0, cancelBlock);        // v0.4.81：常驻进度卡片（时间条 + 倒计时 + 取消）
+    // v0.4.82：进度 / 取消从独立卡片挪进胶囊；上限从 60s 收到 30s ——
+    // 旧版干等满一分钟才报超时，现在有可见时间条和取消键，没必要忍那么久。
+    SLFloatTTSBegin(30.0, cancelBlock);
+
+    // v0.4.82：pipeline 自己的超时是 60s，胶囊 30s 就走满了 —— 不能让它空转半分钟，
+    // 到点自己判超时（迟到的成功回调被 settled 挡掉，不会再偷偷装填）。
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (settled) return;
+        settled = YES;
+        SLLog(@"tts timeout at 30s capsule limit");
+        SLFloatSetState(SLFloatStateIdle);
+        restoreText();
+        SLFloatTTSEnd(NO, @"合成超时", retryBlock);
+        SLReleaseClaim();
+    });
     [[SLPipeline shared] synthesizeMessageText:content completion:^(BOOL ok, NSString *outPath, double dur, NSString *msg) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (cancelled) { SLHideTTSProgress(); return; }   // v0.4.81：取消后忽略后续回调
+            if (settled) return;   // v0.4.82：取消 / 超时之后到的回调，一律丢掉
+            settled = YES;
             if (!ok || !outPath.length) {
                 // v0.4.81：合成失败绝不再把口令文本当普通消息发出去（旧版失败兜底会调 orig，把口令当普通消息漏给对面）。
-                // 改为留在输入框、提示、并释放去重锁放行重试。
-                NSString *m = msg.length ? msg : @"合成失败";
-                SLLog(@"tts failed: %@", m);
-                SLHideTTSProgress();   // v0.4.81：先收掉进度卡片
-                [AWECAUtils showToast:[NSString stringWithFormat:@"%@，已放回输入框", m] duration:2.5];
+                // v0.4.82：失败反馈整体挪进胶囊（红字 + 「口令已放回输入框」），不再弹 toast；
+                // 同时主动把原文写回输入框 —— 陌陌在这之前已经清过框了。
+                SLLog(@"tts failed: %@", msg.length ? msg : @"(无信息)");
                 SLFloatSetState(SLFloatStateIdle);
+                restoreText();
+                NSString *why = SLShortFailReason(msg);
+                SLFloatTTSEnd(NO, why.length ? [NSString stringWithFormat:@"合成失败 · %@", why] : @"合成失败", retryBlock);
                 SLReleaseClaim();
                 return;
             }
-            // v0.4.81：合成成功，先收掉进度卡片，再装填
-            SLHideTTSProgress();
+            // v0.4.82：成功先收胶囊（绿球由下面的 setState 接，顺序不能反 —— 反过来会先绿再收）
+            SLFloatTTSEnd(YES, nil, nil);
             // 「录音替换」模式：合成后只“装填”，不自动发。
             // 等用户真实录音，audioRecorder 钩子会把录音文件覆盖成这份 AI 音频。
             gSLTTSAudioPath = [outPath copy];
@@ -1209,7 +1298,7 @@ static void SLArmTTS(id handler,
                 }
                                                  onRetry:^{
                     SLLog(@"tts audition retry");
-                    SLArmTTS(nil, content, clearOnSuccess);
+                    SLArmTTS(nil, content, rawText, inputView);
                 }];
             } else {
                 // v0.4.52：没开试听面板时合成完就是直接可用，这里补上就绪蓝
@@ -1265,7 +1354,7 @@ static void SLSendText(id self, SEL _cmd) {
         Class uh = NSClassFromString(@"MDChatUniverseHandler");
         if (ub && uh && [self isKindOfClass:ub]) {
             SLLog(@"Universe 输入栏：响应链未命中 handler，但仍装填（录音由全局编码器接管替换）");
-            SLArmTTS(self, content, ^{ SLClearTextInView(tv); });
+            SLArmTTS(self, content, text, tv);
             return;
         }
         SLLog(@"no audio handler near input bar -> 留在输入框，不发送");
@@ -1274,7 +1363,7 @@ static void SLSendText(id self, SEL _cmd) {
         return;
     }
 
-    SLArmTTS(handler, content, ^{ SLClearTextInView(tv); });
+    SLArmTTS(handler, content, text, tv);
     return;
 }
 
@@ -1313,7 +1402,8 @@ static void SLSendTextMessage(id self, SEL _cmd, id arg) {
     }
 
     SLLog(@"#tts hit via %@ -sendTextMessage:", NSStringFromClass([self class]));
-    SLArmTTS(self, content, ^{ SLClearInputBars(); });
+    // v0.4.82：这一层拿不到输入框，只能让 SLArmTTS 自己扫全窗口回填
+    SLArmTTS(self, content, text, nil);
     return;
 }
 
@@ -1338,7 +1428,7 @@ static void SLSendTextMessageService(id self, SEL _cmd, id text, id targetID, BO
         return;
     }
     SLLog(@"#tts hit via MMCommonServiceImpl");
-    SLArmTTS(self, content, ^{ SLClearInputBars(); });
+    SLArmTTS(self, content, str, nil);
     return;
 }
 
@@ -2592,7 +2682,8 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
 
     SLLog(@"#tts hit via %@ -sendContent:, text=%@", NSStringFromClass([self class]), SLShorten(full, 40));
     // v0.4.81：合成失败不再退回原样发送（会漏口令），而是留在输入框；只有成功才清。
-    SLArmTTS(self, content, ^{ SLClearInputBars(); });
+    // v0.4.82：小宇宙这套页面拿不到输入框实例，失败时由 SLArmTTS 扫全窗口回填原文。
+    SLArmTTS(self, content, full, nil);
 }
 
 static void SLInstallHooks(void) {

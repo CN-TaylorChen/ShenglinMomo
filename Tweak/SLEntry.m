@@ -5,7 +5,6 @@
 #import "AWECAUtils.h"
 #import "SLLog.h"
 #import "SLGlass.h"
-#import "SLTTSProgressCard.h"
 #import <PhotosUI/PhotosUI.h>
 #import <AVFoundation/AVFoundation.h>
 #include <stdlib.h>   // v0.4.75：SLHazeImage 里的 calloc/free
@@ -224,6 +223,9 @@ static BOOL sSLFloatSettleMuted = NO;
 #define SLBallSide 48.0
 #define SLPillMaxW 196.0
 #define SLPillMinW 146.0   // v0.4.77：展开态定宽，就是 146 / 196 里最短的那一档
+// v0.4.82：合成中的胶囊要装「两行字 + 取消键」，146 塞不下，单独一档更宽。
+// 不跟名字走（名字那档由 sl_pillSize 决定），所以合成结束收起时不会有第二段宽度跳变。
+#define SLTtsPillW 218.0
 
 // v0.4.44：下压留白改成 0。
 // 之前留 14pt 是为了让搜索栏不压圆角，但导航栏是透明的 —— 那 14pt 成了整张卡片上
@@ -273,6 +275,17 @@ static UIImage *SLTransparentImage(void) {
 /// v0.4.46：拖动中越过中线翻面 / 松手贴边
 - (void)sl_updateMirrorDuringDrag;
 - (void)sl_settlePillToEdge;
+/// v0.4.82：合成状态直接长在胶囊里（取代 v0.4.81 的独立进度卡片）
+- (void)sl_ttsBegin:(NSTimeInterval)limit cancel:(void (^)(void))cancelBlock;
+- (void)sl_ttsEnd:(BOOL)success failText:(NSString *)failText retry:(void (^)(void))retryBlock;
+// 下面几个只在内部互相调用。全部提前声明，省得 clang 因「定义在调用点之后」
+// 报 instance method not found（-Werror 下会直接炸 CI）。
+- (NSString *)sl_ttsSubTextForElapsed:(NSTimeInterval)elapsed;
+- (void)sl_ttsLayout;
+- (void)sl_ttsTick;
+- (void)sl_ttsAutoCollapse;
+- (void)sl_ttsCancelTapped;
+- (void)sl_ttsRetryTapped;
 @end
 
 // v0.4.36：胶囊下方展开的语音包列表（点胶囊右端才出现）。
@@ -491,6 +504,20 @@ static UIImage *SLTransparentImage(void) {
     CFTimeInterval _longPressAt;
     // v0.4.40：球在哪半边，胶囊就往哪边「挂」—— 图标端留在球原位，箭头端伸向屏内
     BOOL _mirrored;
+    // v0.4.82：合成态内容。平时全部隐藏，只占内存不参与布局。
+    UILabel *_ttsTitle;
+    UILabel *_ttsSub;
+    UIButton *_ttsCancel;
+    UIControl *_ttsTapArea;      // 失败态整条胶囊都能点（点一下重试）
+    UIView *_ttsTrack;
+    UIView *_ttsFill;
+    UIView *_ttsStroke;          // 失败态的红色描边（正常态看不见）
+    NSTimer *_ttsTimer;
+    CFTimeInterval _ttsStart;
+    NSTimeInterval _ttsLimit;
+    NSInteger _ttsPhase;         // 0 = 关闭 / 1 = 合成中 / 2 = 失败提示中
+    void (^_ttsCancelBlock)(void);
+    void (^_ttsRetryBlock)(void);
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -655,6 +682,67 @@ static UIImage *SLTransparentImage(void) {
         _readyDot.hidden = YES;
         _readyDot.userInteractionEnabled = NO;
         [self addSubview:_readyDot];
+
+        // ---- v0.4.82：合成态内容（默认全隐藏，只在 #tts 合成期间铺进胶囊）----
+        _ttsTitle = [[UILabel alloc] initWithFrame:CGRectZero];
+        _ttsTitle.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightSemibold];
+        _ttsTitle.textColor = [UIColor labelColor];
+        _ttsTitle.lineBreakMode = NSLineBreakByTruncatingTail;
+        _ttsTitle.hidden = YES;
+        _ttsTitle.userInteractionEnabled = NO;
+        [self addSubview:_ttsTitle];
+
+        _ttsSub = [[UILabel alloc] initWithFrame:CGRectZero];
+        _ttsSub.font = [UIFont systemFontOfSize:11.0 weight:UIFontWeightRegular];
+        _ttsSub.textColor = [UIColor secondaryLabelColor];
+        _ttsSub.lineBreakMode = NSLineBreakByTruncatingTail;
+        _ttsSub.hidden = YES;
+        _ttsSub.userInteractionEnabled = NO;
+        [self addSubview:_ttsSub];
+
+        // 底部时间条：玻璃太透，用 2pt 实色条更清楚（不贴底，避开通胶囊的圆头）
+        _ttsTrack = [[UIView alloc] initWithFrame:CGRectZero];
+        _ttsTrack.backgroundColor = [UIColor secondarySystemFillColor];
+        _ttsTrack.layer.cornerRadius = 1.0;
+        _ttsTrack.layer.masksToBounds = YES;
+        _ttsTrack.hidden = YES;
+        _ttsTrack.userInteractionEnabled = NO;
+        [self addSubview:_ttsTrack];
+
+        _ttsFill = [[UIView alloc] initWithFrame:CGRectZero];
+        _ttsFill.backgroundColor = [UIColor systemBlueColor];
+        [_ttsTrack addSubview:_ttsFill];
+
+        _ttsCancel = [UIButton buttonWithType:UIButtonTypeCustom];
+        _ttsCancel.layer.cornerRadius = 15.0;
+        _ttsCancel.layer.masksToBounds = YES;
+        _ttsCancel.layer.borderWidth = 1.0;
+        _ttsCancel.layer.borderColor = SLGlassHairlineColor().CGColor;
+        _ttsCancel.backgroundColor = SLGlassPillFillColor();
+        [_ttsCancel setTitle:@"取消" forState:UIControlStateNormal];
+        [_ttsCancel setTitleColor:[UIColor labelColor] forState:UIControlStateNormal];
+        _ttsCancel.titleLabel.font = [UIFont systemFontOfSize:12.5 weight:UIFontWeightRegular];
+        _ttsCancel.hidden = YES;
+        [_ttsCancel addTarget:self action:@selector(sl_ttsCancelTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_ttsCancel];
+
+        // 失败态的红色勾边。挂独立一层而不是改 _hairline —— 那条是 0.8pt 白线，
+        // 改色/改宽会把整套玻璃边的观感带偏。
+        _ttsStroke = [[UIView alloc] initWithFrame:CGRectZero];
+        _ttsStroke.backgroundColor = [UIColor clearColor];
+        _ttsStroke.layer.borderWidth = 1.0;
+        _ttsStroke.layer.borderColor = [UIColor systemRedColor].CGColor;
+        _ttsStroke.layer.cornerRadius = SLBallSide / 2.0;
+        _ttsStroke.hidden = YES;
+        _ttsStroke.userInteractionEnabled = NO;
+        [self addSubview:_ttsStroke];
+
+        // 失败提示期间整条胶囊都可以点 = 重来一次合成（运行态隐藏，别挡住「取消」）
+        _ttsTapArea = [[UIControl alloc] initWithFrame:CGRectZero];
+        _ttsTapArea.backgroundColor = [UIColor clearColor];
+        _ttsTapArea.hidden = YES;
+        [_ttsTapArea addTarget:self action:@selector(sl_ttsRetryTapped) forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:_ttsTapArea];
 
         [self addTarget:self action:@selector(sl_tap) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(sl_pan:)];
@@ -1034,6 +1122,8 @@ static UIImage *SLTransparentImage(void) {
     // 展开动画、换音色都不再跳。
     // v0.4.79：窗口改成 146 - 54（图标侧）- 34.5（箭头侧）= 57.5pt，
     // 12.5pt 字号下四个汉字（50pt）能完整静止，五个字起才滚。
+    // v0.4.82：合成态换一档宽 —— 要同时放两行字和「取消」键，146 不可能塞下。
+    if (_ttsPhase != 0) return CGSizeMake(SLTtsPillW, SLBallSide);
     _name.text = SLFloatPackName();
     return CGSizeMake(SLPillMinW, SLBallSide);
 }
@@ -1155,6 +1245,167 @@ static UIImage *SLTransparentImage(void) {
         _chev.alpha = 1.0;
     }
     [self sl_startBreath:self.slState];
+}
+
+#pragma mark - v0.4.82：合成态（进度 / 取消长在胶囊里）
+
+// 「已等 12s · 上限 30s」，11pt 下约 92pt 宽，正好塞进 108pt 的文字区。
+- (NSString *)sl_ttsSubTextForElapsed:(NSTimeInterval)elapsed {
+    NSInteger e = (NSInteger)floor(elapsed);
+    NSInteger lim = (NSInteger)ceil(_ttsLimit);
+    if (e < 0) e = 0;
+    if (e > lim) e = lim;
+    return [NSString stringWithFormat:@"已等 %lds · 上限 %lds", (long)e, (long)lim];
+}
+
+- (void)sl_ttsLayout {
+    CGRect b = self.bounds;
+    CGFloat w = CGRectGetWidth(b);
+    CGFloat h = SLBallSide;
+    BOOL mir = _mirrored;
+
+    // 取消键跟图标换边：胶囊向左长（球贴右）时图标在右端，取消就得挪到左端。
+    CGFloat cancelW = 46.0, cancelH = 30.0;
+    _ttsCancel.frame = CGRectMake(mir ? 8.0 : (w - cancelW - 8.0), (h - cancelH) / 2.0, cancelW, cancelH);
+
+    // 文字区两侧对称留白，镜像时只换方向、不动位置 —— 文本始终落在视觉中轴上。
+    // 失败态「取消」已经隐藏，右边不用再让 46pt，把那块空间还给「合成失败 · 网络错误」。
+    CGFloat textX = mir ? 56.0 : 54.0;
+    CGFloat rightPad = (_ttsPhase == 2) ? 14.0 : 56.0;
+    CGFloat textW = MAX(0.0, w - 54.0 - rightPad);
+    _ttsTitle.frame = CGRectMake(textX, 8.0, textW, 17.0);
+    _ttsSub.frame = CGRectMake(textX, 24.0, textW, 14.0);
+
+    // 时间条跟文字同宽、贴在胶囊下缘往上 7pt：贴到最底会被圆头切掉一截。
+    CGFloat trackY = h - 7.0;
+    _ttsTrack.frame = CGRectMake(textX, trackY, textW, 2.0);
+    CGFloat p = 0.0;
+    if (_ttsPhase == 1 && _ttsLimit > 0.5) {
+        p = (CGFloat)((CACurrentMediaTime() - _ttsStart) / _ttsLimit);
+    } else if (_ttsPhase == 2) {
+        p = 1.0;
+    }
+    if (p < 0.0) p = 0.0;
+    if (p > 1.0) p = 1.0;
+    _ttsFill.frame = CGRectMake(0, 0, textW * p, 2.0);
+
+    _ttsStroke.frame = b;
+    _ttsStroke.layer.cornerRadius = h / 2.0;
+    _ttsTapArea.frame = b;
+}
+
+- (void)sl_ttsBegin:(NSTimeInterval)limit cancel:(void (^)(void))cancelBlock {
+    _ttsPhase = 1;
+    _ttsLimit = (limit > 1.0) ? limit : 30.0;
+    _ttsStart = CACurrentMediaTime();
+    _ttsCancelBlock = [cancelBlock copy];
+    _ttsRetryBlock = nil;
+
+    _ttsTitle.text = @"合成中";
+    _ttsTitle.textColor = [UIColor labelColor];
+    _ttsSub.textColor = [UIColor secondaryLabelColor];
+    _ttsSub.text = [self sl_ttsSubTextForElapsed:0];
+    _ttsFill.backgroundColor = [UIColor systemBlueColor];
+
+    _ttsTitle.hidden = NO;
+    _ttsSub.hidden = NO;
+    _ttsTrack.hidden = NO;
+    _ttsCancel.hidden = NO;
+    _ttsStroke.hidden = YES;
+    _ttsTapArea.hidden = YES;
+
+    [_ttsTimer invalidate];
+    // 0.1s 一档足够了：进度条 108pt 宽，30s 上限下 0.1s 只走 0.36pt，肉眼看是连续的。
+    _ttsTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                 target:self
+                                               selector:@selector(sl_ttsTick)
+                                               userInfo:nil
+                                                repeats:YES];
+
+    // 已经展开着（用户自己点开过）就不能再走 sl_expand: —— 那个方法见 slExpanded==YES 直接 return，
+    // 宽度会停在 146，两行字和取消键全挤成一条。这里按名字那套 resize 逻辑重排一次。
+    if (self.slExpanded) [self sl_resizePillForName];
+    else [self sl_expand:YES animated:YES];
+    [self setNeedsLayout];
+}
+
+- (void)sl_ttsTick {
+    if (_ttsPhase != 1) return;
+    NSTimeInterval elapsed = CACurrentMediaTime() - _ttsStart;
+    _ttsSub.text = [self sl_ttsSubTextForElapsed:elapsed];
+    CGFloat p = (CGFloat)(elapsed / _ttsLimit);
+    if (p < 0.0) p = 0.0;
+    if (p > 1.0) p = 1.0;
+    CGFloat tw = CGRectGetWidth(_ttsTrack.bounds);
+    _ttsFill.frame = CGRectMake(0, 0, tw * p, 2.0);
+}
+
+- (void)sl_ttsEnd:(BOOL)success failText:(NSString *)failText retry:(void (^)(void))retryBlock {
+    [_ttsTimer invalidate];
+    _ttsTimer = nil;
+
+    if (!success && failText.length) {
+        // 失败：原地转红停 2.6s，不走「先收球再弹一下」那条路 —— 收球会把提示也一起收掉。
+        _ttsPhase = 2;
+        _ttsRetryBlock = [retryBlock copy];
+        _ttsTitle.text = failText;
+        _ttsTitle.textColor = [UIColor systemRedColor];
+        _ttsSub.textColor = [UIColor secondaryLabelColor];
+        _ttsSub.text = @"已放回输入框 · 点此重试";
+        _ttsFill.backgroundColor = [UIColor systemRedColor];
+        _ttsCancel.hidden = YES;
+        _ttsStroke.hidden = NO;
+        _ttsTapArea.hidden = NO;
+        [self setNeedsLayout];
+
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsAutoCollapse) object:nil];
+        [self performSelector:@selector(sl_ttsAutoCollapse) withObject:nil afterDelay:2.6];
+        return;
+    }
+    [self sl_ttsAutoCollapse];
+}
+
+- (void)sl_ttsAutoCollapse {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsAutoCollapse) object:nil];
+    [_ttsTimer invalidate];
+    _ttsTimer = nil;
+    _ttsPhase = 0;
+    _ttsCancelBlock = nil;
+    _ttsRetryBlock = nil;
+    _ttsTitle.hidden = YES;
+    _ttsSub.hidden = YES;
+    _ttsTrack.hidden = YES;
+    _ttsCancel.hidden = YES;
+    _ttsStroke.hidden = YES;
+    _ttsTapArea.hidden = YES;
+    [self sl_expand:NO animated:YES];
+    [self setNeedsLayout];
+}
+
+- (void)sl_ttsCancelTapped {
+    if (_ttsPhase != 1) return;
+    void (^cb)(void) = _ttsCancelBlock;
+    _ttsPhase = 0;                  // 先落态，避免 cancel 回调里再回头改一轮
+    [self sl_ttsAutoCollapse];
+    if (cb) cb();
+}
+
+- (void)sl_ttsRetryTapped {
+    if (_ttsPhase != 2) return;
+    void (^rb)(void) = _ttsRetryBlock;
+    _ttsRetryBlock = nil;
+    // 不先收球：原地退回「合成中」再由 sl_ttsBegin 重铺。收球再展开会缩一下又长回来，
+    // 宽度明明一样（218），肉眼却像闪了一下。
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sl_ttsAutoCollapse) object:nil];
+    _ttsPhase = 0;
+    _ttsCancelBlock = nil;
+    _ttsTitle.hidden = YES;
+    _ttsSub.hidden = YES;
+    _ttsTrack.hidden = YES;
+    _ttsCancel.hidden = YES;
+    _ttsStroke.hidden = YES;
+    _ttsTapArea.hidden = YES;
+    if (rb) rb();
 }
 
 #pragma mark 手势
@@ -1432,6 +1683,15 @@ static UIImage *SLTransparentImage(void) {
     _midBtn.hidden = !exp;
     _menuBtn.hidden = !exp;
     _homeBtn.hidden = !exp;
+    // v0.4.82：合成态把「名字 + 箭头 + 两端热区」整套让出来，胶囊里只留进度和取消。
+    // 这里必须放在上面四行之后 —— 否则那四行会把 hidden 改回去，合成态里同时冒出名字和取消键。
+    if (exp && _ttsPhase != 0) {
+        _nameClip.hidden = YES;
+        _midBtn.hidden = YES;
+        _menuBtn.hidden = YES;
+        _homeBtn.hidden = YES;
+        [self sl_ttsLayout];
+    }
 
     // 光晕路径：胶囊就是「圆角 = 高一半」的矩形，球是它的特例
     _haloIn.path = [UIBezierPath bezierPathWithRoundedRect:CGRectInset(b, -2.5, -2.5)
@@ -2341,43 +2601,31 @@ void SLRefreshFloatButton(void) {
     if (btn) [btn sl_applyState:([SLVoicePack isOneShotPending] ? SLFloatStateReady : SLFloatStateIdle)];
 }
 
-#pragma mark - v0.4.81：合成进度卡片桥接
+#pragma mark - v0.4.82：合成态桥接（进度条直接长在胶囊里）
 
-static __weak SLTTSProgressCard *sSLTTSProgressCard = nil;
-
-void SLShowTTSProgress(NSTimeInterval timeout, void (^cancel)(void)) {
+void SLFloatTTSBegin(NSTimeInterval limitSec, void (^cancelBlock)(void)) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (sSLTTSProgressCard) { [sSLTTSProgressCard dismiss]; sSLTTSProgressCard = nil; }
-        UIWindow *w = SLKeyWindow();
-        if (!w) return;
-        SLTTSProgressCard *card = [SLTTSProgressCard cardWithTimeout:timeout cancel:cancel];
-        // 贴在浮球上方；没有球就退到右下角上方
-        CGRect bf = sSLFloatBtn ? sSLFloatBtn.frame : CGRectZero;
-        CGSize ws = w.bounds.size;
-        CGFloat cw = card.bounds.size.width, ch = card.bounds.size.height;
-        CGFloat cx, cy;
-        if (bf.size.width > 0) {
-            cx = bf.origin.x + (bf.size.width - cw) / 2.0;
-            cy = bf.origin.y - ch - 12.0;
-            if (cy < 56.0) cy = bf.origin.y + bf.size.height + 12.0;   // 球靠顶就放到下方
-        } else {
-            cx = ws.width - cw - 16.0;
-            cy = ws.height - ch - 100.0;
+        SLFloatButton *btn = sSLFloatBtn;
+        if (!btn) {
+            UIWindow *w = SLKeyWindow();
+            btn = (SLFloatButton *)[w viewWithTag:SLBtnTag];
         }
-        cx = MAX(8.0, MIN(cx, ws.width - cw - 8.0));
-        cy = MAX(56.0, MIN(cy, ws.height - ch - 8.0));
-        card.frame = CGRectMake(cx, cy, cw, ch);
-        [w addSubview:card];
-        [w bringSubviewToFront:card];
-        sSLTTSProgressCard = card;
+        if (!btn) return;
+        [btn sl_ttsBegin:limitSec cancel:cancelBlock];
+        // 胶囊可能刚从球展开，铺到顶层免得被面板压住
+        [btn.superview bringSubviewToFront:btn];
     });
 }
 
-void SLHideTTSProgress(void) {
+void SLFloatTTSEnd(BOOL success, NSString *failText, void (^retryBlock)(void)) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        SLTTSProgressCard *c = sSLTTSProgressCard;
-        sSLTTSProgressCard = nil;
-        [c dismiss];
+        SLFloatButton *btn = sSLFloatBtn;
+        if (!btn) {
+            UIWindow *w = SLKeyWindow();
+            btn = (SLFloatButton *)[w viewWithTag:SLBtnTag];
+        }
+        if (!btn) return;
+        [btn sl_ttsEnd:success failText:failText retry:retryBlock];
     });
 }
 

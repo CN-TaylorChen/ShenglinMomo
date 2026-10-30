@@ -33,11 +33,16 @@ void SLFloatSetState(SLFloatState state);
 // 试听面板呈现时用这个：面板自己有弹入动画，球再缩一下会撞车。
 void SLFloatSetStateQuiet(SLFloatState state);
 
-// v0.4.81：合成进度卡片（#tts 文字路径 ≤60s / 语音转语音增强 ≤120s 共用）。
-// 显示「正在合成 AI 语音」+ 时间进度条 + 倒计时 + 取消按钮。
-// cancel 块由调用方提供；约定「取消后保留输入框文字、球回落灰、不发送」。
-void SLShowTTSProgress(NSTimeInterval timeout, void (^cancel)(void));
-void SLHideTTSProgress(void);
+// v0.4.82：合成状态并进悬浮胶囊，不再有独立进度卡片（原来那张浮在球上方，遮聊天记录）。
+// 合成开始 → 胶囊自动展开：左端图标保持状态色，中间「合成中 / 已等 12s · 上限 30s」，
+// 右端一个「取消」小胶囊，底部一条 2pt 时间条按「已等待 / 上限」推进。
+// 取消块由调用方提供；约定「取消后把口令写回输入框、球回落灰、不发送」。
+void SLFloatTTSBegin(NSTimeInterval limitSec, void (^cancelBlock)(void));
+
+// success=YES：0.2s 收起回绿球，不弹任何提示。
+// success=NO ：胶囊原地转红，主行 failText、副行「口令已放回输入框」，停 2.2s 收球；
+//              期间点胶囊会执行 retryBlock（重来一次合成），用户不用重打口令。
+void SLFloatTTSEnd(BOOL success, NSString *failText, void (^retryBlock)(void));
 
 // v0.4.34：设置 / 语音包都装在浮窗里，内部是子控制器，
 // 点「完成」要先向上找到真正的呈现者，否则 dismiss 自己什么也不会发生。
