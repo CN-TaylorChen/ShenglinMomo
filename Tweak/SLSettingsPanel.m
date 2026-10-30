@@ -67,7 +67,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.4.85"
+#define SLVersion @"0.4.86"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 

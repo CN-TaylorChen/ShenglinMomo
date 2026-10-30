@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.85"
+#define SLVersion @"0.4.86"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -247,6 +247,9 @@ static NSString *SLDumpPropsOnce(id arg) {
 // v0.4.84：v0.4.83 的回填实际一次都没成功过（见 SLApplyInputBarsText 注释），整段重写。
 static BOOL SLSetTextInView(UIView *v, NSString *text);
 static BOOL SLWriteTextToBar(UIView *bar, NSString *text);
+// v0.4.86：定义在下面（v0.4.84 加的），但 v0.4.85 的全窗口兜底要先用到它 ——
+// 缺这行就是「call to undeclared function」+「static declaration follows non-static」。
+static BOOL SLFillTextView(UITextView *tv, NSString *text);
 
 // v0.4.84：最近一次成功写过的输入框。输入栏被换成语音模式 / 页面重建时，
 // 窗口里可能一时扫不到它，留一手兜底。
