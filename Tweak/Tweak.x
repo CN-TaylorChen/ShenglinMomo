@@ -34,7 +34,7 @@
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
 
-#define SLVersion @"0.4.82"
+#define SLVersion @"0.4.83"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -454,7 +454,10 @@ static void SLSetTextInView(UIView *v, NSString *text) {
             if (d && [d respondsToSelector:@selector(textViewDidChange:)]) {
                 @try { [d textViewDidChange:tv]; } @catch (NSException *e) { }
             }
-            [tv sendActionsForControlEvents:UIControlEventEditingChanged];
+            // v0.4.83：UITextView 不是 UIControl，没有 sendActionsForControlEvents:（v0.4.82
+            // 就是这么炸的 CI）。广播文本变更通知 —— UIKit 内部以及陌陌监听输入栏的那套都收这个。
+            [[NSNotificationCenter defaultCenter] postNotificationName:UITextViewTextDidChangeNotification
+                                                                object:tv];
             if (text.length <= tv.text.length) {
                 tv.selectedRange = NSMakeRange(text.length, 0);   // 光标落到末尾，接着改口令就行
             }
