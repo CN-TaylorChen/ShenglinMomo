@@ -263,7 +263,10 @@ static id SLMetaRowViewIn(UIView *v, NSInteger depth) {
     __block NSInteger bestScore = -1;
     __block CGFloat bestY = CGFLOAT_MAX;
 
-    __block void (^scan)(UIView *, NSInteger);
+    // 递归 block 会捕获自己 → -Warc-retain-cycles 直接挂（本项目 -Werror）。
+    // 标准的破环写法：另存一个 __weak 引用，块里只捕获那个弱引用。
+    __block void (^scan)(UIView *, NSInteger) = nil;
+    __block __weak void (^weakScan)(UIView *, NSInteger) = nil;
     scan = ^(UIView *root, NSInteger d) {
         if (!root || d <= 0) return;
         if (SLCRIsLabelLike(root)) {
@@ -287,8 +290,9 @@ static id SLMetaRowViewIn(UIView *v, NSInteger depth) {
                 }
             }
         }
-        for (UIView *s in root.subviews) scan(s, d - 1);
+        for (UIView *s in root.subviews) weakScan(s, d - 1);
     };
+    weakScan = scan;
     scan(v, depth);
     return best;
 }
@@ -2967,7 +2971,8 @@ void SLRecallApplyCell(UITableViewCell *cell) {
 // 各 VC 的消息数组属性名不一，先试一批常见 key，命中后缓存，没命中就退化为不撑高。
 NSString *SLCRMsgidAtIndexPath(UITableView *tv, NSIndexPath *ip) {
     if (!tv || !ip) return nil;
-    id ds = tv.dataSource ?: tv.delegate;
+    id ds = (id)tv.dataSource;
+    if (!ds) ds = (id)tv.delegate;
     if (!ds) return nil;
     static NSArray *keys = nil;
     static NSString *foundKey = nil;
