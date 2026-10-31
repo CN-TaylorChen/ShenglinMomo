@@ -49,6 +49,8 @@ static NSString *const kSLRealShotDistKey = @"SLRealShotDistance";
 static NSString *const kSLRecallGuardKey  = @"SLRecallGuard";
 /// 被我们拦下来的撤回：msgid → 原文（持久，重进仍在）
 static NSString *const kSLRecallBlockedKey = @"SLRecallBlocked";
+/// 隐藏拦截标记开关
+static NSString *const kSLRecallHideKey   = @"SLRecallHide";
 static NSInteger gSLRealShotLog = 0;
 
 static NSString *SLTrimmed(NSString *s) {
@@ -232,22 +234,63 @@ void SLMetaSave(NSString *msgid, NSString *time, NSString *dist, NSString *date)
 }
 
 // 形态判据：短串、含 km、无换行 —— 就是那行「时间 距离」。
+// 时间 / 距离那行的文字签名：不强制含 "km"（没开定位、或文字还没就位时都没有），
+// 只要像「时间 + 距离」就认：含 km/米距离、含冒号的时间、含「前」的相对时间、
+// 「刚刚」、或形如 10-28 的日期数字。
 static BOOL SLMetaRowLooksLike(NSString *s) {
-    if (![s isKindOfClass:[NSString class]]) return NO;
-    if (s.length < 6 || s.length > 44) return NO;
+    if (![s isKindOfClass:[NSString class]] || s.length < 2) return NO;
+    if (s.length > 60) return NO;
     if ([s rangeOfString:@"\n"].location != NSNotFound) return NO;
-    return [s rangeOfString:@"km" options:NSCaseInsensitiveSearch].location != NSNotFound;
+    if ([s rangeOfString:@"km" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    if ([s rangeOfString:@"米"].location != NSNotFound) return YES;
+    if ([s rangeOfString:@":"].location != NSNotFound) return YES;
+    if ([s rangeOfString:@"前"].location != NSNotFound) return YES;
+    if ([s isEqualToString:@"刚刚"]) return YES;
+    if ([s rangeOfString:@"-"].location != NSNotFound &&
+        [s rangeOfCharacterFromSet:[NSCharacterSet decimalDigitCharacterSet]].location != NSNotFound) return YES;
+    return NO;
 }
 
-// 在一格 cell 里找「形态像时间行」的那个可写标签（UILabel / MDMixLabel 都算）
+// 在一格 cell 里找「时间 + 距离」那行。
+// 判据（按优先级）：
+//   1. 文字签名命中（含 km / 米 / : / 前 / 刚刚 / 「-」+数字）—— 最可靠；
+//   2. 文字还没就位时，用「层级更深 + 更靠上 + 尺寸像」兜底：
+//      时间行嵌在气泡 replay 视图里（tree 实测深度 5），而昵称是 contentView 的直接子视图
+//      （深度 1）—— 单看 100x14 的尺寸会把昵称误判成时间行，所以必须比深度。
 static id SLMetaRowViewIn(UIView *v, NSInteger depth) {
     if (!v || depth <= 0) return nil;
-    if (SLCRIsLabelLike(v) && SLMetaRowLooksLike(SLCRShownTextOf(v))) return v;
-    for (UIView *sub in v.subviews) {
-        id r = SLMetaRowViewIn(sub, depth - 1);
-        if (r) return r;
-    }
-    return nil;
+    __block id best = nil;
+    __block NSInteger bestScore = -1;
+    __block CGFloat bestY = CGFLOAT_MAX;
+
+    __block void (^scan)(UIView *, NSInteger);
+    scan = ^(UIView *root, NSInteger d) {
+        if (!root || d <= 0) return;
+        if (SLCRIsLabelLike(root)) {
+            CGRect af = [root convertRect:root.bounds toView:v];
+            CGFloat h = CGRectGetHeight(af);
+            CGFloat w = CGRectGetWidth(af);
+            if (h >= 10.0 && h <= 24.0 && w >= 28.0 && w <= 260.0) {
+                BOOL sig = SLMetaRowLooksLike(SLCRShownTextOf(root));
+                NSInteger nest = (depth - d);            // 越深越大
+                // 第三个信号：时间行是整条水平居中的，气泡文字不是。
+                // 短气泡（「好的」）尺寸也落在 10~24 / 28~260 里，靠这个把它排掉。
+                CGFloat cellW = CGRectGetWidth(v.bounds);
+                BOOL centered = (cellW > 0 &&
+                                 fabs(CGRectGetMidX(af) - cellW / 2.0) < 40.0);
+                NSInteger score = sig ? (1000 + nest) : (nest + (centered ? 50 : 0));
+                CGFloat top = CGRectGetMinY(af);
+                if (score > bestScore || (score == bestScore && top < bestY - 1.0)) {
+                    bestScore = score;
+                    bestY = top;
+                    best = root;
+                }
+            }
+        }
+        for (UIView *s in root.subviews) scan(s, d - 1);
+    };
+    scan(v, depth);
+    return best;
 }
 
 // v0.5.11：全局替换已废弃。这个符号还留着是因为 Tweak.x 的 `UILabel setText:`
@@ -366,19 +409,26 @@ void SLRecallGuardSetEnabled(BOOL on) {
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kSLRecallGuardKey];
 }
 
+// 隐藏拦截标记：开启后撤回行渲染成普通「对方撤回了一条消息」，不露「已拦截」、不露原文，
+// 截图不会暴露拦截行为；关闭时显示甲样式卡片 + 原文（数据仍持久保存）。
+BOOL SLRecallHidden(void) {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:kSLRecallHideKey];
+}
+void SLRecallSetHidden(BOOL on) {
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kSLRecallHideKey];
+}
+
 static NSMutableDictionary *gSLRecallCache = nil;     // 内存：msgid → 最近一次正常正文
 static NSMutableDictionary *gSLRecallBlocked = nil;    // 持久：msgid → 原文（被拦的撤回）
 static NSInteger gSLRecallLog = 0;
 static NSString *SLCRPreview(NSString *s, NSUInteger max);
 
 // 前向声明（这些 static 定义在文件更后面）
-static void SLRecallAttachBadge(UITableViewCell *cell);
 static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl,
                                       NSMutableString *inv, NSInteger *seen);
 static NSInteger SLCRPatchLayers(CALayer *layer, NSString *orig, NSString *repl,
                                  NSMutableString *inv, NSInteger depth);
-static BOOL SLCRReplaceLabelContaining(UIView *root, NSString *substr, NSString *repl,
-                                      NSInteger depth);
+static void SLCRClearHighlightDeep(UIView *root);
 
 static void SLRecallLoadBlocked(void) {
     gSLRecallBlocked = [NSMutableDictionary dictionary];
@@ -467,7 +517,9 @@ NSString *SLRecallGuardBody(NSString *mid, NSString *body) {
                 @try { SLRecallRepaintVisible(); } @catch (NSException *e) { }
             });
         }
-        return old;
+        // 甲样式：不回写原文到 getter（那会把长文塞进 7×15 小标签 → 溢出/盖字），
+        // 原文只通过卡片显示；0.3s 后刷新可见的被拦行盖卡片即可。
+        return body;
     }
     return body;
 }
@@ -1645,12 +1697,28 @@ void SLChatRewriteBeginFromBubble(UIView *view) {
     SLCROpenEditor(message, nil, SLCRHostCellClass(view), nil);
 }
 
+// 弹编辑器前先把聊天页所有可见 cell 的「按下 / 选中」态清掉。
+// 长按气泡时 Momo 会把那条刷成蓝色按下态，菜单被我们的模态盖住后它常常收不回来，
+// 于是改完字一看气泡还是蓝的。清在弹窗前，蓝就从源头没了。
+static void SLChatClearVisibleHighlights(void) {
+    UIViewController *chat = SLCRChatVC(SLCRTopVC());
+    UITableView *t = chat ? SLCRChatTable(chat.view) : nil;
+    if (!t) t = SLCRChatTableAnywhere();
+    if (!t) return;
+    for (UITableViewCell *c in t.visibleCells) {
+        @try { [c setHighlighted:NO animated:NO]; } @catch (NSException *e) { }
+        @try { [c setSelected:NO animated:NO]; } @catch (NSException *e) { }
+        SLCRClearHighlightDeep(c);
+    }
+}
+
 void SLChatRewriteBeginFromMenu(UIView *menuView) {
     if (!menuView) return;
     if (!SLChatRewriteEnabled()) {
         SLLog(@"REWRITE 未开启，忽略菜单入口");
         return;
     }
+    SLChatClearVisibleHighlights();
 
     // 气泡不在菜单的视图链上（菜单是挂在根 VC 上的浮层），
     // 只能靠菜单自己记下的锚点：targetView + targetViewFrame / targetViewCenter。
@@ -1731,6 +1799,7 @@ void SLChatMetaBeginFromMenu(UIView *menuView) {
         SLLog(@"META 未开启，忽略菜单入口");
         return;
     }
+    SLChatClearVisibleHighlights();
 
     UIView *tv = nil;
     CGRect tvFrame = CGRectNull;
@@ -1840,6 +1909,7 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
         SLLog(@"META 未开启，忽略长按入口");
         return;
     }
+    SLChatClearVisibleHighlights();
     NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
     if (!mid.length) {
         SLLog(@"META 长按时间行：拿不到 msgid，放弃");
@@ -1898,10 +1968,18 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
 // 用户要的就是「长按时间那行本身」，而不是长按气泡再从菜单选。
 // 注意：label 是 cell 复用时重用的，手势只挂一次（按 label 实例记），
 // 它永远作用在当前所在的 cell 上 —— 这正是我们想要的「长按哪条改哪条」。
-@interface SLMetaTimeLPRelay : NSObject
+//
+// 为什么要当 delegate：Momo 自己的 cell 上挂着上下文菜单长按（`_setupMenuGesture`），
+// 默认两个长按互斥、谁先 Began 谁赢，实测里经常是它赢 → 我们的编辑器根本不弹。
+// 返回 YES 允许「同时识别」，我们这条就一定能收到 Began；随后把 Momo 的菜单收掉。
+@interface SLMetaTimeLPRelay : NSObject <UIGestureRecognizerDelegate>
 - (void)sl_handle:(UIGestureRecognizer *)g;
 @end
 @implementation SLMetaTimeLPRelay
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g
+    shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
+}
 - (void)sl_handle:(UIGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
     UIView *v = g.view;
@@ -1909,7 +1987,29 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
     for (UIView *p = v; p; p = p.superview) {
         if ([p isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)p; break; }
     }
-    if (cell) SLChatMetaBeginFromCell(cell);
+    if (!cell) return;
+    // 顺手把 Momo 弹出的上下文菜单收掉，免得挡在编辑器后面
+    [self sl_dismissMomoMenu];
+    SLChatMetaBeginFromCell(cell);
+}
+- (void)sl_dismissMomoMenu {
+    Class menuC = NSClassFromString(@"MDChatUIMenuView");
+    if (!menuC) return;
+    // 别用 UIApplication.windows（iOS15 起弃用，本项目 -Werror 会直接编译失败），
+    // 从当前顶层 VC 的 window 往上找就够。
+    UIWindow *win = SLCRTopVC().view.window ?: SLCRChatTableAnywhere().window;
+    if (!win) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:win];
+    NSInteger budget = 300;
+    while (q.count && budget-- > 0) {
+        UIView *x = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if ([x isKindOfClass:menuC]) {
+            [x removeFromSuperview];
+            return;
+        }
+        for (UIView *s in x.subviews) [q addObject:s];
+    }
 }
 @end
 static SLMetaTimeLPRelay *gSLMetaLPRelay = nil;
@@ -1925,11 +2025,13 @@ void SLChatMetaAttachTimeLongPress(UITableViewCell *cell) {
     UILongPressGestureRecognizer *lp =
         [[UILongPressGestureRecognizer alloc] initWithTarget:gSLMetaLPRelay
                                                      action:@selector(sl_handle:)];
-    lp.minimumPressDuration = 0.5;
+    lp.minimumPressDuration = 0.45;
     lp.cancelsTouchesInView = NO;     // 别吞掉 Momo 自己的触摸
+    lp.delegate = gSLMetaLPRelay;     // 允许与 Momo 的菜单长按同时识别（否则会被抢）
     [(UIView *)lab addGestureRecognizer:lp];
     ((UIView *)lab).userInteractionEnabled = YES;
-    SLLog(@"META 给时间行挂长按手势 cell=%@", NSStringFromClass([cell class]));
+    SLLog(@"META 给时间行挂长按手势 cell=%@ label=%@", NSStringFromClass([cell class]),
+          NSStringFromClass([lab class]));
 }
 
 #pragma mark - 渲染层补丁
@@ -2307,6 +2409,35 @@ static NSArray *SLCRSnapshotBackgrounds(UIView *root) {
     return out;
 }
 
+// 把整棵子树的高亮态清干净：cell 的 highlighted / selected，以及内部控件、图片的
+// highlighted。长按弹菜单那一刻 Momo 会把气泡刷成「按下」配色（蓝），若此时直接
+// 快照，快照到的就是蓝色 —— 之后「还原」反而把蓝还回去，这就是「改完字一直蓝」的根。
+static void SLCRClearHighlightDeep(UIView *root) {
+    if (!root) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 500;
+    while (q.count && budget-- > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UIControl class]]) {
+            @try { ((UIControl *)v).highlighted = NO; } @catch (NSException *e) { }
+            @try { ((UIControl *)v).selected = NO; } @catch (NSException *e) { }
+        }
+        if ([v isKindOfClass:[UIImageView class]]) {
+            @try { ((UIImageView *)v).highlighted = NO; } @catch (NSException *e) { }
+        }
+        for (UIView *s in v.subviews) [q addObject:s];
+    }
+}
+
+// 是不是「被选中/按下」那种蓝：蓝通道明显压过红绿
+static BOOL SLCRColorIsBlueish(UIColor *c) {
+    if (![c isKindOfClass:[UIColor class]]) return NO;
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (![c getRed:&r green:&g blue:&b alpha:&a]) return NO;
+    return (b > 0.55 && b - r > 0.12 && b - g > 0.06);
+}
+
 static NSInteger SLCRRestoreBackgrounds(UIView *root, NSArray *snap) {
     if (!root || !snap.count) return 0;
     NSMutableArray *q = [NSMutableArray arrayWithObject:root];
@@ -2320,6 +2451,8 @@ static NSInteger SLCRRestoreBackgrounds(UIView *root, NSArray *snap) {
             NSArray *pair = (NSArray *)item;
             if (pair.count >= 2 && [pair[0] isKindOfClass:[NSString class]]) {
                 UIColor *want = pair[1];
+                // 快照本身可能就是蓝的（长按按下态）→ 别把蓝还回去，一律刷白
+                if (SLCRColorIsBlueish(want)) want = [UIColor whiteColor];
                 if ([NSStringFromClass([v class]) isEqualToString:pair[0]] &&
                     v.backgroundColor != want) {
                     v.backgroundColor = want;
@@ -2340,13 +2473,18 @@ static NSInteger SLCRRestoreBackgrounds(UIView *root, NSArray *snap) {
 // 现在按优先级调真正的绑数据入口；签名必须是「一个对象参数、返回 void」。
 static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
     if (!cell) return @"-";
-    NSArray *bgSnap = SLCRSnapshotBackgrounds(cell);
     // 关键：重绑（bindWithItem:）会让 cell 走一遍「高亮 / 选中」的配色流程，
     // 对方那条白气泡就被刷成蓝色。所以 bind 之前先把选中 / 高亮态清掉，
     // 让重绑按「正常态」画 —— 这步放在 bind 之前才是关键（之前放在之后没用，
     // 因为 bind 那一刻已经把蓝色画进异步 layer 了）。
     @try { [cell setHighlighted:NO animated:NO]; } @catch (NSException *e) { }
     @try { [cell setSelected:NO animated:NO]; } @catch (NSException *e) { }
+    SLCRClearHighlightDeep(cell);
+    // v0.5.14：快照必须在「清完高亮之后」拍。之前是进函数第一件事就拍，
+    // 而那一刻 cell 还是长按按下态（蓝）→ 快照存的是蓝 → 还原等于把蓝还回去。
+    [cell setNeedsLayout];
+    [cell layoutIfNeeded];
+    NSArray *bgSnap = SLCRSnapshotBackgrounds(cell);
     // 先扔旧排版产物：不扔的话 bindWithItem: 会原样复用，改多少遍屏幕都不动
     SLCRDropLayoutCache(dataItem, cell);
     NSMutableArray *tried = [NSMutableArray array];
@@ -2389,10 +2527,14 @@ static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
     // 重绑把长按时的「高亮 / 选中」状态留在了 cell 上，先按正常态收回来
     @try { [cell setHighlighted:NO animated:NO]; } @catch (NSException *e) { }
     @try { [cell setSelected:NO animated:NO]; } @catch (NSException *e) { }
+    SLCRClearHighlightDeep(cell);
     NSInteger fixed = SLCRRestoreBackgrounds(cell, bgSnap);
     if (fixed > 0) {
         SLLog(@"REWRITE 重绑后底色还原 %ld 处（白↔蓝）", (long)fixed);
     }
+    // 异步 layer 会把「按下态」的位图缓存住，光改 UIView 底色不一定刷新；
+    // 让它重画一次，白底才真正落到屏幕上。
+    [cell.layer setNeedsDisplay];
     return tried.count ? [tried componentsJoinedByString:@","] : @"-";
 }
 
@@ -2625,154 +2767,235 @@ void SLChatRewriteHandleLeave(UIViewController *vc) {
 //   2. 在画回来的气泡上贴一枚「已拦截」小标，让人一眼看出这条是被我们拦下的。
 // 系统原来那行「对方撤回了一条消息」不动，就留在上面。
 static NSInteger gSLRecallRepaintLog = 0;
-static const NSInteger kSLRecallBadgeTag = 0x5EC1;
+static const NSInteger kSLRecallCardTag = 0x5EC2;
 
-static UIView *SLCRBubbleViewIn(UIView *root) {
-    UIView *best = nil;
-    CGFloat bestArea = 0;
-    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
-    NSInteger budget = 400;
-    while (q.count && budget-- > 0) {
-        UIView *v = q.firstObject;
-        [q removeObjectAtIndex:0];
-        if (v != root && ![v isKindOfClass:[UILabel class]]) {
-            CGFloat area = v.frame.size.width * v.frame.size.height;
-            if (v.layer.cornerRadius >= 6.0 && area > bestArea && area > 600.0) {
-                best = v;
-                bestArea = area;
-            }
-        }
-        for (UIView *s in v.subviews) [q addObject:s];
-    }
-    return best;
+// 被拦的撤回在陌陌里是系统消息 cell（MDSChatsystemProCell 之类），不是气泡。
+// 甲样式：在这类 cell 上盖一张居中浅灰卡片，红色「已拦截」小徽章（不压字）+ 浅灰
+// 「对方撤回」+ 深灰原文（自动换行、行高自适应）。不再事后重绑气泡 → 顺手灭掉蓝色死循环。
+static BOOL SLRecallIsSystemCell(UITableViewCell *cell) {
+    NSString *cls = NSStringFromClass([cell class]);
+    return ([cls rangeOfString:@"system" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [cls rangeOfString:@"recall" options:NSCaseInsensitiveSearch].location != NSNotFound);
 }
 
-static void SLRecallAttachBadge(UITableViewCell *cell) {
+// 隐藏系统撤回行原本的内容（那颗「X 撤回了一条消息」灰色胶囊）。
+// 实测它的结构是 contentView → UIView(29x24 胶囊底) → MDMixLabel(7x15)，
+// 标签是**嵌套**的，所以不能只看直接子视图；整块内容都得让位给我们的卡片。
+static const void *kSLRecallHidKey = &kSLRecallHidKey;
+
+static void SLRecallHideSystemContent(UITableViewCell *cell) {
     if (!cell) return;
-    if ([cell.contentView viewWithTag:kSLRecallBadgeTag]) return;
-    UIView *bubble = SLCRBubbleViewIn(cell.contentView);
-    if (!bubble) return;
-    UILabel *badge = [[UILabel alloc] initWithFrame:CGRectZero];
-    badge.tag = kSLRecallBadgeTag;
-    badge.text = @"已拦截";
-    badge.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
-    badge.textColor = [UIColor whiteColor];
-    badge.textAlignment = NSTextAlignmentCenter;
-    badge.backgroundColor = [UIColor colorWithRed:1.0 green:0.29 blue:0.25 alpha:1.0];
-    badge.layer.cornerRadius = 7.0;
-    badge.layer.masksToBounds = YES;
-    CGSize ts = [badge.text sizeWithAttributes:@{NSFontAttributeName: badge.font}];
-    CGRect bf = [bubble convertRect:bubble.bounds toView:cell.contentView];
-    CGFloat h = 14.0;
-    CGFloat w = ts.width + 12.0;
-    CGFloat x = bf.origin.x + 3.0;
-    CGFloat y = bf.origin.y - h - 2.0;
-    if (y < 1.0) y = bf.origin.y + 4.0;          // 顶到 cell 上沿就贴在内侧
-    CGFloat maxX = cell.contentView.bounds.size.width - w - 2.0;
-    if (x > maxX) x = maxX;
-    if (x < 2.0) x = 2.0;
-    badge.frame = CGRectMake(x, y, w, h);
-    [cell.contentView addSubview:badge];
+    NSMutableArray *hid = objc_getAssociatedObject(cell, kSLRecallHidKey);
+    if (![hid isKindOfClass:[NSMutableArray class]]) {
+        hid = [NSMutableArray array];
+        objc_setAssociatedObject(cell, kSLRecallHidKey, hid, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    for (UIView *sub in cell.contentView.subviews) {
+        if (sub.tag == kSLRecallCardTag) continue;
+        if (sub.isHidden) continue;
+        sub.hidden = YES;
+        [hid addObject:sub];
+    }
 }
 
+static void SLRecallShowSystemContent(UITableViewCell *cell) {
+    if (!cell) return;
+    NSMutableArray *hid = objc_getAssociatedObject(cell, kSLRecallHidKey);
+    if (![hid isKindOfClass:[NSMutableArray class]] || !hid.count) return;
+    for (UIView *v in hid) {
+        if (v.superview == cell.contentView) v.hidden = NO;
+    }
+    [hid removeAllObjects];
+}
+
+// 建 / 更新甲卡片。卡片高度按原文估算，行高不够时顶对齐（高度 hook 生效后居中显示更多）。
+static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
+    if (!cell || ![orig isKindOfClass:[NSString class]] || !orig.length) return;
+    UIView *card = [cell.contentView viewWithTag:kSLRecallCardTag];
+    if (!card) {
+        card = [[UIView alloc] initWithFrame:CGRectZero];
+        card.tag = kSLRecallCardTag;
+        card.layer.cornerRadius = 14.0;
+        card.backgroundColor = [UIColor colorWithRed:0.988 green:0.922 blue:0.922 alpha:1.0];
+        card.layer.borderWidth = 0.5;
+        card.layer.borderColor = [[UIColor colorWithRed:0.941 green:0.600 blue:0.478 alpha:1.0] CGColor];
+        card.clipsToBounds = YES;
+
+        UILabel *badge = [[UILabel alloc] init];
+        badge.tag = 11;
+        badge.text = @"已拦截";
+        badge.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+        badge.textColor = [UIColor whiteColor];
+        badge.textAlignment = NSTextAlignmentCenter;
+        badge.backgroundColor = [UIColor colorWithRed:0.886 green:0.290 blue:0.290 alpha:1.0];
+        badge.layer.cornerRadius = 10.0;
+        badge.layer.masksToBounds = YES;
+        [card addSubview:badge];
+
+        UILabel *pre = [[UILabel alloc] init];
+        pre.tag = 12;
+        pre.text = @"对方撤回";
+        pre.font = [UIFont systemFontOfSize:12];
+        pre.textColor = [UIColor colorWithRed:0.706 green:0.698 blue:0.663 alpha:1.0];
+        [card addSubview:pre];
+
+        UILabel *body = [[UILabel alloc] init];
+        body.tag = 13;
+        body.font = [UIFont systemFontOfSize:13];
+        body.textColor = [UIColor colorWithRed:0.173 green:0.173 blue:0.165 alpha:1.0];
+        body.numberOfLines = 0;
+        body.lineBreakMode = NSLineBreakByWordWrapping;
+        [card addSubview:body];
+
+        [cell.contentView addSubview:card];
+    }
+    UILabel *badge = [card viewWithTag:11];
+    UILabel *pre   = [card viewWithTag:12];
+    UILabel *body  = [card viewWithTag:13];
+    body.text = orig;
+
+    CGFloat cw = CGRectGetWidth(cell.contentView.bounds) - 32.0;
+    if (cw < 120.0) cw = 120.0;
+    CGFloat pad = 12.0;
+    CGFloat badgeH = 20.0;
+
+    CGSize badgeSz = [badge.text sizeWithAttributes:@{NSFontAttributeName: badge.font}];
+    CGFloat badgeW = badgeSz.width + 16.0;
+    badge.frame = CGRectMake(pad, pad, badgeW, badgeH);
+    pre.frame = CGRectMake(pad + badgeW + 8.0, pad + 1.0, cw - badgeW - 8.0 - pad, badgeH);
+
+    CGFloat bodyW = cw - pad * 2.0;
+    CGRect bodyRect = [body.text boundingRectWithSize:CGSizeMake(bodyW, CGFLOAT_MAX)
+                                              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                           attributes:@{NSFontAttributeName: body.font}
+                                              context:nil];
+    CGFloat bodyH = (CGFloat)ceil(bodyRect.size.height);
+    CGFloat bodyY = pad + badgeH + 8.0;
+    CGFloat cardH = bodyY + bodyH + pad;
+    CGFloat cardW = cw;
+    CGFloat cellH = CGRectGetHeight(cell.contentView.bounds);
+    // 兜底：行高 hook 没生效（取不到数据源）时，卡片绝不能超出这一行去压住下一条。
+    // 宁可把原文裁掉，也不要叠字 —— 裁掉的只是极端长文，且还有「隐藏拦截标记」开关。
+    if (cellH > 24.0 && cardH > cellH - 8.0) {
+        cardH = cellH - 8.0;
+        bodyH = cardH - bodyY - pad;
+        if (bodyH < 12.0) bodyH = 12.0;
+    }
+    body.frame = CGRectMake(pad, bodyY, bodyW, bodyH);
+
+    CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 4.0;
+    if (cardY < 0) cardY = 0;
+    card.frame = CGRectMake(16.0, cardY, cardW, cardH);
+}
+
+// 估算甲卡片高度（供行高 hook 使用）
+CGFloat SLRecallCardHeight(NSString *orig, CGFloat tableWidth) {
+    if (![orig isKindOfClass:[NSString class]] || !orig.length) return 44.0;
+    CGFloat cw = tableWidth - 32.0;
+    if (cw < 120.0) cw = 120.0;
+    CGFloat pad = 12.0, badgeH = 20.0;
+    CGFloat bodyW = cw - pad * 2.0;
+    UIFont *f = [UIFont systemFontOfSize:13];
+    CGRect r = [orig boundingRectWithSize:CGSizeMake(bodyW, CGFLOAT_MAX)
+                                  options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                               attributes:@{NSFontAttributeName:f} context:nil];
+    CGFloat bodyH = (CGFloat)ceil(r.size.height);
+    return pad + badgeH + 8.0 + bodyH + pad + 4.0;
+}
+
+// 刷新可见的被拦撤回行（无重绑：直接按卡片渲染，杜绝 bindWithItem 触发的蓝色死循环）
 void SLRecallRepaintVisible(void) {
     if (!SLRecallGuardEnabled()) return;
     if (!gSLRecallBlocked) SLRecallLoadBlocked();
     if (!gSLRecallBlocked.count) return;
     UIViewController *chat = SLCRChatVC(SLCRTopVC());
     UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
-    if (!tv) {
-        SLLog(@"RECALL-REPAINT 没找到聊天列表");
-        return;
-    }
-    // 复用会串：先把上一次贴的标全摘掉（包括已经复用到别的消息上的 cell）
-    for (UITableViewCell *c in tv.visibleCells) {
-        UIView *old = [c.contentView viewWithTag:kSLRecallBadgeTag];
-        if (old) [old removeFromSuperview];
-    }
+    if (!tv) { SLLog(@"RECALL-REPAINT 没找到聊天列表"); return; }
     NSInteger n = 0;
     for (UITableViewCell *cell in tv.visibleCells) {
-        id m = SLCRMessageOf(cell);
-        NSString *mid = SLCRMsgidOf(m);
-        if (!mid.length || !SLRecallIsBlocked(mid)) continue;     // 只动被拦的那条
-        NSString *orig = SLRecallBlockedOriginal(mid);
-        if (![orig isKindOfClass:[NSString class]] || !orig.length) continue;
-        NSString *shown = SLCRTextAnywhere(cell, 6);
-        NSString *trimmed = [shown stringByTrimmingCharactersInSet:
-                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        BOOL same = (trimmed.length && [trimmed isEqualToString:orig]);
-        if (!same) {
-            // 可见的是撤回提示 / 旧内容 → 重绑（模型里已经是原文）让 cell 按干净态重画，
-            // 再把含「撤回」的提示标签整段换成原文（只动这一处，不碰昵称 / 时间）。
-            id dataItem = nil;
-            @try { dataItem = [cell valueForKey:@"dataItem"]; } @catch (NSException *e) { }
-            gSLCRPatchBudget = 500;
-            NSString *how = SLCRTryRebindCell(cell, dataItem);
-            [cell setNeedsLayout];
-            [cell layoutIfNeeded];
-            BOOL patched = SLCRReplaceLabelContaining(cell, @"撤回", orig, 6);
-            if (!patched && gSLRecallRepaintLog < 6) {
-                // 没补到：把撤回 cell 的结构打出来，下一步才能精准落字
-                gSLRecallRepaintLog += 1;
-                SLLog(@"RECALL-PROBE 没补到原文 cell=%@ shown=[%@] 已拦",
-                      NSStringFromClass([cell class]), SLCRPreview(trimmed, 24));
-                SLCRDumpViewTreeOnce(cell, @"recall");
-                SLCRDumpLayerTreeOnce(cell, @"recall");
-            }
-            if (gSLRecallRepaintLog < 10) {
-                gSLRecallRepaintLog += 1;
-                SLLog(@"RECALL-REPAINT %@ 重绑=%@ 补到=%d 前=[%@] 后=[%@]", mid, how, (int)patched,
-                      SLCRPreview(trimmed, 12), SLCRPreview(SLCRTextAnywhere(cell, 4), 12));
-            }
-            n += 1;
-        }
-        SLRecallAttachBadge(cell);     // 贴「已拦截」（只贴被拦的这条）
+        @try {
+            NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
+            if (mid.length && SLRecallIsBlocked(mid)) { SLRecallApplyCell(cell); n += 1; }
+        } @catch (NSException *e) {}
     }
-    if (n && gSLRecallRepaintLog < 14) {
+    if (n && gSLRecallRepaintLog < 24) {
         gSLRecallRepaintLog += 1;
-        SLLog(@"RECALL-REPAINT 共重绘 %ld 条（仅被拦的）", (long)n);
+        SLLog(@"RECALL-REPAINT 共刷新 %ld 条（仅被拦的，无重绑）", (long)n);
+    }
+    // 卡片比原来那行高：让 table 重算一次行高（不 reloadData，不重绑，不会闪蓝）
+    static BOOL inUpdate = NO;
+    if (n && !inUpdate) {
+        inUpdate = YES;
+        @try { [tv beginUpdates]; [tv endUpdates]; } @catch (NSException *e) { }
+        inUpdate = NO;
     }
 }
 
-// 把 cell 里「文字含 substr 的那一个标签」整段换成 repl。
-// 只动含 substr 的标签，绝不碰昵称 / 时间等其它标签（这是 v0.5.12 之前误改的根因）。
-static BOOL SLCRReplaceLabelContaining(UIView *root, NSString *substr, NSString *repl, NSInteger depth) {
-    if (!root || depth <= 0 || !substr.length) return NO;
-    if (SLCRIsLabelLike(root)) {
-        NSString *t = SLCRShownTextOf(root);
-        if (t.length && [t containsString:substr]) {
-            return SLCRSetShownText(root, repl);
-        }
-    }
-    for (UIView *s in root.subviews) {
-        if (SLCRReplaceLabelContaining(s, substr, repl, depth - 1)) return YES;
-    }
-    return NO;
-}
-
-// 单格渲染层拦截：被拦的那条把可见的「撤回提示」换成原文 + 贴「已拦截」。
+// 单格渲染层拦截：被拦的那条盖甲卡片 + 隐藏原小标签；非拦截（含被复用）清卡片还原。
 // 只对被拦 mid 生效 —— 别的消息一律不动（解决「贴满屏」）；持久名单让重进后还在。
 void SLRecallApplyCell(UITableViewCell *cell) {
     if (!SLRecallGuardEnabled()) return;
     if (!cell) return;
     if (!gSLRecallBlocked) SLRecallLoadBlocked();
+    UIView *oldCard = [cell.contentView viewWithTag:kSLRecallCardTag];
     NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
     BOOL blocked = (mid.length && SLRecallIsBlocked(mid));
     if (!blocked) {
-        // 这个 cell 被非拦截消息复用了：清掉上一轮可能残留的「已拦截」标
-        UIView *old = [cell.contentView viewWithTag:kSLRecallBadgeTag];
-        if (old) [old removeFromSuperview];
+        if (oldCard) [oldCard removeFromSuperview];
+        SLRecallShowSystemContent(cell);
         return;
     }
     NSString *orig = SLRecallBlockedOriginal(mid);
     if (![orig isKindOfClass:[NSString class]] || !orig.length) return;
-    BOOL patched = SLCRReplaceLabelContaining(cell, @"撤回", orig, 6);
-    if (!patched && gSLRecallRepaintLog < 8) {
-        gSLRecallRepaintLog += 1;
-        SLLog(@"RECALL-APPLY 单格 %@ 没找到含撤回的标签（已是原文 / 结构待查）shown=[%@]",
-              mid, SLCRPreview(SLCRTextAnywhere(cell, 6), 24));
+    if (SLRecallHidden()) {
+        // 隐藏模式：恢复普通撤回外观，不露「已拦截」、不露原文（截图不外泄）
+        if (oldCard) [oldCard removeFromSuperview];
+        SLRecallShowSystemContent(cell);
+        return;
     }
-    SLRecallAttachBadge(cell);
+    if (SLRecallIsSystemCell(cell)) {
+        SLRecallHideSystemContent(cell);
+        SLRecallBuildCard(cell, orig);
+    }
+    if (gSLRecallRepaintLog < 30) {
+        gSLRecallRepaintLog += 1;
+        SLLog(@"RECALL-APPLY 卡片 %@ 原文=[%@] 隐藏=%d", mid, SLCRPreview(orig, 16), (int)SLRecallHidden());
+    }
+}
+
+// 由 indexPath 取到对应消息的 msgid（供行高 hook 判断这条是不是被拦的撤回）。
+// 各 VC 的消息数组属性名不一，先试一批常见 key，命中后缓存，没命中就退化为不撑高。
+NSString *SLCRMsgidAtIndexPath(UITableView *tv, NSIndexPath *ip) {
+    if (!tv || !ip) return nil;
+    id ds = tv.dataSource ?: tv.delegate;
+    if (!ds) return nil;
+    static NSArray *keys = nil;
+    static NSString *foundKey = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keys = @[@"chatMessages", @"messages", @"dataArray", @"messageList",
+                 @"msgList", @"items", @"msgModels", @"modelList", @"dataSourceArray"];
+    });
+    NSArray *arr = nil;
+    if (foundKey) {
+        @try { id a = [ds valueForKey:foundKey]; if ([a isKindOfClass:[NSArray class]]) arr = a; } @catch (NSException *e) {}
+    }
+    if (!arr) {
+        for (NSString *k in keys) {
+            @try {
+                id a = [ds valueForKey:k];
+                if ([a isKindOfClass:[NSArray class]] && [a count] > (NSUInteger)ip.row) {
+                    arr = a; foundKey = k;
+                    SLLog(@"RECALL-HEIGHT 命中数据源 key=%@", k);
+                    break;
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+    if (!arr) return nil;
+    id m = nil;
+    @try { m = arr[ip.row]; } @catch (NSException *e) {}
+    return SLCRMsgidOf(m);
 }
 
 #pragma mark - 已修改列表

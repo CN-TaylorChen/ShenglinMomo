@@ -68,7 +68,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.5.13"
+#define SLVersion @"0.5.14"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -111,6 +111,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 - (void)sl_chatRewriteChanged:(UISwitch *)sw;
 - (void)sl_chatRewriteResetChanged:(UISwitch *)sw;
 - (void)sl_recallGuardChanged:(UISwitch *)sw;
+- (void)sl_recallHideChanged:(UISwitch *)sw;
 - (void)sl_applyVirtualLoc:(BOOL)on;
 - (void)sl_pickLocation;
 - (void)sl_clearLocation;
@@ -226,7 +227,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
     if (section == 5) return 1;   // 运行日志（v0.4.54 去掉「动画预览」入口）
-    if (section == 6) return 4;   // 聊天记录：开关 + 离开重置 + 防撤回 + 已修改 N 条
+    if (section == 6) return 5;   // 聊天记录：开关 + 离开重置 + 防撤回 + 隐藏拦截标记 + 已修改 N 条
     return 1;
 }
 
@@ -469,6 +470,17 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
             return cell;
         }
+        if (ip.row == 3) {
+            cell.textLabel.text = @"隐藏拦截标记";
+            cell.detailTextLabel.text = @"开启后撤回行变普通「对方撤回」，截图不外泄";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLRecallHidden();
+            [sw addTarget:self action:@selector(sl_recallHideChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
         cell.textLabel.text = @"已修改的消息";
         NSInteger rwN = SLChatRewriteCount();
         cell.detailTextLabel.text = rwN > 0 ? [NSString stringWithFormat:@"%ld 条", (long)rwN] : @"暂无";
@@ -538,7 +550,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return;
     }
     if (ip.section == 6) {
-        if (ip.row == 3) {
+        if (ip.row == 4) {
             [self.navigationController pushViewController:[[SLChatRewriteListController alloc] init]
                                                  animated:YES];
         }
@@ -563,6 +575,12 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 - (void)sl_recallGuardChanged:(UISwitch *)sw {
     SLRecallGuardSetEnabled(sw.on);
     [self.tableView reloadData];
+}
+
+- (void)sl_recallHideChanged:(UISwitch *)sw {
+    SLRecallSetHidden(sw.on);
+    [self.tableView reloadData];
+    SLChatRewriteReloadChat();
 }
 
 - (void)sl_auditionChanged:(UISwitch *)sw {

@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.13"
+#define SLVersion @"0.5.14"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -3180,13 +3180,14 @@ static void SLChatWillDisplayCellHook(id self, SEL _cmd, UITableView *tv,
     // 时间行长按手势：每次显示都确保挂着（cell 复用会换 label，但按 label 实例去重）。
     // 必须放在 orig 之后 —— 这时时间行 UILabel 才拿到它的真实文本、能被形态识别认出来。
     @try { SLChatMetaAttachTimeLongPress(cell); } @catch (NSException *e) { }
+    // 被拦下来的撤回：单格盖甲卡片（只动被拦的那条，别的消息不碰）。
+    // 放在节流之前 —— 否则快速滚动时这一格会被跳过，卡片就不出现了。
+    @try { SLRecallApplyCell(cell); } @catch (NSException *e) { }
     static NSTimeInterval lastT = 0;
     NSTimeInterval nowT = [[NSDate date] timeIntervalSince1970];
     if (lastT > 0 && nowT - lastT < 0.08) return;      // 一次滚动会连发十几下，节流
     lastT = nowT;
     @try { SLChatMetaApplyTable(tv); } @catch (NSException *e) { }
-    // 被拦下来的撤回：单格把可见提示换成原文 + 贴「已拦截」（只动被拦的那条，别的消息不碰）
-    @try { SLRecallApplyCell(cell); } @catch (NSException *e) { }
 }
 
 static BOOL SLCRTypeHas(Class cls, SEL sel, const char *needle) {
@@ -3195,6 +3196,32 @@ static BOOL SLCRTypeHas(Class cls, SEL sel, const char *needle) {
     const char *t = method_getTypeEncoding(m);
     if (!t) return NO;
     return strstr(t, needle) != NULL;
+}
+
+// 撤回行高度自适应：被拦的撤回要显示甲卡片（含换行原文），得把行高撑起来。
+// 只在被拦且未隐藏时撑高；其余行走原高度。取不到数据源就退化为不撑高（卡片顶对齐、可能截尾）。
+extern BOOL SLRecallGuardEnabled(void);
+extern BOOL SLRecallHidden(void);
+extern BOOL SLRecallIsBlocked(NSString *mid);
+extern NSString *SLRecallBlockedOriginal(NSString *mid);
+extern CGFloat SLRecallCardHeight(NSString *orig, CGFloat tableWidth);
+extern NSString *SLCRMsgidAtIndexPath(UITableView *tv, NSIndexPath *ip);
+
+static CGFloat SLChatHeightHook(id self, SEL _cmd, UITableView *tv, NSIndexPath *ip) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    CGFloat (*o)(id, SEL, UITableView *, NSIndexPath *) = (void *)orig;
+    CGFloat h = o ? o(self, _cmd, tv, ip) : 44.0;
+    @try {
+        if (SLRecallGuardEnabled() && !SLRecallHidden()) {
+            NSString *mid = SLCRMsgidAtIndexPath(tv, ip);
+            if (mid.length && SLRecallIsBlocked(mid)) {
+                CGFloat want = SLRecallCardHeight(SLRecallBlockedOriginal(mid),
+                                                 CGRectGetWidth(tv.bounds));
+                if (want > h) h = want;
+            }
+        }
+    } @catch (NSException *e) {}
+    return h;
 }
 
 static void SLInstallChatRewriteHooks(void) {
@@ -3250,6 +3277,10 @@ static void SLInstallChatRewriteHooks(void) {
         if (SLRegisterMethod(c, NSSelectorFromString(@"tableView:willDisplayCell:forRowAtIndexPath:"),
                              (IMP)SLChatWillDisplayCellHook)) {
             [hits addObject:[n stringByAppendingString:@".willDisplay"]];
+        }
+        if (SLRegisterMethod(c, NSSelectorFromString(@"tableView:heightForRowAtIndexPath:"),
+                             (IMP)SLChatHeightHook)) {
+            [hits addObject:[n stringByAppendingString:@".height"]];
         }
     }
 

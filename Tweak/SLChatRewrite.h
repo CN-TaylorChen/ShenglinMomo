@@ -152,15 +152,24 @@ NSString *_Nullable SLRecallBlockedOriginal(NSString *_Nullable mid);
 /// 撤销一条拦截（同时清掉持久记录）
 void SLRecallUnblock(NSString *_Nullable mid);
 
-/// 单格渲染层拦截：被拦的那条把可见的撤回提示换成原文 + 贴「已拦截」标。
-/// 只对被拦 mid 生效，别的消息一律不动（解决「贴满屏」）。
+/// 单格渲染层拦截：被拦的那条盖一张居中浅灰卡片（红「已拦截」徽章 + 原文自动换行）。
+/// 只对被拦 mid 生效，别的消息一律不动（解决「贴满屏」）。不再重绑 → 无蓝色死循环。
 void SLRecallApplyCell(UITableViewCell *_Nullable cell);
+
+/// 隐藏拦截标记：开启后撤回行渲染成普通「对方撤回了一条消息」，不露标记/原文（截图安全）。
+BOOL SLRecallHidden(void);
+void SLRecallSetHidden(BOOL on);
+
+/// 甲卡片的高度估算（供 heightForRow 撑高被拦的撤回行）
+CGFloat SLRecallCardHeight(NSString *_Nullable orig, CGFloat tableWidth);
+
+/// 由 indexPath 反查该行消息的 msgid（行高 hook 用；取不到返回 nil）
+NSString *_Nullable SLCRMsgidAtIndexPath(UITableView *_Nullable tv, NSIndexPath *_Nullable ip);
 
 /// 撤回态整形：灰底刷白、字号提回正文，再贴一句「对方撤回了一条消息」。
 void SLRecallStyleSweep(void);
 
-/// 撤回后「把原文重新画出来」：跟改文字走同一条重绑路，刷新问题一并解决。
-/// 画完在气泡上贴一枚「已拦截」小标 —— 系统那行「对方撤回了一条消息」保留不动。
+/// 刷新可见的被拦撤回行（只按卡片重绘，不重绑）。
 void SLRecallRepaintVisible(void);
 
 @interface SLChatRewriteListController : UITableViewController
