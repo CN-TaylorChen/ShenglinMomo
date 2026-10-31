@@ -116,6 +116,103 @@ NSString *SLApplyRealShotEdits(NSString *json) {
     return out;
 }
 
+#pragma mark - 消息下方那行「时间 + 距离」
+
+// 这两个辅助函数定义在文件后半段，这里先用着，得先声明（C99 隐式声明是 error）
+static UIViewController *SLCRTopVC(void);
+static UIViewController *SLCRChatVC(UIViewController *start);
+static UITableView *SLCRChatTable(UIView *root);
+static void SLCRDumpStyleOnce(UIView *root, NSString *tag);
+
+// 聊天界面上每条消息底下那行 `1分钟前 35.95km` / `12:48 35.95km`。
+// 它不在任何 JSON 里 —— App 拿消息发送时间和当前位置的经纬度现场算出来的，
+// 所以改 body 一点用没有（v0.5.08 就是改错了地方）。
+// 唯一稳的入口是「最终显示的那串字」：整串按形态拆成「时间描述 + 数字km」，
+// 时间整段换掉、距离整段换掉，输出「新时间 新距离」。
+static NSRegularExpression *SLMetaPairRE(void) {
+    static NSRegularExpression *re = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:
+              @"^\\s*(.+?)\\s+([0-9]+(?:\\.[0-9]+)?\\s*[kK][mM])\\s*$"
+                                                       options:0 error:NULL];
+    });
+    return re;
+}
+
+static NSInteger gSLMetaLog = 0;
+
+NSString *SLApplyMetaEdits(NSString *s) {
+    if (![s isKindOfClass:[NSString class]]) return s;
+    if (s.length < 4 || s.length > 40) return s;                 // 长文本是正文，不碰
+    if ([s rangeOfString:@"\n"].location != NSNotFound) return s;
+    if ([s rangeOfString:@"km" options:NSCaseInsensitiveSearch].location == NSNotFound) return s;
+    NSString *tt = SLRealShotTime();
+    NSString *dd = SLRealShotDistance();
+    if (!tt.length && !dd.length) return s;
+
+    NSString *distTpl = nil;
+    if (dd.length) {
+        distTpl = [dd.lowercaseString hasSuffix:@"km"] ? dd : [dd stringByAppendingString:@"km"];
+    }
+    NSRange all = NSMakeRange(0, s.length);
+
+    NSTextCheckingResult *m = [SLMetaPairRE() firstMatchInString:s options:0 range:all];
+    if (m && m.numberOfRanges >= 3) {
+        NSString *head = [s substringWithRange:[m rangeAtIndex:1]];
+        NSString *dist = [s substringWithRange:[m rangeAtIndex:2]];
+        NSString *out = [NSString stringWithFormat:@"%@ %@",
+                         tt.length ? tt : head, distTpl ?: dist];
+        if (![out isEqualToString:s]) {
+            if (gSLMetaLog < 10) {
+                gSLMetaLog += 1;
+                SLLog(@"META 时间距离改写 [%@] → [%@]", s, out);
+            }
+            return out;
+        }
+        return s;
+    }
+    if (distTpl) {
+        NSString *out = [s stringByReplacingOccurrencesOfString:@"[0-9]+(?:\\.[0-9]+)?\\s*[kK][mM]"
+                                                     withString:distTpl
+                                                        options:NSRegularExpressionSearch
+                                                          range:all];
+        if (![out isEqualToString:s]) return out;
+    }
+    return s;
+}
+
+// 把当前屏幕上所有「时间+距离」按设置刷一遍。设置改完立刻调，不必退出会话。
+void SLChatMetaSweep(UIView *root) {
+    if (!root) {
+        UIViewController *chat = SLCRChatVC(SLCRTopVC());
+        root = chat.view;
+    }
+    if (!root) return;
+    if (!SLRealShotTime().length && !SLRealShotDistance().length) return;
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 4000;
+    while (queue.count && budget-- > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *l = (UILabel *)v;
+            NSString *cur = l.attributedText.length ? l.attributedText.string : l.text;
+            NSString *out = SLApplyMetaEdits(cur);
+            if (out && ![out isEqualToString:cur]) {
+                if (l.attributedText.length) {
+                    NSAttributedString *na = SLCRReplaceAttributed(l.attributedText, out);
+                    if (na) l.attributedText = na; else l.text = out;
+                } else {
+                    l.text = out;
+                }
+                [l setNeedsDisplay];
+            }
+        }
+        for (UIView *sub in v.subviews) [queue addObject:sub];
+    }
+}
+
 #pragma mark - 防撤回
 
 // 撤回的最小实现：消息正文正常时按 msgid 记一份；等正文被清空 / 变成撤回提示时，
@@ -155,9 +252,115 @@ NSString *SLRecallGuardBody(NSString *mid, NSString *body) {
             gSLRecallLog += 1;
             SLLog(@"RECALL-GUARD 顶回原文 %@ → [%@]", mid, SLCRPreview(old, 14));
         }
+        // 字顶回来了，但 cell 还是「撤回态」的灰胶囊 —— 等它画完再整形一次
+        dispatch_async(dispatch_get_main_queue(), ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ SLRecallStyleSweep(); });
+        });
         return old;
     }
     return body;
+}
+
+#pragma mark - 撤回态整形
+
+// 陌陌把撤回的消息压成一个灰底小胶囊（11 号字、缩得很窄、居中），
+// 用户要的是「原文照样待在原气泡里、正常字号，再给一句提示」。
+// 做法：灰底刷回白色、字号提回正文，然后在气泡上沿贴一行「对方撤回了一条消息」
+// （上沿没空间就贴右侧，绝不改行高 —— 改高度要动数据源，得不偿失）。
+static NSInteger gSLRecallStyleLog = 0;
+
+void SLRecallStyleSweep(void) {
+    if (!SLRecallGuardEnabled()) return;
+    UIViewController *chat = SLCRChatVC(SLCRTopVC());
+    UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
+    if (!tv) return;
+    for (UITableViewCell *cell in tv.visibleCells) {
+        BOOL recalled = NO;
+        for (UIView *v in cell.contentView.subviews) {
+            if (![v isKindOfClass:[UILabel class]]) continue;
+            NSString *t = ((UILabel *)v).text ?: ((UILabel *)v).attributedText.string;
+            if (t.length && [t containsString:@"撤回"]) { recalled = YES; break; }
+        }
+        if (!recalled) {
+            NSMutableArray *q = [NSMutableArray arrayWithArray:cell.contentView.subviews];
+            NSInteger budget = 300;
+            while (q.count && budget-- > 0 && !recalled) {
+                UIView *v = q.firstObject;
+                [q removeObjectAtIndex:0];
+                if ([v isKindOfClass:[UILabel class]]) {
+                    NSString *t = ((UILabel *)v).text ?: ((UILabel *)v).attributedText.string;
+                    if (t.length && [t containsString:@"撤回"]) { recalled = YES; break; }
+                }
+                for (UIView *s in v.subviews) [q addObject:s];
+            }
+        }
+        if (!recalled) continue;
+        if (gSLRecallStyleLog < 6) {
+            gSLRecallStyleLog += 1;
+            SLCRDumpStyleOnce(cell, @"recall");
+        }
+        UIView *bubble = nil;
+        CGFloat bestArea = 0;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:cell];
+        NSInteger budget = 300;
+        while (q.count && budget-- > 0) {
+            UIView *v = q.firstObject;
+            [q removeObjectAtIndex:0];
+            if ([v isKindOfClass:[UILabel class]]) {
+                UILabel *l = (UILabel *)v;
+                NSString *t = l.text ?: l.attributedText.string;
+                // 撤回提示本身别放大，只有正文才提字号
+                if (t.length && ![t containsString:@"撤回"] && l.font.pointSize > 0 &&
+                    l.font.pointSize < 14.5) {
+                    l.font = [UIFont systemFontOfSize:16];
+                }
+            } else {
+                CGSize sz = v.frame.size;
+                CGFloat area = sz.width * sz.height;
+                UIColor *bg = v.backgroundColor;
+                if (v.layer.cornerRadius >= 4 && area > bestArea && area > 900 &&
+                    bg && CGColorGetAlpha(bg.CGColor) > 0.3) {
+                    bubble = v;
+                    bestArea = area;
+                }
+            }
+            for (UIView *s in v.subviews) [q addObject:s];
+        }
+        if (!bubble) continue;
+        // 灰底 → 白底。彩色气泡（自己发的绿/紫）不动，只认真的灰。
+        UIColor *bg = bubble.backgroundColor;
+        size_t nc = CGColorGetNumberOfComponents(bg.CGColor);
+        const CGFloat *c = CGColorGetComponents(bg.CGColor);
+        BOOL isGray = (nc == 2);        // white / gray 色彩空间天生就是灰
+        if (nc >= 4 && c) {
+            CGFloat mx = MAX(c[0], MAX(c[1], c[2])), mn = MIN(c[0], MIN(c[1], c[2]));
+            isGray = (mx - mn < 0.06);
+        }
+        if (isGray) bubble.backgroundColor = [UIColor whiteColor];
+
+        NSString *tip = @"对方撤回了一条消息";
+        BOOL hasTip = NO;
+        for (UIView *s in cell.contentView.subviews) {
+            if ([s isKindOfClass:[UILabel class]] && [((UILabel *)s).text isEqualToString:tip]) {
+                hasTip = YES;
+                break;
+            }
+        }
+        if (hasTip) continue;
+        UILabel *lab = [[UILabel alloc] init];
+        lab.text = tip;
+        lab.font = [UIFont systemFontOfSize:10];
+        lab.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
+        CGSize ts = [tip sizeWithAttributes:@{NSFontAttributeName: lab.font}];
+        CGRect bf = bubble.frame;
+        if (bf.origin.y >= 15) {
+            lab.frame = CGRectMake(bf.origin.x + 2, bf.origin.y - 15, ts.width + 2, 13);
+        } else {
+            lab.frame = CGRectMake(CGRectGetMaxX(bf) + 6, bf.origin.y + 4, ts.width + 2, 13);
+        }
+        [cell.contentView addSubview:lab];
+    }
 }
 
 #pragma mark - 存储
@@ -1243,7 +1446,13 @@ static NSInteger SLCRPatchModelStrings(id obj, NSInteger depth, NSString *orig, 
             @try { v = object_getIvar(obj, ivars[i]); } @catch (NSException *e) { }
             if (!v || v == obj) continue;
             BOOL isView = [v isKindOfClass:[UIView class]] || [v isKindOfClass:[CALayer class]];
-            if (isView) continue;                       // 视图交给标签那一趟，别漫游整棵视图树
+            // 视图/图层不许整个跳过 —— v0.5.08 的树证明气泡是 UIView(54,0 93x58) 这种
+            // 光杆叶子：字不在任何 label 上，就在它自己的私有属性里。
+            // 只浅扫「自己这一层」（depth=1 时不会再往下走，否则会顺着 superview 无限递归）。
+            if (isView) {
+                if (depth > 1) hits += SLCRPatchModelStrings(v, 1, orig, repl, trace);
+                continue;
+            }
             NSString *prop = SLCRPropertyNameForIvar(tn);
             if ([v isKindOfClass:[NSString class]]) {
                 if (!SLCRStringIs((NSString *)v, orig)) continue;
@@ -1381,6 +1590,153 @@ static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl
     return hits;
 }
 
+// 图层这一趟：气泡的字既不在 UILabel 也不在 MDMixLabel 上时，就在 layer 里。
+// CATextLayer 的 string / attributedString 就是屏幕上画的那行字；
+// 还有一类是自家 CALayer 子类，靠 drawInContext 用 CoreText 画，数据源是它自己的属性 ——
+// 那种只能靠 SLCRPatchModelStrings 扫 self 拿下来，这里只负责「有 string 的」。
+static NSInteger SLCRPatchLayers(CALayer *layer, NSString *orig, NSString *repl,
+                                 NSMutableString *inventory, NSInteger depth) {
+    if (!layer || depth <= 0) return 0;
+    NSInteger hits = 0;
+    NSString *cn = NSStringFromClass([layer class]);
+    BOOL textLayer = [layer isKindOfClass:[CATextLayer class]];
+    id str = nil;
+    @try {
+        if (textLayer) str = ((CATextLayer *)layer).string;
+        else if ([layer respondsToSelector:NSSelectorFromString(@"string")]) {
+            SEL sel = NSSelectorFromString(@"string");
+            NSMethodSignature *sig = [layer methodSignatureForSelector:sel];
+            if (sig && sig.methodReturnType[0] == '@' && sig.numberOfArguments == 2) {
+                id (*fn)(id, SEL) = (id (*)(id, SEL))[layer methodForSelector:sel];
+                if (fn) str = fn(layer, sel);
+            }
+        }
+    } @catch (NSException *e) { }
+
+    NSString *shown = nil;
+    if ([str isKindOfClass:[NSAttributedString class]]) shown = [(NSAttributedString *)str string];
+    else if ([str isKindOfClass:[NSString class]]) shown = str;
+    shown = [shown stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    if (shown.length) {
+        if (inventory && inventory.length < 300) {
+            [inventory appendFormat:@"%@«%@» ", cn, SLCRPreview(shown, 10)];
+        }
+        NSString *mapped = SLChatRewriteTextForPlainString(shown);
+        NSString *target = mapped.length ? mapped : (SLCRStringIs(shown, orig) ? repl : nil);
+        if (target.length && ![target isEqualToString:shown]) {
+            @try {
+                if ([str isKindOfClass:[NSAttributedString class]]) {
+                    NSAttributedString *na = SLCRReplaceAttributed((NSAttributedString *)str, target);
+                    if (na) {
+                        if (textLayer) ((CATextLayer *)layer).string = na;
+                        else [layer setValue:na forKey:@"string"];
+                        hits += 1;
+                    }
+                } else {
+                    if (textLayer) ((CATextLayer *)layer).string = target;
+                    else [layer setValue:target forKey:@"string"];
+                    hits += 1;
+                }
+                [layer setNeedsDisplay];
+            } @catch (NSException *e) { }
+        }
+    }
+    for (CALayer *sub in layer.sublayers) {
+        hits += SLCRPatchLayers(sub, orig, repl, inventory, depth - 1);
+    }
+    return hits;
+}
+
+// 排错用：把 layer 树打一行（类名 + 有字的「字」），每个 cell 类只打一次。
+// v0.5.08 只打了视图树，看不出 CATextLayer —— 这次两棵树一起打。
+static void SLCRDumpLayerTreeOnce(UIView *root, NSString *tag) {
+    static NSMutableSet *seen = nil;
+    if (!seen) seen = [NSMutableSet set];
+    NSString *key = [NSString stringWithFormat:@"L|%@|%@", tag ?: @"-", NSStringFromClass([root class])];
+    if ([seen containsObject:key]) return;
+    [seen addObject:key];
+    NSMutableArray *out = [NSMutableArray array];
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:root.layer];
+    NSInteger depth = 0;
+    NSInteger budget = 60;
+    while (queue.count && budget-- > 0 && depth < 5) {
+        NSInteger n = (NSInteger)queue.count;
+        for (NSInteger i = 0; i < n && budget > 0; i++) {
+            CALayer *l = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            NSString *desc = NSStringFromClass([l class]);
+            if ([l isKindOfClass:[CATextLayer class]]) {
+                id s = ((CATextLayer *)l).string;
+                NSString *t = [s isKindOfClass:[NSAttributedString class]]
+                              ? [(NSAttributedString *)s string] : (NSString *)s;
+                desc = [desc stringByAppendingFormat:@"(%.0fx%.0f)«%@»",
+                        l.frame.size.width, l.frame.size.height, SLCRPreview(t, 14)];
+            } else if (l.contents) {
+                desc = [desc stringByAppendingFormat:@"(%.0fx%.0f)contents",
+                        l.frame.size.width, l.frame.size.height];
+            }
+            [out addObject:desc];
+            for (CALayer *sub in l.sublayers) [queue addObject:sub];
+        }
+        depth += 1;
+    }
+    SLLog(@"REWRITE-LAYER %@ 层 %lu：%@", tag ?: @"-", (unsigned long)out.count,
+          [out componentsJoinedByString:@" | "]);
+}
+
+// 排错用：把 cell 里所有 label 的字号/字色/底色列一行 —— 撤回态要「复原成正常气泡」
+// 全靠这张表（哪个 view 是那层灰底、哪个 label 被缩成了 11 号）。
+static void SLCRDumpStyleOnce(UIView *root, NSString *tag) {
+    static NSMutableSet *seen = nil;
+    if (!seen) seen = [NSMutableSet set];
+    NSString *key = [NSString stringWithFormat:@"S|%@|%@", tag ?: @"-", NSStringFromClass([root class])];
+    if ([seen containsObject:key]) return;
+    [seen addObject:key];
+    NSMutableArray *out = [NSMutableArray array];
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 60;
+    while (queue.count && budget-- > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        NSString *cn = NSStringFromClass([v class]);
+        UIColor *bg = v.backgroundColor;
+        if ([v isKindOfClass:[UILabel class]]) {
+            UILabel *l = (UILabel *)v;
+            [out addObject:[NSString stringWithFormat:@"%@(%.0f) %.1fpt«%@»",
+                            cn, l.frame.size.width, l.font.pointSize,
+                            SLCRPreview(l.text ?: l.attributedText.string, 8)]];
+        } else if (bg && CGColorGetAlpha(bg.CGColor) > 0.01) {
+            const CGFloat *c = CGColorGetComponents(bg.CGColor);
+            [out addObject:[NSString stringWithFormat:@"%@(%.0fx%.0f) r=%.0f rgb=%.2f/%.2f/%.2f",
+                            cn, v.frame.size.width, v.frame.size.height,
+                            v.layer.cornerRadius, c ? c[0] : 0, c ? c[1] : 0, c ? c[2] : 0]];
+        }
+        for (UIView *sub in v.subviews) [queue addObject:sub];
+    }
+    SLLog(@"REWRITE-STYLE %@ 样式 %lu：%@", tag ?: @"-", (unsigned long)out.count,
+          [out componentsJoinedByString:@" | "]);
+}
+
+// 重绑前先把「排好版的中间产物」扔了，否则 bindWithItem: 会直接复用旧排版。
+// 名字不统一，常见的几个都试一遍；KVC 不认就跳过，不影响主流程。
+static void SLCRDropLayoutCache(id dataItem, UITableViewCell *cell) {
+    NSArray *keys = @[@"cellViewModel", @"viewModel", @"cellModel", @"layoutModel",
+                      @"cellLayout", @"layout", @"contentModel", @"itemLayout"];
+    for (NSString *k in keys) {
+        if (dataItem) {
+            @try {
+                if ([dataItem valueForKey:k]) { [dataItem setValue:nil forKey:k]; }
+            } @catch (NSException *e) { }
+        }
+        if (cell) {
+            @try {
+                if ([cell valueForKey:k]) { [cell setValue:nil forKey:k]; }
+            } @catch (NSException *e) { }
+        }
+    }
+}
+
 // 没标签时让 cell 自己按新模型重绑一次（下面 SLCRTryRebindCell 干的活）。
 
 // 标签换不动时的正解：让 cell 按「改过的模型」重绑一次。
@@ -1391,6 +1747,8 @@ static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl
 // 现在按优先级调真正的绑数据入口；签名必须是「一个对象参数、返回 void」。
 static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
     if (!cell) return @"-";
+    // 先扔旧排版产物：不扔的话 bindWithItem: 会原样复用，改多少遍屏幕都不动
+    SLCRDropLayoutCache(dataItem, cell);
     NSMutableArray *tried = [NSMutableArray array];
     if (dataItem) {
         NSArray *oneArg = @[@"bindWithItem:", @"bindHelloCellWithItem:",
@@ -1578,17 +1936,36 @@ void SLChatRewritePatchLiveText(NSArray *aliases, NSString *orig, NSString *repl
         NSMutableString *inventory = [NSMutableString string];
         NSInteger seenLabels = 0;
         NSInteger lh = SLCRPatchLabelsInView(cell, orig, repl, inventory, &seenLabels);
-        if (lh == 0) SLCRDumpViewTreeOnce(cell, @"cell");
+        NSMutableString *layerInv = [NSMutableString string];
+        NSInteger ly = SLCRPatchLayers(cell.layer, orig, repl, layerInv, 6);
+        if (lh == 0 && ly == 0) {
+            SLCRDumpViewTreeOnce(cell, @"cell");
+            SLCRDumpLayerTreeOnce(cell, @"cell");
+        }
         NSString *shownNow = SLCRTextAnywhere(cell, 5) ?: @"-";
         modelHits += mh;
-        labelHits += lh;
-        SLLog(@"REWRITE 渲染补丁 cell=%@ dataItem=%@ 模型 %ld 处 [%@] 标签 %ld 处/%ld 个 [%@] 重绑=%@ 现在=[%@]",
+        labelHits += lh + ly;
+        SLLog(@"REWRITE 渲染补丁 cell=%@ dataItem=%@ 模型 %ld 处 [%@] 标签 %ld 处/%ld 个 [%@] 图层 %ld 处 [%@] 重绑=%@ 现在=[%@]",
               NSStringFromClass([cell class]), itemCls, (long)mh,
               trace.length ? trace : @"-", (long)lh, (long)seenLabels,
-              inventory.length ? inventory : @"-", how, SLCRPreview(shownNow, 14));
+              inventory.length ? inventory : @"-", (long)ly,
+              layerInv.length ? layerInv : @"-", how, SLCRPreview(shownNow, 14));
         if (lh > 0 || mh > 0) {
             SLCRProbeSelectorsOnce([cell class], @"cell");
-            SLCRProbeSelectorsOnce([chat class], @"vc");
+            // 聊天页认不出来时拿 table 的 delegate 顶一下 —— 上次 vc 那行一直没打出来，
+            // 就是因为 SLCRChatVC 没认出来，白白少了「整页刷新方法名」这张表
+            id vcObj = chat;
+            if (!vcObj) {
+                id dg = tv.delegate;
+                if ([dg isKindOfClass:[UIViewController class]]) vcObj = dg;
+            }
+            if (!vcObj) {
+                for (UIView *v = tv.superview; v && !vcObj; v = v.superview) {
+                    id nr = v.nextResponder;
+                    if ([nr isKindOfClass:[UIViewController class]]) vcObj = nr;
+                }
+            }
+            if (vcObj) SLCRProbeSelectorsOnce([vcObj class], @"vc");
         }
     }
     if (!cells) SLLog(@"REWRITE 渲染补丁：可见 cell 里没找到这条消息（orig=%@）", SLCRPreview(orig, 16));
@@ -1608,6 +1985,9 @@ void SLChatRewriteDumpVisibleText(void) {
     UIViewController *chat = SLCRChatVC(SLCRTopVC());
     UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
     if (!tv) return;
+    // 刷新之后顺带把「时间 + 距离」那行也按设置刷一遍
+    SLChatMetaSweep(tv);
+    SLRecallStyleSweep();
     NSInteger n = 0;
     for (UITableViewCell *cell in tv.visibleCells) {
         if (n >= 12) break;

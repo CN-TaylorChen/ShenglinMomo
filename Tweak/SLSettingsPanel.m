@@ -68,7 +68,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.5.08"
+#define SLVersion @"0.5.09"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -231,7 +231,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
-    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断", @"聊天记录", @"实拍卡片"][section];
+    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断", @"聊天记录", @"消息时间 / 距离"][section];
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
@@ -477,9 +477,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
     if (ip.section == 7) {
         BOOL isTime = (ip.row == 0);
-        cell.textLabel.text = isTime ? @"实拍时间" : @"实拍距离";
-        NSString *v = isTime ? SLRealShotTime() : SLRealShotDistance();
-        cell.detailTextLabel.text = v.length ? v : @"不改";
+        cell.textLabel.text = isTime ? @"消息时间" : @"消息距离";
+        cell.detailTextLabel.text = isTime
+            ? (SLRealShotTime().length ? SLRealShotTime() : @"不改")
+            : (SLRealShotDistance().length ? SLRealShotDistance() : @"不改");
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
@@ -578,9 +579,9 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 // 卡片上的 "11:44" / "38.62km" 是 prerender JSON 里的字面量，
 // 不知道字段名也能按形态替换，所以这里只要一个文本输入。
 - (void)sl_editRealShotField:(BOOL)isTime {
-    NSString *title = isTime ? @"实拍时间" : @"实拍距离";
-    NSString *msg = isTime ? @"卡片上的时间会换成这里填的，例如 09:30；留空表示不改"
-                           : @"卡片上的公里数会换成这里填的，例如 0.5km；留空表示不改";
+    NSString *title = isTime ? @"消息时间" : @"消息距离";
+    NSString *msg = isTime ? @"聊天里每条消息下面那句「1分钟前」/「12:48」会换成这里填的；留空表示不改"
+                           : @"那行里的公里数会换成这里填的，例如 0.5km；留空表示不改";
     NSString *cur = isTime ? SLRealShotTime() : SLRealShotDistance();
     UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
                                                                message:msg
@@ -596,6 +597,10 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         NSString *input = ac.textFields.firstObject.text ?: @"";
         if (isTime) SLRealShotSetTime(input); else SLRealShotSetDistance(input);
         [weakSelf.tableView reloadData];
+        // 改完立刻把聊天页上那行刷掉，不用退出会话；cell 复用得靠 UILabel 钩子兜
+        SLChatMetaSweep(nil);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ SLChatMetaSweep(nil); });
         NSString *now = isTime ? SLRealShotTime() : SLRealShotDistance();
         [AWECAUtils showToast:(now.length ? [NSString stringWithFormat:@"%@已改为 %@", title, now]
                                           : [NSString stringWithFormat:@"%@已清除", title])

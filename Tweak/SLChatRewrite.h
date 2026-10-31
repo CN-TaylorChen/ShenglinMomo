@@ -90,6 +90,14 @@ void SLRealShotSetDistance(NSString *_Nullable v);
 /// 只动 JSON，普通文字原样返回 —— 不依赖任何字段名。
 NSString *_Nullable SLApplyRealShotEdits(NSString *_Nullable json);
 
+/// 聊天界面每条消息下面那行「1分钟前 35.95km」。
+/// 这串是 App 用发送时间 + 当前位置现场算的，不在任何 JSON 里，
+/// 所以按显示形态拆（时间描述 + 数字km）再按设置重组。
+NSString *_Nullable SLApplyMetaEdits(NSString *_Nullable s);
+
+/// 把当前屏幕上所有「时间 + 距离」按设置刷一遍（设置改完立刻调）。
+void SLChatMetaSweep(UIView *_Nullable root);
+
 #pragma mark - 防撤回
 
 BOOL SLRecallGuardEnabled(void);
@@ -98,6 +106,9 @@ void SLRecallGuardSetEnabled(BOOL on);
 /// 传本次从模型读到的 body，返回最终该显示的 body。
 /// 正文正常时按 msgid 记一份；等正文被清空 / 变成撤回提示时顶回原文。
 NSString *_Nullable SLRecallGuardBody(NSString *_Nullable mid, NSString *_Nullable body);
+
+/// 撤回态整形：灰底刷白、字号提回正文，再贴一句「对方撤回了一条消息」。
+void SLRecallStyleSweep(void);
 
 @interface SLChatRewriteListController : UITableViewController
 @end

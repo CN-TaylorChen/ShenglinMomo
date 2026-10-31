@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.08"
+#define SLVersion @"0.5.09"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2992,6 +2992,36 @@ static void SLChatMixLabelSetAttributedHook(id self, SEL _cmd, id as) {
     ((void (*)(id, SEL, id))orig)(self, _cmd, as);
 }
 
+// 聊天界面里每条消息下面那行「1分钟前 35.95km」。
+// 这串不是任何字段，是 App 用消息发送时间 + 当前位置经纬度现场算出来的，
+// 改 body 完全碰不到（v0.5.08 就改错了地方）。唯一能拦的是「最终显示」这一层。
+// 门禁很严：短串、含 km、无换行，且用户没设值就直接放行 —— 开销可以忽略。
+static void SLChatLabelSetTextHook(id self, SEL _cmd, NSString *text) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    if (!orig) return;
+    if ([text isKindOfClass:[NSString class]] && text.length >= 4 && text.length <= 40) {
+        NSString *_Nullable rep = SLApplyMetaEdits(text);
+        if (rep.length) text = rep;
+    }
+    ((void (*)(id, SEL, id))orig)(self, _cmd, text);
+}
+
+static void SLChatLabelSetAttributedHook(id self, SEL _cmd, id as) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    if (!orig) return;
+    if ([as isKindOfClass:[NSAttributedString class]]) {
+        NSString *s = [(NSAttributedString *)as string];
+        if (s.length >= 4 && s.length <= 40) {
+            NSString *_Nullable rep = SLApplyMetaEdits(s);
+            if (rep.length && ![rep isEqualToString:s]) {
+                NSDictionary *attrs = [as attributesAtIndex:0 effectiveRange:NULL];
+                as = [[NSMutableAttributedString alloc] initWithString:rep attributes:attrs];
+            }
+        }
+    }
+    ((void (*)(id, SEL, id))orig)(self, _cmd, as);
+}
+
 // 陌陌的气泡菜单是自绘的 MDChatUIMenuView + MDChatUIMenuItem，
 // 往 items 数组尾部塞一项就能和原生项长得一模一样（字体/圆角/箭头都复用它的 cell）。
 static const void *kSLCRMenuIndexKey = &kSLCRMenuIndexKey;
@@ -3172,6 +3202,16 @@ static void SLInstallChatRewriteHooks(void) {
                              (IMP)SLChatMixLabelSetAttributedHook)) {
             [hits addObject:@"mixAttr"];
         }
+    }
+
+    // 消息下方「时间 + 距离」那行最后落在普通 UILabel 上
+    if (SLRegisterMethod([UILabel class], NSSelectorFromString(@"setText:"),
+                         (IMP)SLChatLabelSetTextHook)) {
+        [hits addObject:@"labelText"];
+    }
+    if (SLRegisterMethod([UILabel class], NSSelectorFromString(@"setAttributedText:"),
+                         (IMP)SLChatLabelSetAttributedHook)) {
+        [hits addObject:@"labelAttr"];
     }
 
     if (hits.count) {
