@@ -524,7 +524,7 @@ static void SLMetaMarkNoTruncate(UIView *row) {
     if (![row isKindOfClass:[UILabel class]]) return;
     UILabel *l = (UILabel *)row;
     l.adjustsFontSizeToFitWidth = YES;
-    l.minimumScaleFactor = 0.7;                   // 缩到 70% 还装不下才轮到裁
+    l.minimumScaleFactor = 0.55;                  // 缩字兜底（父容器窄时会用到）
     l.lineBreakMode = NSLineBreakByClipping;      // 不要省略号
     l.numberOfLines = 1;
 }
@@ -538,14 +538,28 @@ static void SLMetaFitRowWidth(UIView *row, NSString *text) {
     CGRect f = l.frame;
     CGFloat w = CGRectGetWidth(f);
     if (need <= w + 0.5) return;                   // 装得下就别动排版
-    if (need > 220.0) need = 220.0;                // 别撑成一整行
-    CGRect nf = CGRectMake(CGRectGetMidX(f) - need / 2.0, CGRectGetMinY(f),
-                           need, CGRectGetHeight(f));
-    // 收敛在父视图里，免得跑到 cell 外面
+
+    // ★ 本轮真凶（v0.5.24）：以前这里写「最多 220pt」，但时间行的父容器只有约 109pt，
+    // 而且两个夹取顺序反了 —— 先判断 minX<0 置 0，后面又按 maxX 算出 parentW-need（负数），
+    // 于是 frame.x 变成负值，label 整体左移出容器、左边被 clip 掉。
+    // 结果就是「2025-10-21 12:23 180km」显示成「:23 180km」—— 前面那截被裁没了。
+    // 现在：宽度上限只能是父容器的宽度，且 x 永远夹在 [0, parentW-targetW] 之间。
     CGFloat parentW = CGRectGetWidth(l.superview.bounds);
-    if (CGRectGetMinX(nf) < 0.0) nf.origin.x = 0.0;
-    if (parentW > 0.0 && CGRectGetMaxX(nf) > parentW) nf.origin.x = parentW - need;
-    l.frame = nf;
+    CGFloat maxW = (parentW > 8.0) ? parentW : w;  // 父容器量不到就别乱放宽
+    if (maxW > 220.0) maxW = 220.0;
+    CGFloat targetW = (need > maxW) ? maxW : need;
+    CGFloat x = CGRectGetMidX(f) - targetW / 2.0;  // 保持原来居中
+    if (parentW > 8.0) {
+        if (x + targetW > parentW) x = parentW - targetW;
+        if (x < 0.0) x = 0.0;                      // 绝不允许负 x（负 = 左边永远看不到）
+    }
+    l.frame = CGRectMake(x, CGRectGetMinY(f), targetW, CGRectGetHeight(f));
+    // 宽度被父容器限制住时，把缩字下限按「实际缺口」算 —— 保证放得下，
+    // 而不是缩到 0.7 就停手、剩下的一截被裁掉。
+    if (targetW + 0.5 < need) {
+        CGFloat ratio = targetW / need;
+        l.minimumScaleFactor = MAX(0.45, MIN(1.0, ratio - 0.02));
+    }
 }
 
 static BOOL SLMetaApplyOneMid(UITableViewCell *cell, NSString *mid) {
@@ -1453,7 +1467,7 @@ void SLChatRewriteReloadChat(void) {
     _fields = [NSMutableArray array];
     [self sl_addRow:@"时间" placeholder:@"12:01" value:self.initialTime];
     [self sl_addRow:@"距离" placeholder:@"96.96" value:self.initialDist];
-    [self sl_addRow:@"日期" placeholder:@"2026-10-31" value:self.initialDate];
+    [self sl_addRow:@"日期" placeholder:@"" value:self.initialDate];
 }
 
 - (UITextField *)sl_addRow:(NSString *)title placeholder:(NSString *)ph value:(NSString *)v {
