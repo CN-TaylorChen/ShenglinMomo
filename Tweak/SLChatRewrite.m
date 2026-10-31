@@ -335,7 +335,7 @@ void SLChatMetaApplyTable(UITableView *tv) {
         tv = chat ? SLCRChatTable(chat.view) : nil;
     }
     if (!tv) return;
-    NSInteger applied = 0, misses = 0;
+    NSInteger applied = 0;
     for (UITableViewCell *cell in tv.visibleCells) {
         if (SLMetaApplyOne(cell)) applied += 1;
     }
@@ -377,6 +377,8 @@ static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl
                                       NSMutableString *inv, NSInteger *seen);
 static NSInteger SLCRPatchLayers(CALayer *layer, NSString *orig, NSString *repl,
                                  NSMutableString *inv, NSInteger depth);
+static BOOL SLCRReplaceLabelContaining(UIView *root, NSString *substr, NSString *repl,
+                                      NSInteger depth);
 
 static void SLRecallLoadBlocked(void) {
     gSLRecallBlocked = [NSMutableDictionary dictionary];
