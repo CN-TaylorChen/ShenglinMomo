@@ -33,8 +33,9 @@
 #import "SLEntry.h"
 #import "SLVoicePack.h"
 #import "SLTTSAuditionPanel.h"
+#import "SLDiagMoment.h"
 
-#define SLVersion @"0.4.95"
+#define SLVersion @"0.4.96"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2929,6 +2930,8 @@ static void SLInstallHooks(void) {
     @try { SLInstallUIButtonGuard(); } @catch (NSException *e) {}
     // v0.4.52：事件探针（抓小宇宙私聊的真实发送入口，只记录不改行为）
     @try { SLInstallActionProbe(); } @catch (NSException *e) {}
+    // v0.4.96：时刻拍摄页几何诊断（只读，不装任何 method hook）
+    @try { SLDiagMomentInstall(); } @catch (NSException *e) {}
 }
 
 NSString *SLHookStatusSummary(void) {
