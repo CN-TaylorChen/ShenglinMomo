@@ -28,6 +28,7 @@
 #import "SLPCMTool.h"
 #import "SLPipeline.h"
 #import "SLSettingsPanel.h"
+#import "SLChatRewrite.h"
 #import "SLVirtualLocation.h"
 #import "SLLogViewController.h"
 #import "SLEntry.h"
@@ -35,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.4.96"
+#define SLVersion @"0.4.97"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2874,6 +2875,140 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
     SLArmTTS(self, content, full, nil);
 }
 
+
+#pragma mark - 聊天记录修改（v0.4.97）
+
+// 只在开着的时候拦；关掉时原样返回，零开销。
+static id SLChatBodyGetHook(id self, SEL _cmd) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    if (!orig) return nil;
+    id raw = ((id (*)(id, SEL))orig)(self, _cmd);
+    if (![raw isKindOfClass:[NSString class]]) return raw;
+    if (!SLChatRewriteEnabled()) return raw;
+    @try {
+        id mid = nil;
+        @try { mid = [self valueForKey:@"msgid"]; } @catch (NSException *e) { }
+        if (!mid) { @try { mid = [self valueForKey:@"uuid"]; } @catch (NSException *e) { } }
+        NSString *rep = SLChatRewriteTextForMsgid(mid, (NSString *)raw);
+        return rep ?: raw;
+    } @catch (NSException *e) { }
+    return raw;
+}
+
+// 陌陌的气泡菜单是自绘的 MDChatUIMenuView + MDChatUIMenuItem，
+// 往 items 数组尾部塞一项就能和原生项长得一模一样（字体/圆角/箭头都复用它的 cell）。
+static const void *kSLCRMenuIndexKey = &kSLCRMenuIndexKey;
+
+static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
+    if (!SLChatRewriteEnabled()) return items;
+    if (![items isKindOfClass:[NSArray class]]) return items;
+    Class itemCls = NSClassFromString(@"MDChatUIMenuItem");
+    if (!itemCls) return items;
+    @try {
+        id item = [[itemCls alloc] init];
+        [item setValue:@"修改" forKey:@"title"];
+        NSMutableArray *out = [NSMutableArray arrayWithArray:items];
+        [out addObject:item];
+        objc_setAssociatedObject(menuView, kSLCRMenuIndexKey,
+                                 @(out.count - 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        SLLog(@"REWRITE 菜单注入：原 %lu 项 → 现 %lu 项（修改在第 %lu 位）",
+              (unsigned long)items.count, (unsigned long)out.count, (unsigned long)out.count);
+        return out;
+    } @catch (NSException *e) {
+        SLLog(@"REWRITE 菜单注入失败：%@", e.reason);
+        return items;
+    }
+}
+
+static id SLChatMenuShowHook4(id self, SEL _cmd, id by, NSArray *items, CGRect rect, CGFloat bottom) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    NSArray *patched = SLChatMenuPatchedItems(self, items);
+    if (!orig) return nil;
+    return ((id (*)(id, SEL, id, NSArray *, CGRect, CGFloat))orig)(self, _cmd, by, patched, rect, bottom);
+}
+
+static id SLChatMenuShowHook3(id self, SEL _cmd, id by, NSArray *items, CGFloat bottom) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    NSArray *patched = SLChatMenuPatchedItems(self, items);
+    if (!orig) return nil;
+    return ((id (*)(id, SEL, id, NSArray *, CGFloat))orig)(self, _cmd, by, patched, bottom);
+}
+
+static void SLChatMenuDidSelectHook(id self, SEL _cmd, id cv, id ip) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    NSNumber *mine = objc_getAssociatedObject(self, kSLCRMenuIndexKey);
+    NSInteger tapped = -1;
+    @try { tapped = [[ip valueForKey:@"item"] integerValue]; } @catch (NSException *e) { }
+    if (mine && tapped == (NSInteger)mine.integerValue) {
+        objc_setAssociatedObject(self, kSLCRMenuIndexKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIView *target = nil;
+        @try { target = [self valueForKey:@"targetView"]; } @catch (NSException *e) { }
+        @try { [(id)self performSelector:NSSelectorFromString(@"hideMenu")]; } @catch (NSException *e) { }
+        SLLog(@"REWRITE 点中「修改」 target=%@", target);
+        SLChatRewriteBeginFromBubble(target);
+        return;
+    }
+    if (orig) ((void (*)(id, SEL, id, id))orig)(self, _cmd, cv, ip);
+}
+
+static void SLChatViewWillDisappearHook(id self, SEL _cmd, BOOL animated) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    @try { SLChatRewriteHandleLeave((UIViewController *)self); } @catch (NSException *e) { }
+    if (orig) ((void (*)(id, SEL, BOOL))orig)(self, _cmd, animated);
+}
+
+static BOOL SLCRTypeHas(Class cls, SEL sel, const char *needle) {
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return NO;
+    const char *t = method_getTypeEncoding(m);
+    if (!t) return NO;
+    return strstr(t, needle) != NULL;
+}
+
+static void SLInstallChatRewriteHooks(void) {
+    static BOOL done = NO;
+    if (done) return;
+
+    NSMutableArray *hits = [NSMutableArray array];
+    NSArray *msgClasses = @[@"MDBaseMessage", @"MDTextChatMessage", @"MDSingleMessage",
+                            @"MDGroupMessage", @"MDUniverseMessage", @"MDFastChatMessage"];
+    for (NSString *n in msgClasses) {
+        Class c = SLClassByName(n);
+        if (!c) continue;
+        if (SLRegisterMethod(c, NSSelectorFromString(@"body"), (IMP)SLChatBodyGetHook)) [hits addObject:n];
+    }
+
+    Class menu = SLClassByName(@"MDChatUIMenuView");
+    if (menu) {
+        SEL s4 = NSSelectorFromString(@"showBy:withItems:rect:bottomHeight:");
+        if (SLCRTypeHas(menu, s4, "{CGRect=") &&
+            SLRegisterMethod(menu, s4, (IMP)SLChatMenuShowHook4)) {
+            [hits addObject:@"menu4"];
+        }
+        SEL s3 = NSSelectorFromString(@"showBy:withItems:bottomHeight:");
+        if (SLRegisterMethod(menu, s3, (IMP)SLChatMenuShowHook3)) {
+            [hits addObject:@"menu3"];
+        }
+        if (SLRegisterMethod(menu, NSSelectorFromString(@"collectionView:didSelectItemAtIndexPath:"),
+                             (IMP)SLChatMenuDidSelectHook)) {
+            [hits addObject:@"menuSel"];
+        }
+    }
+
+    Class chatVC = SLClassByName(@"MDChatBaseViewController");
+    if (chatVC) {
+        SEL leave = NSSelectorFromString(@"viewWillDisappear:");
+        if (SLRegisterMethod(chatVC, leave, (IMP)SLChatViewWillDisappearHook)) {
+            [hits addObject:@"chatLeave"];
+        }
+    }
+
+    if (hits.count) {
+        done = YES;
+        SLLog(@"REWRITE-HOOK %@", [hits componentsJoinedByString:@" "]);
+    }
+}
+
 static void SLInstallHooks(void) {
     // v0.4.52：去掉「只装 3 轮」的硬上限。
     // 0.4.52 为了少刷日志把窗口从 6 轮/10 秒砍到 3 轮/3 秒，代价是：
@@ -2932,6 +3067,8 @@ static void SLInstallHooks(void) {
     @try { SLInstallActionProbe(); } @catch (NSException *e) {}
     // v0.4.96：时刻拍摄页几何诊断（只读，不装任何 method hook）
     @try { SLDiagMomentInstall(); } @catch (NSException *e) {}
+    // v0.4.97：聊天记录修改（只拦 body getter + 气泡菜单注入，不碰陌陌数据库）
+    @try { SLInstallChatRewriteHooks(); } @catch (NSException *e) {}
 }
 
 NSString *SLHookStatusSummary(void) {

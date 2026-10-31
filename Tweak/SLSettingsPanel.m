@@ -22,6 +22,7 @@
 #import "SLMapPickerController.h"
 #import "SLTTSAuditionPanel.h"
 #import "SLGlass.h"
+#import "SLChatRewrite.h"
 
 // v0.4.71：语速/音量改用右侧「数值 + 细轨滑块」，行高仍 44pt、跟开关同一列。
 // v0.4.72：系统 thumb 是 30pt 白圆，配 3pt 细轨太重、看着像浮在线上；
@@ -67,7 +68,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.4.96"
+#define SLVersion @"0.4.97"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -107,6 +108,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 // 前置声明：这些方法定义在 didSelect 之后，先声明免得 -Werror 因「方法未找到」中断构建
 - (void)sl_virtualLocSwitchChanged:(UISwitch *)sw;
+- (void)sl_chatRewriteChanged:(UISwitch *)sw;
+- (void)sl_chatRewriteResetChanged:(UISwitch *)sw;
 - (void)sl_applyVirtualLoc:(BOOL)on;
 - (void)sl_pickLocation;
 - (void)sl_clearLocation;
@@ -209,7 +212,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    return 6;
+    return 7;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
@@ -220,11 +223,12 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
     if (section == 5) return 1;   // 运行日志（v0.4.54 去掉「动画预览」入口）
+    if (section == 6) return 3;   // 聊天记录修改：开关 + 离开重置 + 已修改 N 条
     return 1;
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
-    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断"][section];
+    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断", @"聊天记录"][section];
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
@@ -428,6 +432,35 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return cell;
     }
 
+    if (ip.section == 6) {
+        if (ip.row == 0) {
+            cell.textLabel.text = @"修改聊天记录";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLChatRewriteEnabled();
+            [sw addTarget:self action:@selector(sl_chatRewriteChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
+        if (ip.row == 1) {
+            cell.textLabel.text = @"离开会话时重置";
+            cell.detailTextLabel.text = @"退出聊天即恢复原文";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLChatRewriteResetOnLeave();
+            [sw addTarget:self action:@selector(sl_chatRewriteResetChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
+        cell.textLabel.text = @"已修改的消息";
+        NSInteger rwN = SLChatRewriteCount();
+        cell.detailTextLabel.text = rwN > 0 ? [NSString stringWithFormat:@"%ld 条", (long)rwN] : @"暂无";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
+    }
+
     return cell;
 }
 
@@ -489,6 +522,23 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         [self.navigationController pushViewController:vc animated:YES];
         return;
     }
+    if (ip.section == 6) {
+        if (ip.row == 2) {
+            [self.navigationController pushViewController:[[SLChatRewriteListController alloc] init]
+                                                 animated:YES];
+        }
+        return;
+    }
+}
+
+- (void)sl_chatRewriteChanged:(UISwitch *)sw {
+    SLChatRewriteSetEnabled(sw.on);
+    [self.tableView reloadData];
+}
+
+- (void)sl_chatRewriteResetChanged:(UISwitch *)sw {
+    SLChatRewriteSetResetOnLeave(sw.on);
+    [self.tableView reloadData];
 }
 
 - (void)sl_auditionChanged:(UISwitch *)sw {

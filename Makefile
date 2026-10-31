@@ -34,7 +34,8 @@ Tweak/SLEntry.m \
 	Tweak/SLVoicePackController.m \
 	Tweak/SLTrimController.m \
 	Tweak/AWECAAudioReplacer.m \
-	Tweak/SLDiagMoment.m
+	Tweak/SLDiagMoment.m \
+	Tweak/SLChatRewrite.m
 
 ShenglinMomo_CFLAGS = -fobjc-arc
 ShenglinMomo_LDFLAGS = -Xlinker -not_for_dyld_shared_cache
