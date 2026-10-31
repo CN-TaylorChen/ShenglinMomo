@@ -118,11 +118,12 @@ NSString *SLApplyRealShotEdits(NSString *json) {
 
 #pragma mark - 消息下方那行「时间 + 距离」
 
-// 这两个辅助函数定义在文件后半段，这里先用着，得先声明（C99 隐式声明是 error）
+// 这几个辅助函数定义在文件后半段，这里先用着，得先声明（C99 隐式声明是 error）
 static UIViewController *SLCRTopVC(void);
 static UIViewController *SLCRChatVC(UIViewController *start);
 static UITableView *SLCRChatTable(UIView *root);
 static void SLCRDumpStyleOnce(UIView *root, NSString *tag);
+static NSAttributedString *SLCRReplaceAttributed(NSAttributedString *src, NSString *repl);
 
 // 聊天界面上每条消息底下那行 `1分钟前 35.95km` / `12:48 35.95km`。
 // 它不在任何 JSON 里 —— App 拿消息发送时间和当前位置的经纬度现场算出来的，
