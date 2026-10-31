@@ -126,6 +126,7 @@ NSString *SLApplyRealShotEdits(NSString *json) {
 static UIViewController *SLCRTopVC(void);
 static UIViewController *SLCRChatVC(UIViewController *start);
 static UITableView *SLCRChatTable(UIView *root);
+static UITableView *SLCRChatTableAnywhere(void);
 static void SLCRDumpStyleOnce(UIView *root, NSString *tag);
 static NSAttributedString *SLCRReplaceAttributed(NSAttributedString *src, NSString *repl);
 static BOOL SLCRIsLabelLike(id v);
@@ -434,7 +435,6 @@ static NSInteger gSLRecallLog = 0;
 static NSString *SLCRPreview(NSString *s, NSUInteger max);
 
 // 前向声明（这些 static 定义在文件更后面）
-static UITableView *SLCRChatTableAnywhere(void);
 static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl,
                                       NSMutableString *inv, NSInteger *seen);
 static NSInteger SLCRPatchLayers(CALayer *layer, NSString *orig, NSString *repl,
