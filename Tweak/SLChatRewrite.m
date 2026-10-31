@@ -469,9 +469,107 @@ static void SLCRCollectMessageViews(UIView *v, NSInteger depth, NSInteger *budge
     }
 }
 
-// root 子树里离 anchor 最近、且带 message 的那个视图。
-// 菜单位置就是「气泡中心」，拿距离最近的一条，不会误伤相邻气泡。
-static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint anchor, BOOL hasAnchor) {
+// 视图此刻是不是真看得见。cell 里常年挂着一堆复用视图（hidden / alpha=0 / 已移出 window），
+// 它们的 message 还留着上一次渲染的值 —— 这正是「长按哪条都认成同一张卡片」的来源。
+static BOOL SLCRViewVisible(UIView *v) {
+    if (!v) return NO;
+    if (v.hidden || v.alpha < 0.05) return NO;
+    if (!v.window) return NO;
+    return YES;
+}
+
+// 聊天页里面积最大的 UITableView
+static UITableView *SLCRChatTable(UIView *root) {
+    if (!root) return nil;
+    UITableView *best = nil;
+    CGFloat bestArea = 0;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 600;
+    while (stack.count && budget-- > 0) {
+        UIView *v = [stack lastObject];
+        [stack removeLastObject];
+        if ([v isKindOfClass:[UITableView class]]) {
+            CGFloat area = v.bounds.size.width * v.bounds.size.height;
+            if (area > bestArea) { bestArea = area; best = (UITableView *)v; }
+            continue;   // 不进列表内部，免得撞上 cell 里的二级列表
+        }
+        if ([v isKindOfClass:[UICollectionView class]]) continue;
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+    }
+    return best;
+}
+
+// 按屏幕坐标取被长按的那条消息。
+// 菜单给的 targetViewCenter 就是屏幕坐标（和 targetViewFrame 中心一致），
+// 拿到坐标后直接问列表要 indexPath，比在 targetView 子树里翻可靠得多：
+// cell 里常驻的复用视图会把上一张卡片留下来当候选。
+static id SLCRMessageAtScreenPoint(CGPoint pt) {
+    if (CGPointEqualToPoint(pt, CGPointZero)) return nil;
+    UIViewController *chat = SLCRChatVC(SLCRTopVC());
+    UITableView *table = chat ? SLCRChatTable(chat.view) : nil;
+    if (!table) {
+        // 聊天页认不出来时，退一步在所有窗口里找面积最大的列表
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (w.hidden) continue;
+                table = SLCRChatTable(w);
+                if (table) break;
+            }
+            if (table) break;
+        }
+    }
+    if (!table) {
+        SLLog(@"REWRITE 坐标反查：没找到聊天列表（chat=%@）",
+              chat ? NSStringFromClass([chat class]) : @"nil");
+        return nil;
+    }
+    CGPoint p = [table convertPoint:pt fromView:nil];
+    NSIndexPath *ip = [table indexPathForRowAtPoint:p];
+    SLLog(@"REWRITE 坐标反查 pt=(%.0f,%.0f) → 表内 (%.0f,%.0f) ip=%@",
+          pt.x, pt.y, p.x, p.y,
+          ip ? [NSString stringWithFormat:@"%ld-%ld", (long)ip.section, (long)ip.row] : @"nil");
+    if (!ip) return nil;
+
+    UITableViewCell *cell = [table cellForRowAtIndexPath:ip];
+    if (!cell) return nil;
+
+    id m = nil;
+    if ([cell respondsToSelector:NSSelectorFromString(@"message")]) {
+        @try { m = [cell valueForKey:@"message"]; } @catch (NSException *e) { }
+    }
+    if (m) {
+        SLLog(@"REWRITE 坐标命中 cell=%@ 类=%@ frame=%@", NSStringFromClass([cell class]),
+              NSStringFromClass([m class]), NSStringFromCGRect(cell.frame));
+        return m;
+    }
+
+    // cell 自己不挂 message 时，回到它子树里找，并且只认看得见的
+    NSMutableArray *hits = [NSMutableArray array];
+    NSInteger budget = 300;
+    SLCRCollectMessageViews(cell, 0, &budget, hits);
+    UIView *best = nil;
+    CGFloat bestD = CGFLOAT_MAX;
+    for (UIView *v in hits) {
+        if (!SLCRViewVisible(v)) continue;
+        CGRect r = [v convertRect:v.bounds toView:nil];
+        CGFloat d = fabs(CGRectGetMidY(r) - pt.y) + fabs(CGRectGetMidX(r) - pt.x);
+        if (d < bestD) { bestD = d; best = v; }
+    }
+    if (!best) {
+        SLLog(@"REWRITE 坐标命中 cell 但子树里没有可见消息（候选 %lu）", (unsigned long)hits.count);
+        return nil;
+    }
+    @try { m = [best valueForKey:@"message"]; } @catch (NSException *e) { }
+    SLLog(@"REWRITE 坐标命中 cell=%@ 子视图=%@ 偏 %.0f",
+          NSStringFromClass([cell class]), NSStringFromClass([best class]), bestD);
+    return m;
+}
+
+// 兜底：在 root 子树里找带 message 的可见视图。
+// anchor 是屏幕坐标，比较时也得把候选换到 window 坐标 —— 之前拿屏幕坐标比 root 坐标，
+// 量纲都不一样，距离算出来是废的。
+static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint screenAnchor, BOOL hasAnchor) {
     if (!root) return nil;
     NSMutableArray *hits = [NSMutableArray array];
     NSInteger budget = 900;
@@ -480,6 +578,15 @@ static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint anchor, 
           NSStringFromClass([root class]), (unsigned long)hits.count, (long)budget, wantKey ?: @"-");
     if (!hits.count) return nil;
 
+    NSMutableArray *live = [NSMutableArray array];
+    for (UIView *v in hits) {
+        if (SLCRViewVisible(v)) [live addObject:v];
+    }
+    if (live.count != hits.count) {
+        SLLog(@"REWRITE 过滤不可见候选 %lu → %lu", (unsigned long)hits.count, (unsigned long)live.count);
+    }
+    if (!live.count) return nil;
+
     // 1) 精确匹配：菜单给的 "264-DB201489B738" 拆成 264 / DB201489B738，
     //    和每条 message 的 msgid / uuid / remoteid / autoid 逐一比。
     if (wantKey.length) {
@@ -487,7 +594,7 @@ static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint anchor, 
         for (NSString *part in [wantKey componentsSeparatedByString:@"-"]) {
             if (part.length && ![wantAliases containsObject:part]) [wantAliases addObject:part];
         }
-        for (UIView *v in hits) {
+        for (UIView *v in live) {
             id m = nil;
             @try { m = [v valueForKey:@"message"]; } @catch (NSException *e) { }
             if (!m) continue;
@@ -495,50 +602,39 @@ static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint anchor, 
             for (NSString *a in ids) {
                 if (![a isKindOfClass:[NSString class]]) continue;
                 if ([wantAliases containsObject:a]) {
-                    SLLog(@"REWRITE 按 id 命中 %@ frame=%@ ids=[%@]", NSStringFromClass([v class]),
-                          NSStringFromCGRect([v convertRect:v.bounds toView:root]),
-                          [ids componentsJoinedByString:@" "]);
+                    SLLog(@"REWRITE 按 id 命中 %@ 类=%@ ids=[%@]", NSStringFromClass([v class]),
+                          NSStringFromClass([m class]), [ids componentsJoinedByString:@" "]);
                     return m;
                 }
             }
         }
-        // 2) 一个 id 都对不上，但子树里只有这一条消息 —— 就是它（气泡子树不可能有别人）
-        if (hits.count == 1) {
-            UIView *only = hits.firstObject;
-            id m = nil;
-            @try { m = [only valueForKey:@"message"]; } @catch (NSException *e) { }
-            if (m) {
-                SLLog(@"REWRITE id 对不上但唯一候选，直接采用 %@ ids=[%@]",
-                      NSStringFromClass([only class]),
-                      [SLChatRewriteAliasesForMessage(m, wantKey) componentsJoinedByString:@" "]);
-                return m;
-            }
-        }
-        SLLog(@"REWRITE %lu 个候选都对不上 id=%@，放弃（宁可打不开也不改错人）",
-              (unsigned long)hits.count, wantKey);
+        // 不再「唯一候选直接用」：那条兜底会把复用池里的旧卡片当成结果，
+        // 于是长按哪条都变成同一张卡片（v0.5.02 实测就是这样）。
+        SLLog(@"REWRITE %lu 个可见候选都对不上 id=%@，放弃（宁可打不开也不改错人）",
+              (unsigned long)live.count, wantKey);
         return nil;
     }
 
     UIView *best = nil;
     CGFloat bestD = CGFLOAT_MAX;
     CGFloat bestArea = 0;
-    for (UIView *v in hits) {
-        CGRect r = [v convertRect:v.bounds toView:root];
+    for (UIView *v in live) {
+        CGRect r = [v convertRect:v.bounds toView:nil];
         if (CGRectIsEmpty(r)) continue;
         if (!hasAnchor) {
             CGFloat area = r.size.width * r.size.height;
             if (area > bestArea) { bestArea = area; best = v; }
             continue;
         }
-        CGFloat dx = CGRectGetMidX(r) - anchor.x;
-        CGFloat dy = CGRectGetMidY(r) - anchor.y;
+        CGFloat dx = CGRectGetMidX(r) - screenAnchor.x;
+        CGFloat dy = CGRectGetMidY(r) - screenAnchor.y;
         CGFloat d = dx * dx + dy * dy;
         if (d < bestD) { bestD = d; best = v; }
     }
-    if (!best) best = hits.firstObject;
+    if (!best) best = live.firstObject;
     SLLog(@"REWRITE 选中 %@ frame=%@ 离锚点 %.0f",
           NSStringFromClass([best class]),
-          NSStringFromCGRect([best convertRect:best.bounds toView:root]),
+          NSStringFromCGRect([best convertRect:best.bounds toView:nil]),
           (hasAnchor && bestD < CGFLOAT_MAX) ? sqrt(bestD) : -1.0);
 
     id m = nil;
@@ -716,18 +812,28 @@ void SLChatRewriteBeginFromMenu(UIView *menuView) {
           hasCenter ? NSStringFromCGPoint(tvCenter) : @"-",
           menuMid ?: @"-");
 
-    // center 是 targetView 坐标系；frame 可能是屏幕坐标，落不进 bounds 就转一次。
-    if (!hasCenter && !CGRectIsNull(tvFrame) && !CGRectIsEmpty(tvFrame) && tv) {
-        if (CGRectContainsRect(tv.bounds, tvFrame)) {
-            tvCenter = CGPointMake(CGRectGetMidX(tvFrame), CGRectGetMidY(tvFrame));
+    // 统一成屏幕坐标再往下走：targetViewCenter 本身就是屏幕坐标（跟 targetViewFrame
+    // 中心对得上），别拿它跟 root 局部坐标混着比，那样算出来的距离是废的。
+    if (!hasCenter && tv) {
+        CGPoint c = CGPointZero;
+        if (!CGRectIsNull(tvFrame) && !CGRectIsEmpty(tvFrame)) {
+            c = CGPointMake(CGRectGetMidX(tvFrame), CGRectGetMidY(tvFrame));
+            if (CGRectContainsRect(tv.bounds, tvFrame)) {
+                c = [tv convertPoint:c toView:nil];      // frame 是局部坐标，转到屏幕
+            }
         } else {
-            tvCenter = [tv convertPoint:CGPointMake(CGRectGetMidX(tvFrame),
-                                                  CGRectGetMidY(tvFrame)) fromView:nil];
+            c = [tv convertPoint:CGPointMake(CGRectGetMidX(tv.bounds), CGRectGetMidY(tv.bounds))
+                          toView:nil];
         }
+        tvCenter = c;
         hasCenter = YES;
     }
 
-    id message = SLCRMessageNearPoint(tv, menuMid, tvCenter, hasCenter);
+    // 先按坐标问列表要那条消息，再退回子树扫描。
+    // cell 里的复用视图会让子树扫描翻到「上一次渲染的那条」，坐标路径没有这个毛病。
+    id message = nil;
+    if (hasCenter) message = SLCRMessageAtScreenPoint(tvCenter);
+    if (!message) message = SLCRMessageNearPoint(tv, menuMid, tvCenter, hasCenter);
     if (!message) {
         // 不再「拿菜单 msgid 硬开面板」：没拿到 message 就没有原文、也判不出类型，
         // 打开一个空编辑器改完必然不生效（v0.5.00 就是这么空改了一次）。

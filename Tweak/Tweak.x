@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.02"
+#define SLVersion @"0.5.03"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2956,6 +2956,40 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
         }
         id item = [[itemCls alloc] init];
         [item setValue:@"修改" forKey:@"title"];
+
+        // 图标：菜单是自绘 cell，image 为空就只剩一行字，跟原生项放一起很突兀。
+        // 原生项用的什么类型（UIImage 还是包里的图片名）我们照抄，否则 cell 那边会崩；
+        // 实在借不到就留空 —— 宁可没图标，也不能让菜单闪退。
+        id sampleImage = nil;
+        NSInteger sampleType = -1;
+        for (id it in items) {
+            if (sampleType < 0) {
+                id t = nil;
+                @try { t = [it valueForKey:@"itemType"]; } @catch (NSException *e) { }
+                if (t) sampleType = [t integerValue];
+            }
+            id im = nil;
+            @try { im = [it valueForKey:@"image"]; } @catch (NSException *e) { }
+            if (im) { sampleImage = im; break; }
+        }
+        if ([sampleImage isKindOfClass:[UIImage class]]) {
+            UIImage *icon = [UIImage systemImageNamed:@"square.and.pencil"];
+            if (!icon) icon = [UIImage systemImageNamed:@"pencil"];
+            if (icon) [item setValue:icon forKey:@"image"];
+        } else if ([sampleImage isKindOfClass:[NSString class]]) {
+            [item setValue:sampleImage forKey:@"image"];
+        }
+        SLLog(@"REWRITE 菜单项图标：原生 image=%@ itemType=%ld",
+              sampleImage ? NSStringFromClass([sampleImage class]) : @"nil", (long)sampleType);
+
+        // 把原生菜单的项名列出来：有了这张表才能决定「修改」插在哪一项后面最自然
+        NSMutableArray *titles = [NSMutableArray array];
+        for (id it in items) {
+            NSString *t = nil;
+            @try { t = [it valueForKey:@"title"]; } @catch (NSException *e) { }
+            [titles addObject:t ?: @"?"];
+        }
+        SLLog(@"REWRITE 菜单原有项：[%@]", [titles componentsJoinedByString:@" | "]);
         NSMutableArray *out = [NSMutableArray arrayWithArray:items];
         [out addObject:item];
         objc_setAssociatedObject(menuView, kSLCRMenuIndexKey,
