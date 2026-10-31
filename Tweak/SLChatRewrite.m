@@ -434,6 +434,7 @@ static NSInteger gSLRecallLog = 0;
 static NSString *SLCRPreview(NSString *s, NSUInteger max);
 
 // 前向声明（这些 static 定义在文件更后面）
+static UITableView *SLCRChatTableAnywhere(void);
 static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl,
                                       NSMutableString *inv, NSInteger *seen);
 static NSInteger SLCRPatchLayers(CALayer *layer, NSString *orig, NSString *repl,
