@@ -29,6 +29,11 @@ NSString *SLChatRewriteTextForIds(NSArray *_Nullable ids, NSString *_Nullable or
 /// 一条消息要挂的全部 id：msgid / uuid / remoteid / autoid + extra，"a-b" 串还会拆段
 NSArray *SLChatRewriteAliasesForMessage(id _Nullable message, NSString *_Nullable extra);
 
+/// 这条消息能不能当文本改。
+/// 卡片 / 小程序 / 礼物这类消息的 body 是一坨 JSON（卡片配置），不是展示文本，
+/// 改了也不会变 —— 与其让用户对着 JSON 编辑，不如直接拦掉。
+BOOL SLChatRewriteMessageIsText(id _Nullable message);
+
 /// 记一条改写（newText 为空等于还原）
 void SLChatRewriteSave(NSString *msgid, NSArray *_Nullable aliases, NSString *_Nullable newText,
                        NSString *_Nullable orig, NSString *_Nullable session);

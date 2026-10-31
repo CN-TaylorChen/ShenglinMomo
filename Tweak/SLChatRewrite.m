@@ -7,6 +7,7 @@
 #import <objc/runtime.h>
 #import "SLGlass.h"
 #import "SLLog.h"
+#import "AWECAUtils.h"
 
 static NSString *const kSLCRStoreKey   = @"SLChatRewriteStore";
 static NSString *const kSLCREnabledKey = @"SLChatRewriteEnabled";
@@ -161,6 +162,24 @@ NSArray *SLChatRewriteAliasesForMessage(id message, NSString *extra) {
         }
     }
     return out;
+}
+
+// body 是不是「可以直接当文字改」的那种。
+// 卡片 / 小程序 / 礼物 / 火花提示这些消息的 body 是整坨 JSON（prender / icon / images /
+// extends ... 一千多字），卡片上显示的文字是从 JSON 里解析出来的，改 body 不会重新渲染，
+// 于是「保存成功、界面照旧」—— 上一版就是这么白改的。这类一律拦掉。
+BOOL SLChatRewriteMessageIsText(id message) {
+    if (!message) return NO;
+    NSString *body = nil;
+    @try { body = [message valueForKey:@"body"]; } @catch (NSException *e) { }
+    if (![body isKindOfClass:[NSString class]]) return NO;
+    NSString *t = [body stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!t.length) return NO;
+    if (t.length > 1200) return NO;                       // 卡片配置串远长于正常聊天
+    unichar c = [t characterAtIndex:0];
+    if (c == '{' || c == '[') return NO;                  // JSON 对象 / 数组
+    if ([t rangeOfString:@"\":\""].location != NSNotFound) return NO;   // JSON 片段
+    return YES;
 }
 
 void SLChatRewriteSave(NSString *msgid, NSArray *aliases, NSString *newText,
@@ -535,7 +554,16 @@ static NSString *SLCRMsgidOf(id message) {
     return SLCRKeyOf(mid);
 }
 
-static void SLCROpenEditor(id message, NSString *fallbackKey) {
+// SLLog 一行一条，body 里的换行会把日志撑乱；这里压成单行并截断
+static NSString *SLCRPreview(NSString *s, NSUInteger max) {
+    if (![s isKindOfClass:[NSString class]] || !s.length) return @"";
+    NSString *t = [s stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    t = [t stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    if (t.length <= max) return t;
+    return [[t substringToIndex:max] stringByAppendingString:@"…"];
+}
+
+static void SLCROpenEditor(id message, NSString *fallbackKey, NSString *cellCls) {
     NSString *key = SLCRMsgidOf(message) ?: fallbackKey;
     if (!key.length) {
         SLLog(@"REWRITE 打不开：既没有 message 也没有 msgid");
@@ -549,6 +577,24 @@ static void SLCROpenEditor(id message, NSString *fallbackKey) {
     NSString *body = nil;
     @try { body = [message valueForKey:@"body"]; } @catch (NSException *e) { }
     if (![body isKindOfClass:[NSString class]]) body = @"";
+
+    // 类型探针：这一段是「改了没变」时的唯一证据源。
+    // cell 类名 + type/contentType 一起打，下一版就能按白名单精确放行。
+    NSString *typeStr = @"-";
+    NSString *cateStr = @"-";
+    NSString *ctStr = @"-";
+    @try { typeStr = [[message valueForKey:@"type"] description] ?: @"-"; } @catch (NSException *e) { }
+    @try { cateStr = [[message valueForKey:@"cate"] description] ?: @"-"; } @catch (NSException *e) { }
+    @try { ctStr = [[message valueForKey:@"contentType"] description] ?: @"-"; } @catch (NSException *e) { }
+    SLLog(@"REWRITE 类型 cls=%@ cell=%@ type=%@ cate=%@ contentType=%@ body=%@",
+          message ? NSStringFromClass([message class]) : @"nil",
+          cellCls ?: @"-", typeStr, cateStr, ctStr, SLCRPreview(body, 32));
+
+    if (message && !SLChatRewriteMessageIsText(message)) {
+        SLLog(@"REWRITE 拒绝：非文字消息（body 长度 %lu，看上面类型行）", (unsigned long)body.length);
+        [AWECAUtils showToast:@"这条不是文字消息，改不了" duration:2.0];
+        return;
+    }
 
     NSString *orig = body;
     NSString *initial = body;
@@ -586,6 +632,22 @@ static void SLCROpenEditor(id message, NSString *fallbackKey) {
     [host presentViewController:nav animated:YES completion:nil];
 }
 
+// 从锚点视图往上找宿主 cell。类是 Swift 的（MDChatBusinessBase.MDSChatType2Cell），
+// 类名能直接看出消息类型：Type2 文本、Type3 语音、Type28 卡片 —— 日志里一眼能对。
+static NSString *SLCRHostCellClass(UIView *v) {
+    UIView *cur = v;
+    NSInteger guard = 0;
+    while (cur && guard < 20) {
+        guard += 1;
+        if ([cur isKindOfClass:[UITableViewCell class]] ||
+            [cur isKindOfClass:[UICollectionViewCell class]]) {
+            return NSStringFromClass([cur class]);
+        }
+        cur = cur.superview;
+    }
+    return nil;
+}
+
 void SLChatRewriteBeginFromBubble(UIView *view) {
     if (!view) return;
     if (!SLChatRewriteEnabled()) {
@@ -613,7 +675,7 @@ void SLChatRewriteBeginFromBubble(UIView *view) {
         SLLog(@"REWRITE 找不到消息对象（气泡链与子树都没有 message）");
         return;
     }
-    SLCROpenEditor(message, nil);
+    SLCROpenEditor(message, nil, SLCRHostCellClass(view));
 }
 
 void SLChatRewriteBeginFromMenu(UIView *menuView) {
@@ -666,17 +728,13 @@ void SLChatRewriteBeginFromMenu(UIView *menuView) {
     }
 
     id message = SLCRMessageNearPoint(tv, menuMid, tvCenter, hasCenter);
-    if (!message && menuMid.length) {
-        // 兜底：菜单自己记了 msgid（有 msgid 就能改写，正文之后由 body 钩子读）
-        SLLog(@"REWRITE 反查失败，退化为菜单 msgid=%@", menuMid);
-        SLCROpenEditor(nil, menuMid);
-        return;
-    }
     if (!message) {
-        SLLog(@"REWRITE 找不到消息对象（菜单锚点上没有 message，msgid 也是空）");
+        // 不再「拿菜单 msgid 硬开面板」：没拿到 message 就没有原文、也判不出类型，
+        // 打开一个空编辑器改完必然不生效（v0.5.00 就是这么空改了一次）。
+        SLLog(@"REWRITE 反查失败：锚点子树里没有 message，不打开面板（msgid=%@）", menuMid ?: @"-");
         return;
     }
-    SLCROpenEditor(message, menuMid);
+    SLCROpenEditor(message, menuMid, SLCRHostCellClass(tv));
 }
 
 void SLChatRewriteHandleLeave(UIViewController *vc) {

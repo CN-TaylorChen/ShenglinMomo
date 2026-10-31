@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.01"
+#define SLVersion @"0.5.02"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2912,6 +2912,31 @@ static id SLChatBodyGetHook(id self, SEL _cmd) {
     return raw;
 }
 
+// 陌陌里「带表情 / 富文本」的气泡不一定读 body，而是读 textv2。
+// 两条路都堵上：textv2 返回 NSString 才替换；返回模型对象就原样放过（不动它）。
+static NSInteger gSLCRTv2Probe = 0;
+static id SLChatTextV2GetHook(id self, SEL _cmd) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    if (!orig) return nil;
+    id raw = ((id (*)(id, SEL))orig)(self, _cmd);
+    if (![raw isKindOfClass:[NSString class]]) return raw;
+    if (!SLChatRewriteEnabled()) return raw;
+    @try {
+        NSArray *ids = SLChatRewriteAliasesForMessage(self, nil);
+        NSString *rep = SLChatRewriteTextForIds(ids, (NSString *)raw);
+        if (gSLCRTv2Probe < 8 && SLChatRewriteCount() > 0) {
+            gSLCRTv2Probe += 1;
+            SLLog(@"REWRITE-TV2 %@ len=%lu hit=%d text=%@",
+                  NSStringFromClass([self class]),
+                  (unsigned long)[(NSString *)raw length],
+                  (rep != raw) ? 1 : 0,
+                  SLShorten((NSString *)raw, 16));
+        }
+        return rep ?: raw;
+    } @catch (NSException *e) { }
+    return raw;
+}
+
 // 陌陌的气泡菜单是自绘的 MDChatUIMenuView + MDChatUIMenuItem，
 // 往 items 数组尾部塞一项就能和原生项长得一模一样（字体/圆角/箭头都复用它的 cell）。
 static const void *kSLCRMenuIndexKey = &kSLCRMenuIndexKey;
@@ -3001,7 +3026,12 @@ static void SLInstallChatRewriteHooks(void) {
     for (NSString *n in msgClasses) {
         Class c = SLClassByName([n UTF8String]);
         if (!c) continue;
-        if (SLRegisterMethod(c, NSSelectorFromString(@"body"), (IMP)SLChatBodyGetHook)) [hits addObject:n];
+        if (SLRegisterMethod(c, NSSelectorFromString(@"body"), (IMP)SLChatBodyGetHook)) {
+            [hits addObject:n];
+        }
+        if (SLRegisterMethod(c, NSSelectorFromString(@"textv2"), (IMP)SLChatTextV2GetHook)) {
+            [hits addObject:[n stringByAppendingString:@".textv2"]];
+        }
     }
 
     Class menu = SLClassByName("MDChatUIMenuView");
