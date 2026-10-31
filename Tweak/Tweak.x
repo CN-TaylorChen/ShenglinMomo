@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.19"
+#define SLVersion @"0.5.20"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -3193,11 +3193,9 @@ static void SLChatWillDisplayCellHook(id self, SEL _cmd, UITableView *tv,
     // 被拦下来的撤回：单格盖甲卡片（只动被拦的那条，别的消息不碰）。
     // 放在节流之前 —— 否则快速滚动时这一格会被跳过，卡片就不出现了。
     @try { SLRecallApplyCell(cell); } @catch (NSException *e) { }
-    static NSTimeInterval lastT = 0;
-    NSTimeInterval nowT = [[NSDate date] timeIntervalSince1970];
-    if (lastT > 0 && nowT - lastT < 0.08) return;      // 一次滚动会连发十几下，节流
-    lastT = nowT;
-    @try { SLChatMetaApplyTable(tv); } @catch (NSException *e) { }
+    // 只刷这一格。整表扫会把「cell 反查抓到共享对象」的毛病放大成一屏同一条时间，
+    // 而且每滚一格就扫全屏，纯浪费。谁出现就只刷谁。
+    @try { SLChatMetaApplyCellAtIndex(tv, cell, ip); } @catch (NSException *e) { }
 }
 
 static BOOL SLCRTypeHas(Class cls, SEL sel, const char *needle) {

@@ -68,7 +68,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.5.19"
+#define SLVersion @"0.5.20"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -226,14 +226,14 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 2) return 4;   // 合成口令 + 短录音补全 + 合成后先试听 + 失败时放回输入框
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
-    if (section == 5) return 1;   // 运行日志（v0.4.54 去掉「动画预览」入口）
-    if (section == 6) return 5;   // 聊天记录：开关 + 离开重置 + 防撤回 + 隐藏拦截标记 + 已修改 N 条
+    if (section == 5) return 5;   // 聊天记录：开关 + 离开重置 + 防撤回 + 隐藏拦截标记 + 已修改 N 条
+    if (section == 6) return 1;   // 运行日志（诊断永远放最底下）
     return 1;
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
     if (section < 0 || section > 6) return @"";
-    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断", @"聊天记录"][section];
+    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"聊天记录", @"诊断"][section];
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
@@ -430,14 +430,13 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return cell;
     }
 
-    if (ip.section == 5) {
+    if (ip.section == 6) {
         cell.textLabel.text = @"运行日志";
-        cell.detailTextLabel.text = @"点此查看";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
 
-    if (ip.section == 6) {
+    if (ip.section == 5) {
         if (ip.row == 0) {
             cell.textLabel.text = @"修改聊天记录";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
@@ -450,7 +449,6 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         }
         if (ip.row == 1) {
             cell.textLabel.text = @"离开会话时重置";
-            cell.detailTextLabel.text = @"退出聊天即恢复原文";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             sw.on = SLChatRewriteResetOnLeave();
             [sw addTarget:self action:@selector(sl_chatRewriteResetChanged:)
@@ -461,7 +459,6 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         }
         if (ip.row == 2) {
             cell.textLabel.text = @"防撤回";
-            cell.detailTextLabel.text = @"对方撤回后仍显示原文";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             sw.on = SLRecallGuardEnabled();
             [sw addTarget:self action:@selector(sl_recallGuardChanged:)
@@ -472,7 +469,6 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         }
         if (ip.row == 3) {
             cell.textLabel.text = @"隐藏拦截标记";
-            cell.detailTextLabel.text = @"开启后撤回行变普通「对方撤回」，截图不外泄";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             sw.on = SLRecallHidden();
             [sw addTarget:self action:@selector(sl_recallHideChanged:)
@@ -544,12 +540,12 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return;
     }
     if (ip.section == 2 && (ip.row == 1 || ip.row == 2)) return;   // 两个开关行
-    if (ip.section == 5) {
+    if (ip.section == 6) {
         SLLogViewController *vc = [[SLLogViewController alloc] init];
         [self.navigationController pushViewController:vc animated:YES];
         return;
     }
-    if (ip.section == 6) {
+    if (ip.section == 5) {
         if (ip.row == 4) {
             [self.navigationController pushViewController:[[SLChatRewriteListController alloc] init]
                                                  animated:YES];

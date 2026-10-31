@@ -103,6 +103,11 @@ BOOL SLMetaHasOverride(NSString *_Nullable msgid);
 /// 把整张表可见行的时间行按映射刷一遍（保存后 / cell 显示时调）
 void SLChatMetaApplyTable(UITableView *_Nullable tv);
 
+/// 只刷一格（willDisplayCell 用）：indexPath → 数据源取 msgid，最准
+void SLChatMetaApplyCellAtIndex(UITableView *_Nullable tv,
+                                UITableViewCell *_Nullable cell,
+                                NSIndexPath *_Nullable ip);
+
 /// 从气泡菜单进入「改时间 / 距离」面板（跟「修改」同一套锚点反查）
 void SLChatMetaBeginFromMenu(UIView *_Nullable menuView);
 

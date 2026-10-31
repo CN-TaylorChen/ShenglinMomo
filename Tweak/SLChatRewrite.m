@@ -135,6 +135,8 @@ static BOOL SLCRSetShownText(id v, NSString *target);
 static NSString *SLCRTextAnywhere(UIView *v, NSInteger depth);
 static id SLCRMessageOf(id obj);
 static NSString *SLCRMsgidOf(id message);
+static void SLChatClearVisibleHighlights(void);
+NSString *SLCRMsgidAtIndexPath(UITableView *tv, NSIndexPath *ip);
 
 // 聊天界面上每条消息上方那行 `12:48 35.95km` / `5分钟前 96.96km`。
 // 它不在任何 JSON 里 —— App 拿这条消息的发送时间和当时的经纬度现场算出来的，
@@ -185,6 +187,86 @@ static void SLMetaSync(void) {
     [[NSUserDefaults standardUserDefaults] setObject:gSLMetaStore ?: @{} forKey:kSLMetaStoreKey];
 }
 
+// 用户填的是「哪一天几点」这种绝对时间（2026-10-31 12:00），
+// 屏幕上要的是陌陌那种相对说法（10分钟前 / 昨天 12:00）。
+// 所以：存绝对时间，每次渲染时按「当前时刻」重新算一遍 ——
+// 这样时间行会随着时间自己走，而不是焊死成字符串。
+static NSTimeInterval SLMetaParseWhen(NSString *s) {
+    if (![s isKindOfClass:[NSString class]] || !s.length) return 0;
+    NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!t.length) return 0;
+    static NSRegularExpression *re = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:
+              @"^(?:(\\d{2,4})[-/.](\\d{1,2})[-/.](\\d{1,2}))?\\s*(?:(\\d{1,2}):(\\d{1,2}))?$"
+                                                     options:0 error:NULL];
+    });
+    NSTextCheckingResult *m = [re firstMatchInString:t options:0 range:NSMakeRange(0, t.length)];
+    if (!m || m.numberOfRanges < 6) return 0;
+    NSInteger y = 0, mo = 0, dd = 0, hh = -1, mi = 0;
+    if ([m rangeAtIndex:1].location != NSNotFound) y = [[t substringWithRange:[m rangeAtIndex:1]] integerValue];
+    if ([m rangeAtIndex:2].location != NSNotFound) mo = [[t substringWithRange:[m rangeAtIndex:2]] integerValue];
+    if ([m rangeAtIndex:3].location != NSNotFound) dd = [[t substringWithRange:[m rangeAtIndex:3]] integerValue];
+    if ([m rangeAtIndex:4].location != NSNotFound) hh = (NSInteger)[[t substringWithRange:[m rangeAtIndex:4]] integerValue];
+    if ([m rangeAtIndex:5].location != NSNotFound) mi = (NSInteger)[[t substringWithRange:[m rangeAtIndex:5]] integerValue];
+    if (mo == 0 && hh < 0) return 0;              // 「5分钟前」这种就别硬解析了
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *now = [NSDate date];
+    NSDateComponents *nc = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth |
+                                           NSCalendarUnitDay | NSCalendarUnitHour |
+                                           NSCalendarUnitMinute) fromDate:now];
+    if (mo == 0) { mo = nc.month; dd = nc.day; y = nc.year; }
+    if (y < 100) y += 2000;
+    if (y < 1970) y = nc.year;
+    if (mo < 1 || mo > 12) return 0;
+    if (dd < 1 || dd > 31) return 0;
+    if (hh < 0) { hh = nc.hour; mi = nc.minute; }
+    if (hh > 23) hh = 23;
+    if (mi > 59) mi = 59;
+    NSDateComponents *c = [[NSDateComponents alloc] init];
+    c.year = y; c.month = mo; c.day = dd; c.hour = hh; c.minute = mi;
+    NSDate *d = [cal dateFromComponents:c];
+    return d ? [d timeIntervalSince1970] : 0;
+}
+
+// 时间点 → 陌陌那种说法：刚刚 / X分钟前 / X小时前 / 昨天 12:00 / 10-28 15:19
+static NSString *SLMetaWhenText(NSTimeInterval ts) {
+    if (ts <= 0) return nil;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    double diff = now - ts;
+    if (diff < 0) diff = 0;                        // 填了未来 → 当「刚刚」
+    if (diff < 60) return @"刚刚";
+    if (diff < 3600) return [NSString stringWithFormat:@"%d分钟前", (int)(diff / 60)];
+    NSDate *d = [NSDate dateWithTimeIntervalSince1970:ts];
+    NSDate *nowD = [NSDate dateWithTimeIntervalSince1970:now];
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
+    if ([cal isDate:d inSameDayAsDate:nowD]) {
+        // 同一天：一小时内上面的「X分钟前」更贴近陌陌；再往上按小时说
+        return [NSString stringWithFormat:@"%d小时前", (int)(diff / 3600)];
+    }
+    f.dateFormat = @"HH:mm";
+    NSString *hm = [f stringFromDate:d];
+    NSDate *yday = [cal dateByAddingUnit:NSCalendarUnitDay value:-1 toDate:nowD options:0];
+    if (yday && [cal isDate:d inSameDayAsDate:yday]) {
+        return [NSString stringWithFormat:@"昨天 %@", hm];
+    }
+    BOOL sameYear = ([cal component:NSCalendarUnitYear fromDate:d] ==
+                     [cal component:NSCalendarUnitYear fromDate:nowD]);
+    f.dateFormat = sameYear ? @"MM-dd HH:mm" : @"yyyy-MM-dd HH:mm";
+    return [f stringFromDate:d];
+}
+
+// 面板「日期」那一栏最终该显示成什么
+static NSString *SLMetaHeadFor(NSString *dtRaw, NSString *fallback) {
+    if (![dtRaw isKindOfClass:[NSString class]] || !dtRaw.length) return fallback;
+    NSTimeInterval ts = SLMetaParseWhen(dtRaw);
+    NSString *rel = SLMetaWhenText(ts);
+    return rel.length ? rel : dtRaw;               // 解析不出来就按用户写的原样贴
+}
+
 NSString *SLMetaTimeFor(NSString *msgid) {
     if (![msgid isKindOfClass:[NSString class]] || !msgid.length) return nil;
     NSDictionary *e = SLMetaStore()[msgid];
@@ -230,8 +312,8 @@ void SLMetaSave(NSString *msgid, NSString *time, NSString *dist, NSString *date)
     else SLMetaStore()[msgid] = e;
     SLMetaSync();
     SLLog(@"META 保存 %@ 时间=[%@] 距离=[%@] 日期=[%@]", msgid, t ?: @"-", d ?: @"-", dt ?: @"-");
-    // 聊天页当场刷
-    dispatch_async(dispatch_get_main_queue(), ^{ SLChatMetaApplyTable(nil); });
+    // 这里不再整表刷：调用方（面板）拿着「长按的那一格」，精确刷那一条就够。
+    // 整表刷 + cell→msgid 反查不准 = 一改全变，这是 v0.5.19 踩过的坑。
 }
 
 // 形态判据：短串、含 km、无换行 —— 就是那行「时间 距离」。
@@ -313,12 +395,15 @@ BOOL SLMetaIsTimeRowText(NSString *s) {
 // 把某条消息的时间行按它的映射刷一遍。返回是否真的改了。
 //
 // v0.5.12：时间行不是独立 header，它就是这条消息 cell 内部的一个 UILabel（约 100x14），
-// 所以「找时间行」只在【本条 cell 内部】找，绝不再往上去抓别的消息的格子 ——
-// 这是 v0.5.11「好几条一起变」的根因：SLMetaRowViewAbove 往上 4 格，会抓到同组的共享时间格。
-static BOOL SLMetaApplyOne(UITableViewCell *cell) {
+// 所以「找时间行」只在【本条 cell 内部】找，绝不再往上去抓别的消息的格子。
+//
+// v0.5.20：msgid 改成**从外面传进来**。之前这里自己 `SLCRMessageOf(cell)` 反查，
+// 而 cell 上那个「共享对象」会让一整屏 cell 都反查成同一条 —— 于是改一条、
+// 全屏同一条时间都变（用户 v0.5.19 实测「一改所有时间都一样」的真根因）。
+// 传进来的 mid 来自「长按的那条」或「indexPath → 数据源」，都是准的。
+static BOOL SLMetaApplyOneMid(UITableViewCell *cell, NSString *mid) {
     if (!cell) return NO;
-    NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
-    if (!mid.length) return NO;
+    if (![mid isKindOfClass:[NSString class]] || !mid.length) return NO;
     NSString *tt = SLMetaTimeFor(mid);
     NSString *dd = SLMetaDistFor(mid);
     NSString *dt = SLMetaDateFor(mid);
@@ -366,12 +451,13 @@ static BOOL SLMetaApplyOne(UITableViewCell *cell) {
             dist = [orig substringWithRange:[m2 rangeAtIndex:2]];
         }
     }
-    // 日期优先：填了「10-28 15:19」就整体替换时间头（连「5分钟前」这种相对描述也替换）
-    NSString *headOut = dt.length ? dt : (tt.length ? tt : head);
+    // 日期优先：填了「2026-10-31 12:00」就按当前时刻算成「X分钟前」/「昨天 12:00」，
+    // 而且每次渲染都重算 —— 这样它会随着时间自己往前走，不是死字符串。
+    NSString *headOut = dt.length ? SLMetaHeadFor(dt, head) : (tt.length ? tt : head);
     NSString *nd = nil;
     if (dd.length) nd = [dd.lowercaseString hasSuffix:@"km"] ? dd : [dd stringByAppendingString:@"km"];
-    else nd = dist ?: @"km";
-    NSString *out = [NSString stringWithFormat:@"%@ %@", headOut, nd];
+    else nd = dist;                 // 这一行原本就没有距离，别硬塞一个 "km" 上去
+    NSString *out = nd.length ? [NSString stringWithFormat:@"%@ %@", headOut, nd] : headOut;
     if ([out isEqualToString:cur]) return NO;
     if (!SLCRSetShownText(rowView, out)) return NO;
     if (gSLMetaLog < 12) {
@@ -379,6 +465,15 @@ static BOOL SLMetaApplyOne(UITableViewCell *cell) {
         SLLog(@"META 时间距离 [%@] → [%@] (msgid=%@)", cur, out, mid);
     }
     return YES;
+}
+
+// 单格刷新（willDisplay 走这条）：indexPath → 数据源拿 msgid 最准；
+// 拿不到才退回 cell 反查。绝不整表扫，谁出现就刷谁。
+void SLChatMetaApplyCellAtIndex(UITableView *tv, UITableViewCell *cell, NSIndexPath *ip) {
+    if (!cell || !SLMetaStore().count) return;
+    NSString *mid = SLCRMsgidAtIndexPath(tv, ip);
+    if (!mid.length) mid = SLCRMsgidOf(SLCRMessageOf(cell));
+    SLMetaApplyOneMid(cell, mid);
 }
 
 void SLChatMetaApplyTable(UITableView *tv) {
@@ -390,8 +485,16 @@ void SLChatMetaApplyTable(UITableView *tv) {
     if (!tv) tv = SLCRChatTableAnywhere();
     if (!tv) return;
     NSInteger applied = 0;
+    NSMutableSet *used = [NSMutableSet set];
     for (UITableViewCell *cell in tv.visibleCells) {
-        if (SLMetaApplyOne(cell)) applied += 1;
+        NSString *mid = SLCRMsgidAtIndexPath(tv, [tv indexPathForCell:cell]);
+        if (!mid.length) mid = SLCRMsgidOf(SLCRMessageOf(cell));
+        if (!mid.length) continue;
+        // 一条消息只可能占一个 cell。同一个 mid 出现第二遍，说明反查抓到了共享对象，
+        // 这时候再刷就是把别人的行也改成同一条 —— 直接丢掉。
+        if ([used containsObject:mid]) continue;
+        [used addObject:mid];
+        if (SLMetaApplyOneMid(cell, mid)) applied += 1;
     }
     if (applied && gSLMetaLog < 20) {
         gSLMetaLog += 1;
@@ -1141,6 +1244,8 @@ void SLChatRewriteReloadChat(void) {
 @property (nonatomic, copy) NSString *initialTime;
 @property (nonatomic, copy) NSString *initialDist;
 @property (nonatomic, copy) NSString *initialDate;
+/// 长按的那一格。保存后只刷它 —— 这是「只改我按的那条」的唯一可靠锚点。
+@property (nonatomic, weak) UITableViewCell *sourceCell;
 - (void)sl_cancel;
 - (void)sl_save;
 - (UITextField *)sl_addRow:(NSString *)title placeholder:(NSString *)ph value:(NSString *)v;
@@ -1178,7 +1283,7 @@ void SLChatRewriteReloadChat(void) {
     _fields = [NSMutableArray array];
     [self sl_addRow:@"时间" placeholder:@"12:01 / 5分钟前" value:self.initialTime];
     [self sl_addRow:@"距离" placeholder:@"96.96（km 会自动补）" value:self.initialDist];
-    [self sl_addRow:@"日期" placeholder:@"10-28 15:19（填了整体替换时间）" value:self.initialDate];
+    [self sl_addRow:@"日期" placeholder:@"2026-10-31 12:00" value:self.initialDate];
 }
 
 - (UITextField *)sl_addRow:(NSString *)title placeholder:(NSString *)ph value:(NSString *)v {
@@ -1231,7 +1336,9 @@ void SLChatRewriteReloadChat(void) {
 }
 
 - (void)sl_cancel {
-    [self dismissViewControllerAnimated:YES completion:nil];
+    [self dismissViewControllerAnimated:YES completion:^{
+        SLChatClearVisibleHighlights();
+    }];
 }
 
 - (NSString *)sl_trim:(NSString *)s {
@@ -1244,11 +1351,20 @@ void SLChatRewriteReloadChat(void) {
     NSString *d = [self sl_trim:_fields.count > 1 ? _fields[1].text : @""];
     NSString *dt = [self sl_trim:_fields.count > 2 ? _fields[2].text : @""];
     NSString *mid = [self.msgid copy];
+    UITableViewCell *src = self.sourceCell;
     SLMetaSave(mid, t, d, dt);
     [self dismissViewControllerAnimated:YES completion:^{
-        SLChatMetaApplyTable(nil);
+        // 长按弹菜单那一刻陌陌会把气泡刷成按下态，菜单被模态盖住后它常常收不回来，
+        // 于是「改完看着是蓝的」。关窗后连清两次，把它按回正常态。
+        SLChatClearVisibleHighlights();
+        // 只刷「长按的那一条」。全表刷会把整屏同一条时间都改掉（反查抓错对象的锅）。
+        if (!src) return;
+        SLMetaApplyOneMid(src, mid);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ SLChatMetaApplyTable(nil); });
+                       dispatch_get_main_queue(), ^{
+            SLChatClearVisibleHighlights();
+            if (src) SLMetaApplyOneMid(src, mid);
+        });
     }];
 }
 
@@ -1904,6 +2020,7 @@ void SLChatMetaBeginFromMenu(UIView *menuView) {
     editor.initialTime = t0;
     editor.initialDist = d0;
     editor.initialDate = dt0;
+    editor.sourceCell = cell;
 
     UIViewController *host = SLCRTopVC();
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:editor];
@@ -1929,7 +2046,13 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
     // 标签钩子会给所有「像时间行」的标签挂长按，通知栏/其它列表里的「10:30」也会命中。
     // 认不出消息就安静退出，别弹「没认出这条消息」的提示去打扰。
     if (!SLCRMessageOf(cell)) return;
-    NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
+    // msgid 优先走「indexPath → 数据源」：cell 上那个共享对象会让反查整体错位。
+    UITableView *ownerTV = nil;
+    for (UIView *p = cell.superview; p; p = p.superview) {
+        if ([p isKindOfClass:[UITableView class]]) { ownerTV = (UITableView *)p; break; }
+    }
+    NSString *mid = ownerTV ? SLCRMsgidAtIndexPath(ownerTV, [ownerTV indexPathForCell:cell]) : nil;
+    if (!mid.length) mid = SLCRMsgidOf(SLCRMessageOf(cell));
     if (!mid.length) {
         SLLog(@"META 长按时间行：拿不到 msgid，放弃");
         [AWECAUtils showToast:@"没认出这条消息，再试一次" duration:2.0];
@@ -1969,6 +2092,7 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
     editor.initialTime = t0;
     editor.initialDist = d0;
     editor.initialDate = dt0;
+    editor.sourceCell = cell;
 
     UIViewController *host = SLCRTopVC();
     UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:editor];
@@ -2001,6 +2125,11 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
 }
 - (void)sl_handle:(UIGestureRecognizer *)g {
     if (g.state != UIGestureRecognizerStateBegan) return;
+    // 热区和标签可能同时挂着，一次长按只准开一次面板
+    static NSTimeInterval lastOpen = 0;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (lastOpen > 0 && now - lastOpen < 0.8) return;
+    lastOpen = now;
     UIView *v = g.view;
     UITableViewCell *cell = nil;
     for (UIView *p = v; p; p = p.superview) {
@@ -2060,11 +2189,64 @@ void SLChatMetaAttachTimeLongPressForLabel(UIView *label) {
     SLMetaAttachLPToLabel(label, @"labelText");
 }
 
+// 常驻热区：透明，直接盖在「时间 + 距离」那一行上，吃触摸。
+//
+// 为什么不能只挂在标签上：时间行的字其实落在一颗 UITextFieldLabel 里（UITextField
+// 内部的标签），文本框自带的文本交互（日志里那条 UITextSelectionInteraction
+// #_handleMultiTapGesture）会在部分时机把我们的长按抢走 —— 实测就是「有时候能按、
+// 有时候按了没反应」。热区挂在 contentView 最上层，先接到触摸，稳。
+static const NSInteger kSLMetaHotTag = 0x5EC3;
+
+static void SLMetaInstallHotZone(UITableViewCell *cell, UIView *row) {
+    if (!cell || !row) return;
+    UIView *con = cell.contentView;
+    if (!con) return;
+    CGRect r = [row convertRect:row.bounds toView:con];
+    if (CGRectGetWidth(r) < 8.0 || CGRectGetHeight(r) < 6.0) return;
+    r = CGRectInset(r, -14.0, -10.0);
+    // 别超出 cell，免得盖到相邻行上去（会抢别的消息的长按）
+    CGRect b = con.bounds;
+    r = CGRectIntersection(r, b);
+    if (CGRectGetWidth(r) < 8.0) return;
+
+    UIView *hot = [con viewWithTag:kSLMetaHotTag];
+    if (!hot) {
+        hot = [[UIView alloc] initWithFrame:r];
+        hot.tag = kSLMetaHotTag;
+        hot.backgroundColor = [UIColor clearColor];
+        hot.opaque = NO;
+        if (!gSLMetaLPRelay) gSLMetaLPRelay = [[SLMetaTimeLPRelay alloc] init];
+        UILongPressGestureRecognizer *lp =
+            [[UILongPressGestureRecognizer alloc] initWithTarget:gSLMetaLPRelay
+                                                         action:@selector(sl_handle:)];
+        lp.minimumPressDuration = 0.45;
+        lp.cancelsTouchesInView = NO;
+        lp.delaysTouchesBegan = NO;
+        lp.delaysTouchesEnded = NO;
+        lp.delegate = gSLMetaLPRelay;
+        [hot addGestureRecognizer:lp];
+        hot.userInteractionEnabled = YES;
+    } else {
+        hot.frame = r;
+    }
+    // 必须压在最上层：cell 复用后新加的子视图会跑到它上面，每次显示都提一下
+    [con bringSubviewToFront:hot];
+}
+
 void SLChatMetaAttachTimeLongPress(UITableViewCell *cell) {
     if (!cell || !SLChatRewriteEnabled()) return;
     id lab = SLMetaRowViewIn(cell, 6);
-    if (![lab isKindOfClass:[UIView class]]) return;
+    if (![lab isKindOfClass:[UIView class]]) {
+        // 这格没有时间行（图片 / 语音 / 系统消息）→ 把复用时带过来的热区收起来，
+        // 不然它会停在老位置盖住别的行
+        UIView *staleHot = [cell.contentView viewWithTag:kSLMetaHotTag];
+        if (staleHot) staleHot.hidden = YES;
+        return;
+    }
     SLMetaAttachLPToLabel((UIView *)lab, @"willDisplay");
+    SLMetaInstallHotZone(cell, (UIView *)lab);
+    UIView *hot = [cell.contentView viewWithTag:kSLMetaHotTag];
+    if (hot) hot.hidden = NO;
 }
 
 #pragma mark - 渲染层补丁
@@ -2750,19 +2932,23 @@ void SLChatRewritePatchLiveText(NSArray *aliases, NSString *orig, NSString *repl
         gSLCRPatchBudget = 900;
         NSMutableString *trace = [NSMutableString string];
         NSInteger mh = SLCRPatchModelStrings(cell, 5, orig, repl, trace);
-        // 模型改完立刻重绑：bindWithItem: 才是「退出会话重进」真正走的入口，
-        // 只调 setDataItem: 这种属性 setter 不会重排（v0.5.07 就是这么白改的）
-        NSString *how = SLCRTryRebindCell(cell, dataItem);
-        [cell setNeedsLayout];
-        [cell layoutIfNeeded];
-        // 重绑会把模型里的字再抄一份到排版对象上，所以再补一遍
-        mh += SLCRPatchModelStrings(cell, 5, orig, repl, nil);
+        // v0.5.20：先试着直接改活着的标签（不动 bind）。蓝色气泡的唯一来源就是
+        // bindWithItem: 走的那遍高亮配色 —— 只要不重绑，就绝不可能变蓝。
         NSMutableString *inventory = [NSMutableString string];
         NSInteger seenLabels = 0;
         NSInteger lh = SLCRPatchLabelsInView(cell, orig, repl, inventory, &seenLabels);
         NSMutableString *layerInv = [NSMutableString string];
         NSInteger ly = SLCRPatchLayers(cell.layer, orig, repl, layerInv, 6);
+        NSString *how = @"未重绑";
         if (lh == 0 && ly == 0) {
+            // 标签确实换不动（排版对象里没有原文），这时才让 cell 按新模型重绑一次。
+            // 这是兜底路径，不常走；走了也未必能彻底躲掉蓝色，但至少不再是每条都蓝。
+            how = SLCRTryRebindCell(cell, dataItem);
+            [cell setNeedsLayout];
+            [cell layoutIfNeeded];
+            mh += SLCRPatchModelStrings(cell, 5, orig, repl, nil);
+            lh = SLCRPatchLabelsInView(cell, orig, repl, inventory, &seenLabels);
+            ly = SLCRPatchLayers(cell.layer, orig, repl, layerInv, 6);
             SLCRDumpViewTreeOnce(cell, @"cell");
             SLCRDumpLayerTreeOnce(cell, @"cell");
         }
@@ -2883,6 +3069,27 @@ static void SLRecallShowSystemContent(UITableViewCell *cell) {
     [hid removeAllObjects];
 }
 
+// 原文比窗口高 → 让它自己慢慢上下滚（12pt/s，走到底停一下再回来）。
+// 用 layer 动画而不是 UIView 动画：cell 反复复用、列表动来动去都不会打断它。
+static void SLRecallStartScroll(UILabel *body, UIView *clip) {
+    if (!body || !clip) return;
+    [body.layer removeAnimationForKey:@"sl_scroll"];
+    CGFloat contentH = CGRectGetHeight(body.frame);
+    CGFloat winH = CGRectGetHeight(clip.bounds);
+    if (winH < 6.0 || contentH <= winH + 1.0) return;      // 装得下就不滚
+    CGFloat dist = contentH - winH;
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+    a.fromValue = @(0);
+    a.toValue = @(-dist);
+    a.duration = MAX(2.4, (double)dist / 12.0);
+    a.autoreverses = YES;
+    a.repeatCount = 1.0e9f;
+    a.beginTime = CACurrentMediaTime() + 1.0;   // 先让人读到第一行，再开始走
+    a.fillMode = kCAFillModeBoth;
+    a.removedOnCompletion = NO;
+    [body.layer addAnimation:a forKey:@"sl_scroll"];
+}
+
 // 建 / 更新甲卡片。卡片高度按原文估算，行高不够时顶对齐（高度 hook 生效后居中显示更多）。
 static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
     if (!cell || ![orig isKindOfClass:[NSString class]] || !orig.length) return;
@@ -2914,19 +3121,28 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
         pre.textColor = [UIColor colorWithRed:0.706 green:0.698 blue:0.663 alpha:1.0];
         [card addSubview:pre];
 
+        // 原文放进裁剪容器：字多的时候容器高不够，就让这行字在里面慢慢上下滚
+        // （严格 one-line 的窗口也照样能看全文，不再「多的看不到」）
+        UIView *clip = [[UIView alloc] init];
+        clip.tag = 14;
+        clip.clipsToBounds = YES;
+        clip.backgroundColor = [UIColor clearColor];
+        [card addSubview:clip];
+
         UILabel *body = [[UILabel alloc] init];
         body.tag = 13;
         body.font = [UIFont systemFontOfSize:13];
         body.textColor = [UIColor colorWithRed:0.173 green:0.173 blue:0.165 alpha:1.0];
         body.numberOfLines = 0;
         body.lineBreakMode = NSLineBreakByWordWrapping;
-        [card addSubview:body];
+        [clip addSubview:body];
 
         [cell.contentView addSubview:card];
     }
     UILabel *badge = [card viewWithTag:11];
     UILabel *pre   = [card viewWithTag:12];
     UILabel *body  = [card viewWithTag:13];
+    UIView  *clip  = [card viewWithTag:14];
     body.text = orig;
 
     CGFloat cw = CGRectGetWidth(cell.contentView.bounds) - 32.0;
@@ -2964,10 +3180,16 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
         CGFloat bodyX = preX + preW + 4.0;
         CGFloat bodyW = cardW - bodyX - pad;
         if (bodyW < 24.0) bodyW = 24.0;
-        body.numberOfLines = 1;
-        body.lineBreakMode = NSLineBreakByTruncatingTail;
+        // 不再单行截断（用户实测「长文字只剩一行，多的看不到」）。
+        // label 按全文长度铺开，容器只露一行高 —— 超出就滚。
+        body.numberOfLines = 0;
+        body.lineBreakMode = NSLineBreakByWordWrapping;
         body.font = [UIFont systemFontOfSize:12];
-        body.frame = CGRectMake(bodyX, y, bodyW, rowH);
+        CGFloat naturalH = ceil([body sizeThatFits:CGSizeMake(bodyW, CGFLOAT_MAX)].height);
+        if (naturalH < rowH) naturalH = rowH;
+        clip.frame = CGRectMake(bodyX, y, bodyW, rowH);
+        body.frame = CGRectMake(0, 0, bodyW, naturalH);
+        SLRecallStartScroll(body, clip);
 
         CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 2.0;
         if (cardY < 0) cardY = 0;
@@ -2988,19 +3210,19 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
     pre.frame = CGRectMake(pad + badgeW + 8.0, pad + 1.0, cw - badgeW - 8.0 - pad, badgeH);
 
     CGFloat bodyW = cw - pad * 2.0;
-    CGRect bodyRect = [body.text boundingRectWithSize:CGSizeMake(bodyW, CGFLOAT_MAX)
-                                              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                           attributes:@{NSFontAttributeName: body.font}
-                                              context:nil];
-    CGFloat bodyH = (CGFloat)ceil(bodyRect.size.height);
+    CGFloat naturalH = ceil([body sizeThatFits:CGSizeMake(bodyW, CGFLOAT_MAX)].height);
+    if (naturalH < 16.0) naturalH = 16.0;
     CGFloat bodyY = pad + badgeH + 8.0;
-    CGFloat cardH = bodyY + bodyH + pad;
+    CGFloat winH = naturalH;
+    CGFloat cardH = bodyY + naturalH + pad;
     if (cardH > avail) {                       // 再兜一层：绝不越过本行
         cardH = avail;
-        bodyH = cardH - bodyY - pad;
-        if (bodyH < 14.0) bodyH = 14.0;
+        winH = cardH - bodyY - pad;
+        if (winH < 14.0) winH = 14.0;
     }
-    body.frame = CGRectMake(pad, bodyY, bodyW, bodyH);
+    clip.frame = CGRectMake(pad, bodyY, bodyW, winH);
+    body.frame = CGRectMake(0, 0, bodyW, naturalH);
+    SLRecallStartScroll(body, clip);
 
     CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 3.0;
     if (cardY < 0) cardY = 0;
@@ -3019,6 +3241,9 @@ CGFloat SLRecallCardHeight(NSString *orig, CGFloat tableWidth) {
                                   options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                attributes:@{NSFontAttributeName:f} context:nil];
     CGFloat bodyH = (CGFloat)ceil(r.size.height);
+    // 最多给三行高度，再长就在卡片里自己滚（以前是「一行截断」或「撑满半屏」两种极端）
+    CGFloat maxH = ceil(f.lineHeight * 3.0 + 2.0);
+    if (bodyH > maxH) bodyH = maxH;
     return pad + badgeH + 8.0 + bodyH + pad + 4.0;
 }
 
@@ -3091,31 +3316,52 @@ NSString *SLCRMsgidAtIndexPath(UITableView *tv, NSIndexPath *ip) {
     if (!ds) ds = (id)tv.delegate;
     if (!ds) return nil;
     static NSArray *keys = nil;
-    static NSString *foundKey = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         keys = @[@"chatMessages", @"messages", @"dataArray", @"messageList",
-                 @"msgList", @"items", @"msgModels", @"modelList", @"dataSourceArray"];
+                 @"msgList", @"items", @"msgModels", @"modelList", @"dataSourceArray",
+                 @"displayMessages", @"datas", @"list", @"rows", @"cellItems"];
     });
-    NSArray *arr = nil;
-    if (foundKey) {
-        @try { id a = [ds valueForKey:foundKey]; if ([a isKindOfClass:[NSArray class]]) arr = a; } @catch (NSException *e) {}
-    }
-    if (!arr) {
-        for (NSString *k in keys) {
-            @try {
-                id a = [ds valueForKey:k];
-                if ([a isKindOfClass:[NSArray class]] && [a count] > (NSUInteger)ip.row) {
-                    arr = a; foundKey = k;
-                    SLLog(@"RECALL-HEIGHT 命中数据源 key=%@", k);
-                    break;
-                }
-            } @catch (NSException *e) {}
-        }
-    }
-    if (!arr) return nil;
+
     id m = nil;
-    @try { m = arr[ip.row]; } @catch (NSException *e) {}
+    // 1) 常见属性名
+    for (NSString *k in keys) {
+        @try {
+            id a = [ds valueForKey:k];
+            if ([a isKindOfClass:[NSArray class]] && [a count] > (NSUInteger)ip.row) {
+                id cand = a[(NSUInteger)ip.row];
+                NSString *mid = SLCRMsgidOf(cand);
+                if (mid.length) { m = cand; break; }
+            }
+        } @catch (NSException *e) {}
+    }
+    // 2) 属性名猜不到就直接翻 ivar —— 陌陌的 helper 是 Swift 类，属性名不一定对得上。
+    //    只认「能取出一条真消息（有 body + msgid）」的那个数组，别的一律跳过。
+    if (!m) {
+        Class cls = object_getClass(ds);
+        NSInteger guard = 0;
+        while (cls && cls != [NSObject class] && guard < 8 && !m) {
+            unsigned int n = 0;
+            Ivar *ivars = class_copyIvarList(cls, &n);
+            for (unsigned int i = 0; i < n && !m; i++) {
+                const char *t = ivar_getTypeEncoding(ivars[i]);
+                if (!t || t[0] != '@') continue;
+                id v = nil;
+                @try { v = object_getIvar(ds, ivars[i]); } @catch (NSException *e) { }
+                if (![v isKindOfClass:[NSArray class]]) continue;
+                NSArray *a = (NSArray *)v;
+                if ([a count] <= (NSUInteger)ip.row) continue;
+                id cand = nil;
+                @try { cand = a[(NSUInteger)ip.row]; } @catch (NSException *e) { }
+                if (!cand) continue;
+                if (SLCRMsgidOf(cand).length) m = cand;
+            }
+            if (ivars) free(ivars);
+            cls = class_getSuperclass(cls);
+            guard += 1;
+        }
+        if (m) SLLog(@"RECALL-HEIGHT 数据源 ivar 兜底命中（row=%ld）", (long)ip.row);
+    }
     return SLCRMsgidOf(m);
 }
 
