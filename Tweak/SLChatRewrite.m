@@ -505,10 +505,26 @@ void SLChatRewriteReloadChat(void) {
         }
     }
     if (self.doneBlock) self.doneBlock(changed);
+    // 补丁要在 reload 之后再补一次：reloadData 会重新绑 cell，绑的时候如果又拿到旧排版，
+    // 刚才换上去的字会被盖回去。所以顺序是 先补 → 关面板 → 刷新 → 再补 → 回读。
+    NSArray *aliases = [self.aliases copy];
+    NSString *session = [self.session copy];
+    NSString *msgid = [self.msgid copy];
+    (void)session; (void)msgid;
+    NSString *origCopy = [origStr copy];
+    NSString *curCopy = [current copy];
+    NSString *textCopy = [text copy];
     [self dismissViewControllerAnimated:YES completion:^{
-        if (!changed) return;
+        if (!changed || !aliases) return;
         SLChatRewriteReloadChat();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            SLChatRewritePatchLiveText(aliases, origCopy, textCopy);
+            if (![curCopy isEqualToString:origTrim]) {
+                SLChatRewritePatchLiveText(aliases, curCopy, textCopy);
+            }
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.55 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             SLChatRewriteDumpVisibleText();
         });
@@ -1132,49 +1148,194 @@ static NSInteger SLCRPatchModelStrings(id obj, NSInteger depth, NSString *orig, 
     return hits;
 }
 
-// 已经排好版的气泡标签：MDMixLabel 里 text / attributedString 就是屏幕上那行字
-static NSInteger SLCRPatchLabels(UIView *v, NSString *orig, NSString *repl) {
-    if (!v) return 0;
-    NSInteger hits = 0;
-    NSString *cn = NSStringFromClass([v class]);
-    if ([cn containsString:@"MixLabel"] || [v isKindOfClass:[UILabel class]]) {
-        id t = nil;
-        @try { t = [v valueForKey:@"text"]; } @catch (NSException *e) { }
-        if ([t isKindOfClass:[NSString class]] && SLCRStringIs((NSString *)t, orig)) {
-            @try { [v setValue:repl forKey:@"text"]; hits += 1; } @catch (NSException *e) { }
-        } else {
-            id as = nil;
-            @try { as = [v valueForKey:@"attributedString"]; } @catch (NSException *e) { }
-            if ([as isKindOfClass:[NSAttributedString class]] &&
-                SLCRStringIs([(NSAttributedString *)as string], orig)) {
-                NSAttributedString *na = SLCRReplaceAttributed((NSAttributedString *)as, repl);
-                if (na) { @try { [v setValue:na forKey:@"attributedString"]; hits += 1; } @catch (NSException *e) { } }
+// 已经排好版的气泡标签：MDMixLabel 里 text / attributedString 就是屏幕上那行字。
+//
+// **别再对 MDMixLabel 用 valueForKey**（v0.5.06 的坑）：它是 Swift 类，属性不是
+// @objc dynamic，valueForKey:@"text" 直接抛 NSUnknownKeyException。外面套着 @catch，
+// 于是日志打「标签 0 处」——标签明明在屏幕上，只是读不出来，补丁就只改模型不改显示，
+// 要退出会话重进（重进走的是 setAttributedString: 钩子）才刷新。
+// 这里声明一个同签名的探针接口，直接发消息，绕开 KVC。
+@interface SLCRMixLabelProbe : NSObject
+- (id)text;
+- (id)attributedString;
+- (void)setText:(id)text;
+- (void)setAttributedString:(id)as;
+@end
+
+static BOOL SLCRIsLabelLike(id v) {
+    if (![v isKindOfClass:[UIView class]]) return NO;
+    if ([v isKindOfClass:[UILabel class]]) return YES;
+    if ([NSStringFromClass([v class]) containsString:@"MixLabel"]) return YES;
+    return [v respondsToSelector:@selector(setAttributedString:)] ||
+           [v respondsToSelector:@selector(setText:)];
+}
+
+// 屏幕上这行字。MDMixLabel 只认 attributedString（自绘表情混排），普通 UILabel 反过来先看 attributedText。
+static NSString *SLCRShownTextOf(id v) {
+    if (!v) return nil;
+    NSString *t = nil;
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        t = l.attributedText.length ? l.attributedText.string : l.text;
+    } else {
+        if ([v respondsToSelector:@selector(attributedString)]) {
+            @try {
+                id as = [(SLCRMixLabelProbe *)v attributedString];
+                if ([as isKindOfClass:[NSAttributedString class]]) t = [(NSAttributedString *)as string];
+            } @catch (NSException *e) { }
+        }
+        if (!t.length && [v respondsToSelector:@selector(text)]) {
+            @try {
+                id x = [(SLCRMixLabelProbe *)v text];
+                if ([x isKindOfClass:[NSString class]]) t = (NSString *)x;
+            } @catch (NSException *e) { }
+        }
+    }
+    t = [t stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return t.length ? t : nil;
+}
+
+static BOOL SLCRSetShownText(id v, NSString *target) {
+    if (!v || ![target isKindOfClass:[NSString class]] || !target.length) return NO;
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        if (l.attributedText.length) {
+            NSAttributedString *na = SLCRReplaceAttributed(l.attributedText, target);
+            if (na) { l.attributedText = na; return YES; }
+        }
+        l.text = target;
+        return YES;
+    }
+    if ([v respondsToSelector:@selector(attributedString)] &&
+        [v respondsToSelector:@selector(setAttributedString:)]) {
+        NSAttributedString *as = nil;
+        @try {
+            id x = [(SLCRMixLabelProbe *)v attributedString];
+            if ([x isKindOfClass:[NSAttributedString class]]) as = (NSAttributedString *)x;
+        } @catch (NSException *e) { }
+        if (as.length) {
+            NSAttributedString *na = SLCRReplaceAttributed(as, target);
+            if (na) {
+                @try { [(SLCRMixLabelProbe *)v setAttributedString:na]; return YES; }
+                @catch (NSException *e) { }
             }
         }
     }
-    for (UIView *sub in v.subviews) hits += SLCRPatchLabels(sub, orig, repl);
+    if ([v respondsToSelector:@selector(setText:)]) {
+        @try { [(SLCRMixLabelProbe *)v setText:target]; return YES; }
+        @catch (NSException *e) { }
+    }
+    return NO;
+}
+
+// 一个 cell 子树里的所有标签：换字，顺手把清单记下来（下一版排错靠它）
+static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl,
+                                       NSMutableString *inventory, NSInteger *seen) {
+    if (!v) return 0;
+    NSInteger hits = 0;
+    if (SLCRIsLabelLike(v)) {
+        NSString *shown = SLCRShownTextOf(v);
+        if (shown.length) {
+            if (seen) *seen += 1;
+            if (inventory && inventory.length < 240) {
+                [inventory appendFormat:@"%@«%@» ", NSStringFromClass([v class]), SLCRPreview(shown, 10)];
+            }
+            // 这串字本身是不是某条改写的原文（跟 setText: 钩子同一个判据）；
+            // 不是的话再按本次要改的原文对一次，对上就直接换成本次的新文。
+            NSString *mapped = SLChatRewriteTextForPlainString(shown);
+            NSString *target = mapped.length ? mapped : (SLCRStringIs(shown, orig) ? repl : nil);
+            if (target.length && ![target isEqualToString:shown]) {
+                if (SLCRSetShownText(v, target)) {
+                    hits += 1;
+                    [v setNeedsDisplay];
+                    [v setNeedsLayout];
+                }
+            }
+        }
+    }
+    for (UIView *sub in v.subviews) {
+        hits += SLCRPatchLabelsInView(sub, orig, repl, inventory, seen);
+    }
     return hits;
 }
 
 static NSString *SLCRFirstMixLabelText(UIView *v) {
     if (!v) return nil;
-    NSString *cn = NSStringFromClass([v class]);
-    if ([cn containsString:@"MixLabel"] || [v isKindOfClass:[UILabel class]]) {
-        id t = nil;
-        @try { t = [v valueForKey:@"text"]; } @catch (NSException *e) { }
-        if ([t isKindOfClass:[NSString class]] && [(NSString *)t length]) return (NSString *)t;
-        id as = nil;
-        @try { as = [v valueForKey:@"attributedString"]; } @catch (NSException *e) { }
-        if ([as isKindOfClass:[NSAttributedString class]]) {
-            NSString *s = [(NSAttributedString *)as string];
-            if (s.length) return s;
-        }
+    if (SLCRIsLabelLike(v)) {
+        NSString *s = SLCRShownTextOf(v);
+        if (s.length) return s;
     }
     for (UIView *sub in v.subviews) {
         NSString *s = SLCRFirstMixLabelText(sub);
         if (s.length) return s;
     }
     return nil;
+}
+
+// 标签换不动时的最后一招：让 cell 自己重排一遍。
+// Swift 的 cell 通常有个「塞数据重排版」的方法（setDataItem:/setItem:/configureWithItem:…），
+// 名字不确定，就按签名挑：必须正好一个对象参数、返回 void，别的绝不碰（多参数会读到垃圾栈值）。
+static NSString *SLCRTryReconfigureCell(UITableViewCell *cell, id dataItem) {
+    if (!cell || !dataItem) return @"-";
+    NSMutableArray *tried = [NSMutableArray array];
+    @try {
+        [cell setValue:dataItem forKey:@"dataItem"];
+        [tried addObject:@"kvc"];
+    } @catch (NSException *e) { }
+    // 只挑「语义上就是塞同一个 dataItem」的入口 —— setMessage:/setModel: 之类的名字
+    // 看着像但参数类型未必对得上，塞错东西会留下更难查的崩溃
+    NSArray *names = @[@"setDataItem:", @"setItem:", @"configureWithItem:",
+                       @"updateWithItem:", @"configureWithDataItem:"];
+    for (NSString *name in names) {
+        SEL sel = NSSelectorFromString(name);
+        if (![cell respondsToSelector:sel]) continue;
+        NSMethodSignature *sig = [cell methodSignatureForSelector:sel];
+        if (!sig || sig.numberOfArguments != 3) continue;
+        const char *at = [sig getArgumentTypeAtIndex:2];
+        if (!at || at[0] != '@') continue;
+        @try {
+            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+            [inv setTarget:cell];
+            [inv setSelector:sel];
+            __unsafe_unretained id arg = dataItem;
+            [inv setArgument:&arg atIndex:2];
+            [inv invoke];
+            [tried addObject:name];
+        } @catch (NSException *e) { }
+    }
+    return tried.count ? [tried componentsJoinedByString:@","] : @"-";
+}
+
+// 排错用：把某个类（含父类）里跟「重新加载/重排版」沾边的方法名打一行。
+// 同一个类只打一次，别每保存一遍刷屏。
+static void SLCRProbeSelectorsOnce(Class cls, NSString *tag) {
+    if (!cls) return;
+    static NSMutableSet *seen = nil;
+    if (!seen) seen = [NSMutableSet set];
+    NSString *key = [NSString stringWithFormat:@"%@|%@", tag, NSStringFromClass(cls)];
+    if ([seen containsObject:key]) return;
+    [seen addObject:key];
+    NSArray *kws = @[@"reload", @"refresh", @"update", @"load", @"setup", @"config",
+                     @"item", @"message", @"cell", @"render", @"bind"];
+    NSMutableArray *out = [NSMutableArray array];
+    Class c = cls;
+    NSInteger guard = 0;
+    while (c && c != [NSObject class] && guard < 6 && out.count < 70) {
+        unsigned int n = 0;
+        Method *ms = class_copyMethodList(c, &n);
+        for (unsigned int i = 0; i < n && out.count < 70; i++) {
+            NSString *sel = NSStringFromSelector(method_getName(ms[i]));
+            if ([sel hasPrefix:@"."]) continue;
+            for (NSString *kw in kws) {
+                if ([sel rangeOfString:kw].location != NSNotFound) { [out addObject:sel]; break; }
+            }
+        }
+        if (ms) free(ms);
+        c = class_getSuperclass(c);
+        guard += 1;
+    }
+    SLLog(@"REWRITE-PROBE %@ %@ 候选 %lu：%@", tag, NSStringFromClass(cls),
+          (unsigned long)out.count, [out componentsJoinedByString:@" | "]);
 }
 
 void SLChatRewritePatchLiveText(NSArray *aliases, NSString *orig, NSString *repl) {
@@ -1209,16 +1370,38 @@ void SLChatRewritePatchLiveText(NSArray *aliases, NSString *orig, NSString *repl
         gSLCRPatchBudget = 900;
         NSMutableString *trace = [NSMutableString string];
         NSInteger mh = SLCRPatchModelStrings(cell, 5, orig, repl, trace);
-        NSInteger lh = SLCRPatchLabels(cell, orig, repl);
+        NSMutableString *inventory = [NSMutableString string];
+        NSInteger seenLabels = 0;
+        NSInteger lh = SLCRPatchLabelsInView(cell, orig, repl, inventory, &seenLabels);
+        NSString *how = @"-";
+        if (lh == 0) {
+            // 标签换不动 → 让 cell 自己按新模型重排一次，再补一次
+            how = SLCRTryReconfigureCell(cell, dataItem);
+            [cell setNeedsLayout];
+            [cell layoutIfNeeded];
+            lh += SLCRPatchLabelsInView(cell, orig, repl, inventory, &seenLabels);
+        }
         modelHits += mh;
         labelHits += lh;
-        SLLog(@"REWRITE 渲染补丁 cell=%@ dataItem=%@ 模型 %ld 处 [%@] 标签 %ld 处",
+        SLLog(@"REWRITE 渲染补丁 cell=%@ dataItem=%@ 模型 %ld 处 [%@] 标签 %ld 处/%ld 个 [%@] 重排=%@",
               NSStringFromClass([cell class]), itemCls, (long)mh,
-              trace.length ? trace : @"-", (long)lh);
+              trace.length ? trace : @"-", (long)lh, (long)seenLabels,
+              inventory.length ? inventory : @"-", how);
+        if (lh > 0 || mh > 0) {
+            SLCRProbeSelectorsOnce([cell class], @"cell");
+            SLCRProbeSelectorsOnce([chat class], @"vc");
+        }
     }
     if (!cells) SLLog(@"REWRITE 渲染补丁：可见 cell 里没找到这条消息（orig=%@）", SLCRPreview(orig, 16));
-    else SLLog(@"REWRITE 渲染补丁合计 %ld 个 cell，模型 %ld 处 / 标签 %ld 处",
-               (long)cells, (long)modelHits, (long)labelHits);
+    else {
+        SLLog(@"REWRITE 渲染补丁合计 %ld 个 cell，模型 %ld 处 / 标签 %ld 处",
+              (long)cells, (long)modelHits, (long)labelHits);
+        // 字变长了气泡得跟着长，不然新字被旧高度裁掉一截
+        if (labelHits > 0) {
+            [tv beginUpdates];
+            [tv endUpdates];
+        }
+    }
 }
 
 // 刷新后回读：屏幕上真正显示的字是什么。下次再出问题，这一行就能定性。
@@ -1228,11 +1411,16 @@ void SLChatRewriteDumpVisibleText(void) {
     if (!tv) return;
     NSInteger n = 0;
     for (UITableViewCell *cell in tv.visibleCells) {
-        if (n >= 5) break;
+        if (n >= 12) break;
         id m = SLCRMessageOf(cell);
         NSString *mid = SLCRMsgidOf(m) ?: @"-";
         NSString *shown = SLCRFirstMixLabelText(cell) ?: SLCRLongestText(cell) ?: @"-";
-        SLLog(@"REWRITE 显示 %@ → [%@]", mid, SLCRPreview(shown, 20));
+        NSArray *ids = m ? SLChatRewriteAliasesForMessage(m, nil) : nil;
+        // 空串当「没有记录」：这个函数拿它当 orig 原样返回，正好用来判有没有改写
+        NSString *want = SLChatRewriteTextForIds(ids, @"");
+        SLLog(@"REWRITE 显示 %@ → [%@]%@", mid, SLCRPreview(shown, 20),
+              want.length ? [NSString stringWithFormat:@" 应为[%@]%@", SLCRPreview(want, 20),
+                             [want isEqualToString:shown] ? @" ✓" : @" ✗"] : @"");
         n += 1;
     }
 }
