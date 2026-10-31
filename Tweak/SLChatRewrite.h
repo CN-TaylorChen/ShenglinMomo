@@ -22,8 +22,15 @@ void SLChatRewriteSetResetOnLeave(BOOL on);
 /// 该消息当前应该显示的文本。没有改写记录时原样返回 orig。
 NSString *SLChatRewriteTextForMsgid(id _Nullable msgid, NSString *_Nullable orig);
 
+/// 同一份改写记录可以挂多个 id（msgid / uuid / 菜单里的 "seq-uuid" 串），
+/// 任一命中就算命中 —— 陌陌的菜单 id 与消息对象的 msgid 不是同一个值。
+NSString *SLChatRewriteTextForIds(NSArray *_Nullable ids, NSString *_Nullable orig);
+
+/// 一条消息要挂的全部 id：msgid / uuid / remoteid / autoid + extra，"a-b" 串还会拆段
+NSArray *SLChatRewriteAliasesForMessage(id _Nullable message, NSString *_Nullable extra);
+
 /// 记一条改写（newText 为空等于还原）
-void SLChatRewriteSave(NSString *msgid, NSString *_Nullable newText,
+void SLChatRewriteSave(NSString *msgid, NSArray *_Nullable aliases, NSString *_Nullable newText,
                        NSString *_Nullable orig, NSString *_Nullable session);
 
 NSInteger SLChatRewriteCount(void);

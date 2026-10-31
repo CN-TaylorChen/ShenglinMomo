@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.00"
+#define SLVersion @"0.5.01"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2879,6 +2879,7 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
 #pragma mark - 聊天记录修改（v0.4.97）
 
 // 只在开着的时候拦；关掉时原样返回，零开销。
+static NSInteger gSLCRProbe = 0;
 static id SLChatBodyGetHook(id self, SEL _cmd) {
     IMP orig = SLGetOrigIMP(self, _cmd);
     if (!orig) return nil;
@@ -2886,10 +2887,26 @@ static id SLChatBodyGetHook(id self, SEL _cmd) {
     if (![raw isKindOfClass:[NSString class]]) return raw;
     if (!SLChatRewriteEnabled()) return raw;
     @try {
-        id mid = nil;
-        @try { mid = [self valueForKey:@"msgid"]; } @catch (NSException *e) { }
-        if (!mid) { @try { mid = [self valueForKey:@"uuid"]; } @catch (NSException *e) { } }
-        NSString *rep = SLChatRewriteTextForMsgid(mid, (NSString *)raw);
+        // 陌陌的菜单 id 与消息对象 msgid 不是同一个值（菜单是 "seq-uuid"），
+        // 所以要拿全套 id 去查，命中任意一个都算。
+        NSArray *ids = SLChatRewriteAliasesForMessage(self, nil);
+        NSString *rep = SLChatRewriteTextForIds(ids, (NSString *)raw);
+        // 探针：只在前 12 次读 body 且有条目时打，用来确认真的是这条路径在渲染
+        if (gSLCRProbe < 12 && SLChatRewriteCount() > 0) {
+            gSLCRProbe += 1;
+            NSString *tv2Cls = @"-";
+            @try {
+                id tv2 = [self valueForKey:@"textv2"];
+                if (tv2) tv2Cls = NSStringFromClass([tv2 class]);
+            } @catch (NSException *e) { }
+            SLLog(@"REWRITE-PROBE %@ ids=[%@] len=%lu hit=%d textv2=%@ body=%@",
+                  NSStringFromClass([self class]),
+                  [ids componentsJoinedByString:@" "],
+                  (unsigned long)[(NSString *)raw length],
+                  (rep != raw) ? 1 : 0,
+                  tv2Cls,
+                  SLShorten((NSString *)raw, 14));
+        }
         return rep ?: raw;
     } @catch (NSException *e) { }
     return raw;

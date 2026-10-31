@@ -56,12 +56,58 @@ static NSMutableDictionary *SLCRStore(void) {
     return gSLCRCache;
 }
 
+// 别名索引缓存（alias -> entry），落盘或改写时失效重建
+static NSMutableDictionary *gSLCRIndex = nil;
+
 static void SLCRFlush(NSDictionary *store) {
     gSLCRCache = store ? [NSMutableDictionary dictionaryWithDictionary:store] : [NSMutableDictionary dictionary];
+    gSLCRIndex = nil;   // 别名索引下次查询时重建
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     if (gSLCRCache.count) [d setObject:gSLCRCache forKey:kSLCRStoreKey];
     else [d removeObjectForKey:kSLCRStoreKey];
     [d synchronize];
+}
+
+#pragma mark - 别名索引
+//
+// 陌陌的菜单和消息对象用的不是同一个 id：
+//   菜单 msgid = "264-DB201489B738"（seq-uuid 拼的）
+//   消息 msgid = 264 / uuid = DB201489B738
+// 所以一条改写要挂多个别名，body getter 拿哪个都能命中。
+// 用一张 alias -> entry 的表，避免每次 body 读都遍历整个 store。
+
+static void SLCRRebuildIndex(void) {
+    NSMutableDictionary *idx = [NSMutableDictionary dictionary];
+    NSDictionary *store = SLCRStore();
+    [store enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) {
+        (void)stop;
+        if (![v isKindOfClass:[NSDictionary class]]) return;
+        idx[k] = v;
+        // 老版本只存了 "264-DB201489B738" 这种主键，没有 ids；
+        // 这里顺手把段拆出来，升级前改过的记录也能继续命中。
+        for (NSString *part in [(NSString *)k componentsSeparatedByString:@"-"]) {
+            if (part.length > 1 && !idx[part]) idx[part] = v;
+        }
+        NSArray *ids = ((NSDictionary *)v)[@"ids"];
+        if (![ids isKindOfClass:[NSArray class]]) return;
+        for (id a in ids) {
+            if ([a isKindOfClass:[NSString class]] && [(NSString *)a length]) idx[a] = v;
+        }
+    }];
+    gSLCRIndex = idx;
+}
+
+static NSDictionary *SLCRLookup(NSString *key) {
+    if (!key.length) return nil;
+    if (!gSLCRIndex) SLCRRebuildIndex();
+    id v = gSLCRIndex[key];
+    return [v isKindOfClass:[NSDictionary class]] ? v : nil;
+}
+
+static NSString *SLCRTextOfEntry(NSDictionary *entry) {
+    if (![entry isKindOfClass:[NSDictionary class]]) return nil;
+    NSString *t = entry[@"t"];
+    return ([t isKindOfClass:[NSString class]] && t.length) ? t : nil;
 }
 
 static NSString *SLCRKeyOf(id msgid) {
@@ -78,17 +124,47 @@ static NSString *SLCRKeyOf(id msgid) {
 NSString *SLChatRewriteTextForMsgid(id msgid, NSString *orig) {
     if (!orig) return orig;
     if (!SLChatRewriteEnabled()) return orig;
-    NSString *key = SLCRKeyOf(msgid);
-    if (!key.length) return orig;
-    NSDictionary *store = SLCRStore();
-    NSDictionary *entry = store[key];
-    if (![entry isKindOfClass:[NSDictionary class]]) return orig;
-    NSString *text = entry[@"t"];
-    if (![text isKindOfClass:[NSString class]] || !text.length) return orig;
-    return text;
+    NSString *text = SLCRTextOfEntry(SLCRLookup(SLCRKeyOf(msgid)));
+    return text ?: orig;
 }
 
-void SLChatRewriteSave(NSString *msgid, NSString *newText, NSString *orig, NSString *session) {
+NSString *SLChatRewriteTextForIds(NSArray *ids, NSString *orig) {
+    if (!orig) return orig;
+    if (!SLChatRewriteEnabled()) return orig;
+    if (![ids isKindOfClass:[NSArray class]] || !ids.count) return orig;
+    for (id a in ids) {
+        NSString *key = SLCRKeyOf(a);
+        NSString *text = SLCRTextOfEntry(SLCRLookup(key));
+        if (text) return text;
+    }
+    return orig;
+}
+
+// 一条改写要挂的 id 集合：消息对象上的每个 id 字段 + 菜单给的串 + 串里拆出来的段。
+// "264-DB201489B738" 拆成 264 / DB201489B738，body getter 用它拿到的任何一个都能命中。
+NSArray *SLChatRewriteAliasesForMessage(id message, NSString *extra) {
+    NSMutableArray *out = [NSMutableArray array];
+    NSArray *keys = @[@"msgid", @"uuid", @"remoteid", @"autoid"];
+    for (NSString *k in keys) {
+        id v = nil;
+        @try { v = [message valueForKey:k]; } @catch (NSException *e) { }
+        NSString *s = SLCRKeyOf(v);
+        if (s.length && ![out containsObject:s]) [out addObject:s];
+    }
+    if ([extra isKindOfClass:[NSString class]] && extra.length && ![out containsObject:extra]) {
+        [out addObject:extra];
+    }
+    for (NSString *s in [out copy]) {
+        if (![s isKindOfClass:[NSString class]] || ![s containsString:@"-"]) continue;
+        for (NSString *part in [s componentsSeparatedByString:@"-"]) {
+            if (part.length && ![out containsObject:part]) [out addObject:part];
+        }
+    }
+    return out;
+}
+
+void SLChatRewriteSave(NSString *msgid, NSArray *aliases, NSString *newText,
+                       NSString *orig, NSString *session) {
     NSString *key = SLCRKeyOf(msgid);
     if (!key.length) {
         SLLog(@"REWRITE 保存失败：没有消息号");
@@ -96,24 +172,44 @@ void SLChatRewriteSave(NSString *msgid, NSString *newText, NSString *orig, NSStr
     }
     NSMutableDictionary *store = SLCRStore();
     if (!newText.length) {
+        // 还原：主键和别名命中的那条一起删
+        NSDictionary *hit = SLCRLookup(key);
+        NSString *primary = key;
+        if (hit) {
+            for (NSString *k in store) {
+                if (store[k] == hit) { primary = k; break; }
+            }
+        }
+        [store removeObjectForKey:primary];
         [store removeObjectForKey:key];
         SLCRFlush(store);
-        SLLog(@"REWRITE 还原 %@", key);
+        SLLog(@"REWRITE 还原 %@", primary);
         return;
     }
-    NSDictionary *old = store[key];
+    NSDictionary *old = SLCRLookup(key);
     NSString *keepOrig = orig;
     if ([old isKindOfClass:[NSDictionary class]] && [old[@"o"] isKindOfClass:[NSString class]]) {
         keepOrig = old[@"o"];   // 多次修改时始终保留最初的原文
     }
+    NSMutableArray *ids = [NSMutableArray array];
+    if ([aliases isKindOfClass:[NSArray class]]) {
+        for (id a in aliases) {
+            NSString *s = SLCRKeyOf(a);
+            if (s.length && ![ids containsObject:s]) [ids addObject:s];
+        }
+    }
+    if (![ids containsObject:key]) [ids insertObject:key atIndex:0];
     store[key] = @{
         @"t": newText,
         @"o": keepOrig ?: @"",
         @"s": session ?: @"",
         @"ts": @([[NSDate date] timeIntervalSince1970]),
+        @"ids": ids,
     };
     SLCRFlush(store);
-    SLLog(@"REWRITE 保存 %@ 会话=%@ 长度 %lu", key, session ?: @"-", (unsigned long)newText.length);
+    SLLog(@"REWRITE 保存 %@ 别名 %lu 个 [%@] 会话=%@ 长度 %lu",
+          key, (unsigned long)ids.count, [ids componentsJoinedByString:@" "],
+          session ?: @"-", (unsigned long)newText.length);
 }
 
 NSInteger SLChatRewriteCount(void) {
@@ -262,6 +358,7 @@ void SLChatRewriteReloadChat(void) {
 
 @interface SLChatRewriteEditorController : UIViewController
 @property (nonatomic, copy) NSString *msgid;
+@property (nonatomic, copy) NSArray *aliases;
 @property (nonatomic, copy) NSString *orig;
 @property (nonatomic, copy) NSString *session;
 @property (nonatomic, copy) void (^doneBlock)(BOOL changed);
@@ -318,7 +415,7 @@ void SLChatRewriteReloadChat(void) {
     NSString *current = [self.orig ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     BOOL changed = ![text isEqualToString:current];
     if (changed) {
-        SLChatRewriteSave(self.msgid, text, self.orig, self.session);
+        SLChatRewriteSave(self.msgid, self.aliases, text, self.orig, self.session);
     }
     if (self.doneBlock) self.doneBlock(changed);
     [self dismissViewControllerAnimated:YES completion:^{
@@ -355,7 +452,6 @@ static void SLCRCollectMessageViews(UIView *v, NSInteger depth, NSInteger *budge
 
 // root 子树里离 anchor 最近、且带 message 的那个视图。
 // 菜单位置就是「气泡中心」，拿距离最近的一条，不会误伤相邻气泡。
-// wantKey 非空时只认这个 msgid —— 菜单自己记的 msgid 是权威值，宁可不改也不能改错人。
 static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint anchor, BOOL hasAnchor) {
     if (!root) return nil;
     NSMutableArray *hits = [NSMutableArray array];
@@ -365,19 +461,42 @@ static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint anchor, 
           NSStringFromClass([root class]), (unsigned long)hits.count, (long)budget, wantKey ?: @"-");
     if (!hits.count) return nil;
 
-    // 先用 msgid 精确定位（最可靠）
+    // 1) 精确匹配：菜单给的 "264-DB201489B738" 拆成 264 / DB201489B738，
+    //    和每条 message 的 msgid / uuid / remoteid / autoid 逐一比。
     if (wantKey.length) {
+        NSMutableArray *wantAliases = [NSMutableArray arrayWithObject:wantKey];
+        for (NSString *part in [wantKey componentsSeparatedByString:@"-"]) {
+            if (part.length && ![wantAliases containsObject:part]) [wantAliases addObject:part];
+        }
         for (UIView *v in hits) {
             id m = nil;
             @try { m = [v valueForKey:@"message"]; } @catch (NSException *e) { }
             if (!m) continue;
-            if ([SLCRMsgidOf(m) isEqualToString:wantKey]) {
-                SLLog(@"REWRITE 按 msgid 命中 %@ frame=%@", NSStringFromClass([v class]),
-                      NSStringFromCGRect([v convertRect:v.bounds toView:root]));
+            NSArray *ids = SLChatRewriteAliasesForMessage(m, nil);
+            for (NSString *a in ids) {
+                if (![a isKindOfClass:[NSString class]]) continue;
+                if ([wantAliases containsObject:a]) {
+                    SLLog(@"REWRITE 按 id 命中 %@ frame=%@ ids=[%@]", NSStringFromClass([v class]),
+                          NSStringFromCGRect([v convertRect:v.bounds toView:root]),
+                          [ids componentsJoinedByString:@" "]);
+                    return m;
+                }
+            }
+        }
+        // 2) 一个 id 都对不上，但子树里只有这一条消息 —— 就是它（气泡子树不可能有别人）
+        if (hits.count == 1) {
+            UIView *only = hits.firstObject;
+            id m = nil;
+            @try { m = [only valueForKey:@"message"]; } @catch (NSException *e) { }
+            if (m) {
+                SLLog(@"REWRITE id 对不上但唯一候选，直接采用 %@ ids=[%@]",
+                      NSStringFromClass([only class]),
+                      [SLChatRewriteAliasesForMessage(m, wantKey) componentsJoinedByString:@" "]);
                 return m;
             }
         }
-        SLLog(@"REWRITE 子树里没有 msgid=%@ 的消息视图", wantKey);
+        SLLog(@"REWRITE %lu 个候选都对不上 id=%@，放弃（宁可打不开也不改错人）",
+              (unsigned long)hits.count, wantKey);
         return nil;
     }
 
@@ -423,13 +542,17 @@ static void SLCROpenEditor(id message, NSString *fallbackKey) {
         return;
     }
 
+    // 一条改写挂上全套 id：消息对象的 msgid / uuid / remoteid / autoid，
+    // 再加上菜单给的串。body getter 拿其中任何一个都能命中。
+    NSArray *aliases = SLChatRewriteAliasesForMessage(message, fallbackKey);
+
     NSString *body = nil;
     @try { body = [message valueForKey:@"body"]; } @catch (NSException *e) { }
     if (![body isKindOfClass:[NSString class]]) body = @"";
 
     NSString *orig = body;
     NSString *initial = body;
-    NSDictionary *entry = SLCRStore()[key];
+    NSDictionary *entry = SLCRLookup(key);
     if ([entry isKindOfClass:[NSDictionary class]]) {
         NSString *o = entry[@"o"];
         NSString *t = entry[@"t"];
@@ -439,11 +562,12 @@ static void SLCROpenEditor(id message, NSString *fallbackKey) {
 
     UIViewController *chat = SLCRChatVC(SLCRTopVC());
     NSString *session = SLCRSessionOfVC(chat);
-    SLLog(@"REWRITE 打开修改 msgid=%@ 会话=%@ 现长 %lu",
-          key, session ?: @"-", (unsigned long)initial.length);
+    SLLog(@"REWRITE 打开修改 key=%@ 别名=[%@] 会话=%@ 现长 %lu",
+          key, [aliases componentsJoinedByString:@" "], session ?: @"-", (unsigned long)initial.length);
 
     SLChatRewriteEditorController *editor = [[SLChatRewriteEditorController alloc] init];
     editor.msgid = key;
+    editor.aliases = aliases;
     editor.orig = orig;
     editor.session = session;
     editor.doneBlock = ^(BOOL changed) {
