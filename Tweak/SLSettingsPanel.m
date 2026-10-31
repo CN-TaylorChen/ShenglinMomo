@@ -68,7 +68,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.5.07"
+#define SLVersion @"0.5.08"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -110,6 +110,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 - (void)sl_virtualLocSwitchChanged:(UISwitch *)sw;
 - (void)sl_chatRewriteChanged:(UISwitch *)sw;
 - (void)sl_chatRewriteResetChanged:(UISwitch *)sw;
+- (void)sl_recallGuardChanged:(UISwitch *)sw;
+- (void)sl_editRealShotField:(BOOL)isTime;
 - (void)sl_applyVirtualLoc:(BOOL)on;
 - (void)sl_pickLocation;
 - (void)sl_clearLocation;
@@ -212,7 +214,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    return 7;
+    return 8;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
@@ -223,12 +225,13 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
     if (section == 3) return 1;   // API 凭证
     if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
     if (section == 5) return 1;   // 运行日志（v0.4.54 去掉「动画预览」入口）
-    if (section == 6) return 3;   // 聊天记录修改：开关 + 离开重置 + 已修改 N 条
+    if (section == 6) return 4;   // 聊天记录：开关 + 离开重置 + 防撤回 + 已修改 N 条
+    if (section == 7) return 2;   // 实拍卡片：时间 + 距离
     return 1;
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
-    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断", @"聊天记录"][section];
+    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"诊断", @"聊天记录", @"实拍卡片"][section];
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
@@ -454,9 +457,29 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
             return cell;
         }
+        if (ip.row == 2) {
+            cell.textLabel.text = @"防撤回";
+            cell.detailTextLabel.text = @"对方撤回后仍显示原文";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLRecallGuardEnabled();
+            [sw addTarget:self action:@selector(sl_recallGuardChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
         cell.textLabel.text = @"已修改的消息";
         NSInteger rwN = SLChatRewriteCount();
         cell.detailTextLabel.text = rwN > 0 ? [NSString stringWithFormat:@"%ld 条", (long)rwN] : @"暂无";
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
+    }
+
+    if (ip.section == 7) {
+        BOOL isTime = (ip.row == 0);
+        cell.textLabel.text = isTime ? @"实拍时间" : @"实拍距离";
+        NSString *v = isTime ? SLRealShotTime() : SLRealShotDistance();
+        cell.detailTextLabel.text = v.length ? v : @"不改";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
@@ -523,10 +546,14 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return;
     }
     if (ip.section == 6) {
-        if (ip.row == 2) {
+        if (ip.row == 3) {
             [self.navigationController pushViewController:[[SLChatRewriteListController alloc] init]
                                                  animated:YES];
         }
+        return;
+    }
+    if (ip.section == 7) {
+        [self sl_editRealShotField:(ip.row == 0)];
         return;
     }
 }
@@ -539,6 +566,42 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 - (void)sl_chatRewriteResetChanged:(UISwitch *)sw {
     SLChatRewriteSetResetOnLeave(sw.on);
     [self.tableView reloadData];
+}
+
+- (void)sl_recallGuardChanged:(UISwitch *)sw {
+    SLRecallGuardSetEnabled(sw.on);
+    [self.tableView reloadData];
+}
+
+#pragma mark - 实拍卡片
+
+// 卡片上的 "11:44" / "38.62km" 是 prerender JSON 里的字面量，
+// 不知道字段名也能按形态替换，所以这里只要一个文本输入。
+- (void)sl_editRealShotField:(BOOL)isTime {
+    NSString *title = isTime ? @"实拍时间" : @"实拍距离";
+    NSString *msg = isTime ? @"卡片上的时间会换成这里填的，例如 09:30；留空表示不改"
+                           : @"卡片上的公里数会换成这里填的，例如 0.5km；留空表示不改";
+    NSString *cur = isTime ? SLRealShotTime() : SLRealShotDistance();
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:title
+                                                               message:msg
+                                                        preferredStyle:UIAlertControllerStyleAlert];
+    [ac addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.text = cur ?: @"";
+        tf.placeholder = @"留空 = 不改";
+        tf.keyboardType = isTime ? UIKeyboardTypeNumbersAndPunctuation : UIKeyboardTypeDecimalPad;
+    }];
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [ac addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *input = ac.textFields.firstObject.text ?: @"";
+        if (isTime) SLRealShotSetTime(input); else SLRealShotSetDistance(input);
+        [weakSelf.tableView reloadData];
+        NSString *now = isTime ? SLRealShotTime() : SLRealShotDistance();
+        [AWECAUtils showToast:(now.length ? [NSString stringWithFormat:@"%@已改为 %@", title, now]
+                                          : [NSString stringWithFormat:@"%@已清除", title])
+                    duration:1.5];
+    }]];
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)sl_auditionChanged:(UISwitch *)sw {

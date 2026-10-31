@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.07"
+#define SLVersion @"0.5.08"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2880,34 +2880,62 @@ static void SLUniverseContentHook(id self, SEL _cmd, id arg) {
 
 // 只在开着的时候拦；关掉时原样返回，零开销。
 static NSInteger gSLCRProbe = 0;
+static NSInteger gSLCardDump = 0;
+
 static id SLChatBodyGetHook(id self, SEL _cmd) {
     IMP orig = SLGetOrigIMP(self, _cmd);
     if (!orig) return nil;
     id raw = ((id (*)(id, SEL))orig)(self, _cmd);
     if (![raw isKindOfClass:[NSString class]]) return raw;
-    if (!SLChatRewriteEnabled()) return raw;
     @try {
-        // 陌陌的菜单 id 与消息对象 msgid 不是同一个值（菜单是 "seq-uuid"），
-        // 所以要拿全套 id 去查，命中任意一个都算。
-        NSArray *ids = SLChatRewriteAliasesForMessage(self, nil);
-        NSString *rep = SLChatRewriteTextForIds(ids, (NSString *)raw);
-        // 探针：只在前 12 次读 body 且有条目时打，用来确认真的是这条路径在渲染
-        if (gSLCRProbe < 12 && SLChatRewriteCount() > 0) {
-            gSLCRProbe += 1;
-            NSString *tv2Cls = @"-";
-            @try {
-                id tv2 = [self valueForKey:@"textv2"];
-                if (tv2) tv2Cls = NSStringFromClass([tv2 class]);
-            } @catch (NSException *e) { }
-            SLLog(@"REWRITE-PROBE %@ ids=[%@] len=%lu hit=%d textv2=%@ body=%@",
-                  NSStringFromClass([self class]),
-                  [ids componentsJoinedByString:@" "],
-                  (unsigned long)[(NSString *)raw length],
-                  (rep != raw) ? 1 : 0,
-                  tv2Cls,
-                  SLShorten((NSString *)raw, 14));
+        NSString *body = (NSString *)raw;
+        BOOL rewriteOn = SLChatRewriteEnabled();
+        BOOL recallOn = SLRecallGuardEnabled();
+        // 改字与防撤回都要 id；两个都关就别白扫一遍 ivar
+        NSArray *ids = (rewriteOn || recallOn) ? SLChatRewriteAliasesForMessage(self, nil) : nil;
+        if (![ids isKindOfClass:[NSArray class]]) ids = @[];
+        NSString *out = body;
+
+        if (rewriteOn) {
+            // 陌陌的菜单 id 与消息对象 msgid 不是同一个值（菜单是 "seq-uuid"），
+            // 所以要拿全套 id 去查，命中任意一个都算。
+            NSString *rep = SLChatRewriteTextForIds(ids, body);
+            if ([rep isKindOfClass:[NSString class]] && rep.length) out = rep;
+            // 探针：只在前 12 次读 body 且有条目时打，用来确认真的是这条路径在渲染
+            if (gSLCRProbe < 12 && SLChatRewriteCount() > 0) {
+                gSLCRProbe += 1;
+                NSString *tv2Cls = @"-";
+                @try {
+                    id tv2 = [self valueForKey:@"textv2"];
+                    if (tv2) tv2Cls = NSStringFromClass([tv2 class]);
+                } @catch (NSException *e) { }
+                SLLog(@"REWRITE-PROBE %@ ids=[%@] len=%lu hit=%d textv2=%@ body=%@",
+                      NSStringFromClass([self class]),
+                      [ids componentsJoinedByString:@" "],
+                      (unsigned long)[body length],
+                      (out != body) ? 1 : 0,
+                      tv2Cls,
+                      SLShorten(body, 14));
+            }
         }
-        return rep ?: raw;
+
+        // 防撤回：正文被清空 / 变成撤回提示时顶回原文（独立开关，默认开）
+        if (recallOn && ids.count) {
+            NSString *keep = SLRecallGuardBody(ids.firstObject, out);
+            if ([keep isKindOfClass:[NSString class]] && keep.length) out = keep;
+        }
+
+        // 实拍卡片：prerender JSON 里的时间 / 公里数字面量，不知道字段名也能改
+        if ([out hasPrefix:@"{"]) {
+            if (gSLCardDump < 2) {
+                gSLCardDump += 1;
+                SLLog(@"REALSHOT-JSON %@ %@", ids.count ? ids.firstObject : @"-",
+                      SLShorten(out, 2400));
+            }
+            NSString *edited = SLApplyRealShotEdits(out);
+            if ([edited isKindOfClass:[NSString class]] && edited.length) out = edited;
+        }
+        return out;
     } @catch (NSException *e) { }
     return raw;
 }

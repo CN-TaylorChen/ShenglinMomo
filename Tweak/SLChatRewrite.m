@@ -38,6 +38,128 @@ void SLChatRewriteSetResetOnLeave(BOOL on) {
     [[NSUserDefaults standardUserDefaults] setBool:on forKey:kSLCRResetKey];
 }
 
+#pragma mark - 实拍卡片：时间 / 公里数
+
+// 实拍时刻这类卡片（knock_type28）的 body 是一坨 prerender JSON，
+// 屏幕上的 "11:44" 和 "38.62km" 就是里面的字面量。不必知道字段名 ——
+// 直接按形态替换：时间认 `H:mm` / `HH:mm`，距离认 `数字km`。
+// 边界用前后不挨数字/冒号卡住，免得把 "11:44:00" 这种完整时间戳改成半边。
+static NSString *const kSLRealShotTimeKey = @"SLRealShotTime";
+static NSString *const kSLRealShotDistKey = @"SLRealShotDistance";
+static NSString *const kSLRecallGuardKey  = @"SLRecallGuard";
+static NSInteger gSLRealShotLog = 0;
+
+static NSString *SLTrimmed(NSString *s) {
+    if (![s isKindOfClass:[NSString class]]) return nil;
+    s = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return s.length ? s : nil;
+}
+
+NSString *SLRealShotTime(void) {
+    return SLTrimmed([[NSUserDefaults standardUserDefaults] stringForKey:kSLRealShotTimeKey]);
+}
+
+NSString *SLRealShotDistance(void) {
+    return SLTrimmed([[NSUserDefaults standardUserDefaults] stringForKey:kSLRealShotDistKey]);
+}
+
+void SLRealShotSetTime(NSString *v) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *t = SLTrimmed(v);
+    if (t.length) [d setObject:t forKey:kSLRealShotTimeKey];
+    else [d removeObjectForKey:kSLRealShotTimeKey];
+}
+
+void SLRealShotSetDistance(NSString *v) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *t = SLTrimmed(v);
+    if (t.length) [d setObject:t forKey:kSLRealShotDistKey];
+    else [d removeObjectForKey:kSLRealShotDistKey];
+}
+
+NSString *SLApplyRealShotEdits(NSString *json) {
+    if (![json isKindOfClass:[NSString class]] || json.length < 40) return json;
+    unichar c0 = [json characterAtIndex:0];
+    if (c0 != '{' && c0 != '[') return json;          // 只动 JSON 卡片，普通文字不碰
+    NSString *tt = SLRealShotTime();
+    NSString *dd = SLRealShotDistance();
+    if (!tt.length && !dd.length) return json;
+
+    NSString *out = json;
+    NSInteger nTime = 0, nDist = 0;
+    if (tt.length) {
+        NSRegularExpression *re =
+            [NSRegularExpression regularExpressionWithPattern:@"(?<![0-9:])([0-2]?[0-9]):([0-5][0-9])(?![0-9:])"
+                                                      options:0 error:NULL];
+        NSRange all = NSMakeRange(0, out.length);
+        nTime = (NSInteger)[re numberOfMatchesInString:out options:0 range:all];
+        if (nTime > 0) {
+            out = [re stringByReplacingMatchesInString:out options:0 range:all withTemplate:tt];
+        }
+    }
+    if (dd.length) {
+        NSString *tpl = [dd.lowercaseString hasSuffix:@"km"] ? dd : [dd stringByAppendingString:@"km"];
+        NSRegularExpression *re =
+            [NSRegularExpression regularExpressionWithPattern:@"[0-9]+(?:\\.[0-9]+)?\\s*km"
+                                                      options:NSRegularExpressionCaseInsensitive error:NULL];
+        NSRange all = NSMakeRange(0, out.length);
+        nDist = (NSInteger)[re numberOfMatchesInString:out options:0 range:all];
+        if (nDist > 0) {
+            out = [re stringByReplacingMatchesInString:out options:0 range:all withTemplate:tpl];
+        }
+    }
+    if ((nTime || nDist) && gSLRealShotLog < 6) {
+        gSLRealShotLog += 1;
+        SLLog(@"REALSHOT 卡片改写 时间×%ld→%@ 距离×%ld→%@", (long)nTime, tt ?: @"-",
+              (long)nDist, dd ?: @"-");
+    }
+    return out;
+}
+
+#pragma mark - 防撤回
+
+// 撤回的最小实现：消息正文正常时按 msgid 记一份；等正文被清空 / 变成撤回提示时，
+// 把记下来的原文顶回去。陌陌要是整条消息删掉（连对象都不留），这招救不回来，
+// 但只要是「改字段」型的撤回，就能保住内容。
+BOOL SLRecallGuardEnabled(void) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if (![d objectForKey:kSLRecallGuardKey]) return YES;   // 默认开
+    return [d boolForKey:kSLRecallGuardKey];
+}
+
+void SLRecallGuardSetEnabled(BOOL on) {
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:kSLRecallGuardKey];
+}
+
+static NSMutableDictionary *gSLRecallCache = nil;
+static NSInteger gSLRecallLog = 0;
+static NSString *SLCRPreview(NSString *s, NSUInteger max);
+
+static BOOL SLRecallLooksGone(NSString *s) {
+    if (!s.length) return YES;
+    return [s containsString:@"撤回"] || [s containsString:@"已失效"];
+}
+
+NSString *SLRecallGuardBody(NSString *mid, NSString *body) {
+    if (!SLRecallGuardEnabled()) return body;
+    if (![mid isKindOfClass:[NSString class]] || !mid.length) return body;
+    if (![body isKindOfClass:[NSString class]]) return body;
+    if (!gSLRecallCache) gSLRecallCache = [NSMutableDictionary dictionary];
+    if (!SLRecallLooksGone(body) && gSLRecallCache.count < 2000) {
+        gSLRecallCache[mid] = body;
+        return body;
+    }
+    NSString *old = gSLRecallCache[mid];
+    if ([old isKindOfClass:[NSString class]] && old.length) {
+        if (gSLRecallLog < 8) {
+            gSLRecallLog += 1;
+            SLLog(@"RECALL-GUARD 顶回原文 %@ → [%@]", mid, SLCRPreview(old, 14));
+        }
+        return old;
+    }
+    return body;
+}
+
 #pragma mark - 存储
 
 static NSMutableDictionary *gSLCRCache = nil;
@@ -1259,51 +1381,127 @@ static NSInteger SLCRPatchLabelsInView(UIView *v, NSString *orig, NSString *repl
     return hits;
 }
 
-static NSString *SLCRFirstMixLabelText(UIView *v) {
-    if (!v) return nil;
-    if (SLCRIsLabelLike(v)) {
-        NSString *s = SLCRShownTextOf(v);
-        if (s.length) return s;
-    }
-    for (UIView *sub in v.subviews) {
-        NSString *s = SLCRFirstMixLabelText(sub);
-        if (s.length) return s;
-    }
-    return nil;
-}
+// 没标签时让 cell 自己按新模型重绑一次（下面 SLCRTryRebindCell 干的活）。
 
-// 标签换不动时的最后一招：让 cell 自己重排一遍。
-// Swift 的 cell 通常有个「塞数据重排版」的方法（setDataItem:/setItem:/configureWithItem:…），
-// 名字不确定，就按签名挑：必须正好一个对象参数、返回 void，别的绝不碰（多参数会读到垃圾栈值）。
-static NSString *SLCRTryReconfigureCell(UITableViewCell *cell, id dataItem) {
-    if (!cell || !dataItem) return @"-";
+// 标签换不动时的正解：让 cell 按「改过的模型」重绑一次。
+//
+// v0.5.07 日志打出来 cell 的方法表：`bindWithItem:` / `rebindCustomViewModel` /
+// `itemMessage` —— 这就是退出会话重进时数据源干的事。我们之前只调属性 setter
+// （`setDataItem:` 其实调成功了，但没触发重排），所以模型改了、屏幕不动。
+// 现在按优先级调真正的绑数据入口；签名必须是「一个对象参数、返回 void」。
+static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
+    if (!cell) return @"-";
     NSMutableArray *tried = [NSMutableArray array];
-    @try {
-        [cell setValue:dataItem forKey:@"dataItem"];
-        [tried addObject:@"kvc"];
-    } @catch (NSException *e) { }
-    // 只挑「语义上就是塞同一个 dataItem」的入口 —— setMessage:/setModel: 之类的名字
-    // 看着像但参数类型未必对得上，塞错东西会留下更难查的崩溃
-    NSArray *names = @[@"setDataItem:", @"setItem:", @"configureWithItem:",
-                       @"updateWithItem:", @"configureWithDataItem:"];
-    for (NSString *name in names) {
+    if (dataItem) {
+        NSArray *oneArg = @[@"bindWithItem:", @"bindHelloCellWithItem:",
+                            @"setDataItem:", @"configureWithItem:", @"updateWithItem:"];
+        for (NSString *name in oneArg) {
+            SEL sel = NSSelectorFromString(name);
+            if (![cell respondsToSelector:sel]) continue;
+            NSMethodSignature *sig = [cell methodSignatureForSelector:sel];
+            if (!sig || sig.numberOfArguments != 3) continue;
+            const char *at = [sig getArgumentTypeAtIndex:2];
+            if (!at || at[0] != '@') continue;
+            @try {
+                NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setTarget:cell];
+                [inv setSelector:sel];
+                __unsafe_unretained id arg = dataItem;
+                [inv setArgument:&arg atIndex:2];
+                [inv invoke];
+                [tried addObject:name];
+                break;                 // 只走第一个能用的，反复绑会闪
+            } @catch (NSException *e) { }
+        }
+    }
+    NSArray *noArg = @[@"rebindCustomViewModel", @"updateLeftBubble", @"updateRightBubble"];
+    for (NSString *name in noArg) {
         SEL sel = NSSelectorFromString(name);
         if (![cell respondsToSelector:sel]) continue;
         NSMethodSignature *sig = [cell methodSignatureForSelector:sel];
-        if (!sig || sig.numberOfArguments != 3) continue;
-        const char *at = [sig getArgumentTypeAtIndex:2];
-        if (!at || at[0] != '@') continue;
+        if (!sig || sig.numberOfArguments != 2) continue;
         @try {
             NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
             [inv setTarget:cell];
             [inv setSelector:sel];
-            __unsafe_unretained id arg = dataItem;
-            [inv setArgument:&arg atIndex:2];
             [inv invoke];
             [tried addObject:name];
         } @catch (NSException *e) { }
     }
     return tried.count ? [tried componentsJoinedByString:@","] : @"-";
+}
+
+// 任何能读出字的地方都试一遍。v0.5.07 的「显示 → [-]」就是只认 UILabel 吃的亏。
+static NSString *SLCRTextAnywhere(UIView *v, NSInteger depth) {
+    if (!v || depth <= 0) return nil;
+    NSString *best = nil;
+    if ([v isKindOfClass:[UILabel class]]) {
+        UILabel *l = (UILabel *)v;
+        best = l.attributedText.length ? l.attributedText.string : l.text;
+    } else if ([v isKindOfClass:[UITextView class]]) {
+        best = ((UITextView *)v).text;
+    } else if ([v isKindOfClass:[UITextField class]]) {
+        best = ((UITextField *)v).text;
+    } else {
+        for (NSString *key in @[@"attributedString", @"text", @"title", @"string", @"content"]) {
+            SEL sel = NSSelectorFromString(key);
+            if (![v respondsToSelector:sel]) continue;
+            // 返回值必须是对象：performSelector 在 ARC 下会告警（-Werror 直接挂），走 IMP 稳一点
+            NSMethodSignature *sig = [v methodSignatureForSelector:sel];
+            if (!sig || sig.methodReturnType[0] != '@' || sig.numberOfArguments != 2) continue;
+            @try {
+                id (*fn)(id, SEL) = (id (*)(id, SEL))[v methodForSelector:sel];
+                if (!fn) continue;
+                id x = fn(v, sel);
+                if ([x isKindOfClass:[NSAttributedString class]] && [(NSAttributedString *)x length]) {
+                    best = [(NSAttributedString *)x string];
+                } else if ([x isKindOfClass:[NSString class]] && [(NSString *)x length]) {
+                    best = (NSString *)x;
+                }
+            } @catch (NSException *e) { }
+            if (best.length) break;
+        }
+    }
+    best = [best stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    for (UIView *sub in v.subviews) {
+        NSString *s = SLCRTextAnywhere(sub, depth - 1);
+        if (s.length > best.length) best = s;
+    }
+    return best.length ? best : nil;
+}
+
+// 排错专用：把 cell 的视图树打一次（每个 cell 类只打一次），
+// 这样「气泡的字到底由谁画」不用再猜。
+static void SLCRDumpViewTreeOnce(UIView *root, NSString *tag) {
+    static NSMutableSet *seen = nil;
+    if (!seen) seen = [NSMutableSet set];
+    NSString *key = [NSString stringWithFormat:@"%@|%@", tag ?: @"-", NSStringFromClass([root class])];
+    if ([seen containsObject:key]) return;
+    [seen addObject:key];
+
+    NSMutableArray *out = [NSMutableArray array];
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
+    NSMutableArray *depths = [NSMutableArray arrayWithObject:@0];
+    NSInteger budget = 40;
+    while (queue.count && budget-- > 0) {
+        UIView *cur = queue.firstObject;
+        NSInteger d = [depths.firstObject integerValue];
+        [queue removeObjectAtIndex:0];
+        [depths removeObjectAtIndex:0];
+        if (d > 3) continue;
+        NSString *t = SLCRTextAnywhere(cur, 3) ?: @"-";
+        [out addObject:[NSString stringWithFormat:@"%*s%@(%.0f,%.0f %.0fx%.0f)«%@»",
+                        (int)(d * 2), "", NSStringFromClass([cur class]),
+                        cur.frame.origin.x, cur.frame.origin.y,
+                        cur.frame.size.width, cur.frame.size.height,
+                        SLCRPreview(t, 12)]];
+        for (UIView *sub in cur.subviews) {
+            [queue addObject:sub];
+            [depths addObject:@(d + 1)];
+        }
+    }
+    SLLog(@"REWRITE-TREE %@ 节点 %lu：%@", tag ?: @"-", (unsigned long)out.count,
+          [out componentsJoinedByString:@" | "]);
 }
 
 // 排错用：把某个类（含父类）里跟「重新加载/重排版」沾边的方法名打一行。
@@ -1370,23 +1568,24 @@ void SLChatRewritePatchLiveText(NSArray *aliases, NSString *orig, NSString *repl
         gSLCRPatchBudget = 900;
         NSMutableString *trace = [NSMutableString string];
         NSInteger mh = SLCRPatchModelStrings(cell, 5, orig, repl, trace);
+        // 模型改完立刻重绑：bindWithItem: 才是「退出会话重进」真正走的入口，
+        // 只调 setDataItem: 这种属性 setter 不会重排（v0.5.07 就是这么白改的）
+        NSString *how = SLCRTryRebindCell(cell, dataItem);
+        [cell setNeedsLayout];
+        [cell layoutIfNeeded];
+        // 重绑会把模型里的字再抄一份到排版对象上，所以再补一遍
+        mh += SLCRPatchModelStrings(cell, 5, orig, repl, nil);
         NSMutableString *inventory = [NSMutableString string];
         NSInteger seenLabels = 0;
         NSInteger lh = SLCRPatchLabelsInView(cell, orig, repl, inventory, &seenLabels);
-        NSString *how = @"-";
-        if (lh == 0) {
-            // 标签换不动 → 让 cell 自己按新模型重排一次，再补一次
-            how = SLCRTryReconfigureCell(cell, dataItem);
-            [cell setNeedsLayout];
-            [cell layoutIfNeeded];
-            lh += SLCRPatchLabelsInView(cell, orig, repl, inventory, &seenLabels);
-        }
+        if (lh == 0) SLCRDumpViewTreeOnce(cell, @"cell");
+        NSString *shownNow = SLCRTextAnywhere(cell, 5) ?: @"-";
         modelHits += mh;
         labelHits += lh;
-        SLLog(@"REWRITE 渲染补丁 cell=%@ dataItem=%@ 模型 %ld 处 [%@] 标签 %ld 处/%ld 个 [%@] 重排=%@",
+        SLLog(@"REWRITE 渲染补丁 cell=%@ dataItem=%@ 模型 %ld 处 [%@] 标签 %ld 处/%ld 个 [%@] 重绑=%@ 现在=[%@]",
               NSStringFromClass([cell class]), itemCls, (long)mh,
               trace.length ? trace : @"-", (long)lh, (long)seenLabels,
-              inventory.length ? inventory : @"-", how);
+              inventory.length ? inventory : @"-", how, SLCRPreview(shownNow, 14));
         if (lh > 0 || mh > 0) {
             SLCRProbeSelectorsOnce([cell class], @"cell");
             SLCRProbeSelectorsOnce([chat class], @"vc");
@@ -1397,7 +1596,7 @@ void SLChatRewritePatchLiveText(NSArray *aliases, NSString *orig, NSString *repl
         SLLog(@"REWRITE 渲染补丁合计 %ld 个 cell，模型 %ld 处 / 标签 %ld 处",
               (long)cells, (long)modelHits, (long)labelHits);
         // 字变长了气泡得跟着长，不然新字被旧高度裁掉一截
-        if (labelHits > 0) {
+        if (labelHits > 0 || modelHits > 0) {
             [tv beginUpdates];
             [tv endUpdates];
         }
@@ -1414,7 +1613,7 @@ void SLChatRewriteDumpVisibleText(void) {
         if (n >= 12) break;
         id m = SLCRMessageOf(cell);
         NSString *mid = SLCRMsgidOf(m) ?: @"-";
-        NSString *shown = SLCRFirstMixLabelText(cell) ?: SLCRLongestText(cell) ?: @"-";
+        NSString *shown = SLCRTextAnywhere(cell, 6) ?: @"-";
         NSArray *ids = m ? SLChatRewriteAliasesForMessage(m, nil) : nil;
         // 空串当「没有记录」：这个函数拿它当 orig 原样返回，正好用来判有没有改写
         NSString *want = SLChatRewriteTextForIds(ids, @"");

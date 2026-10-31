@@ -78,6 +78,27 @@ void SLChatRewritePatchLiveText(NSArray *_Nullable aliases, NSString *_Nullable 
 /// 刷新后回读可见气泡上真正显示的字（诊断用）
 void SLChatRewriteDumpVisibleText(void);
 
+#pragma mark - 实拍卡片（knock_type28）
+
+/// 卡片上的时间 / 公里数。空字符串 = 不改。
+NSString *_Nullable SLRealShotTime(void);
+NSString *_Nullable SLRealShotDistance(void);
+void SLRealShotSetTime(NSString *_Nullable v);
+void SLRealShotSetDistance(NSString *_Nullable v);
+
+/// 卡片 body（prerender JSON）按上面的设置做字面量替换。
+/// 只动 JSON，普通文字原样返回 —— 不依赖任何字段名。
+NSString *_Nullable SLApplyRealShotEdits(NSString *_Nullable json);
+
+#pragma mark - 防撤回
+
+BOOL SLRecallGuardEnabled(void);
+void SLRecallGuardSetEnabled(BOOL on);
+
+/// 传本次从模型读到的 body，返回最终该显示的 body。
+/// 正文正常时按 msgid 记一份；等正文被清空 / 变成撤回提示时顶回原文。
+NSString *_Nullable SLRecallGuardBody(NSString *_Nullable mid, NSString *_Nullable body);
+
 @interface SLChatRewriteListController : UITableViewController
 @end
 
