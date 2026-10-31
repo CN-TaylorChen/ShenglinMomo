@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.16"
+#define SLVersion @"0.5.17"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -3242,8 +3242,10 @@ static void SLCRInstallTableHooks(void) {
     UITableView *tv = SLChatFindTable();
     if (!tv) return;
     NSMutableArray *targets = [NSMutableArray array];
-    if (tv.delegate) [targets addObject:tv.delegate];
-    if (tv.dataSource && tv.dataSource != tv.delegate) [targets addObject:tv.dataSource];
+    id dg = (id)tv.delegate;
+    id ds = (id)tv.dataSource;
+    if (dg) [targets addObject:dg];
+    if (ds && ds != dg) [targets addObject:ds];
     BOOL any = NO;
     for (id obj in targets) {
         Class c = object_getClass(obj);
