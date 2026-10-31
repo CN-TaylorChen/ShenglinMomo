@@ -137,6 +137,7 @@ static id SLCRMessageOf(id obj);
 static NSString *SLCRMsgidOf(id message);
 static void SLChatClearVisibleHighlights(void);
 NSString *SLCRMsgidAtIndexPath(UITableView *tv, NSIndexPath *ip);
+static NSString *SLCRSessionOfVC(UIViewController *vc);
 
 // 聊天界面上每条消息上方那行 `12:48 35.95km` / `5分钟前 96.96km`。
 // 它不在任何 JSON 里 —— App 拿这条消息的发送时间和当时的经纬度现场算出来的，
@@ -361,12 +362,35 @@ void SLMetaSave(NSString *msgid, NSString *time, NSString *dist, NSString *date)
     if (t.length) e[@"t"] = t;
     if (d.length) e[@"d"] = d;
     if (dt.length) e[@"dt"] = dt;
+    // 记下属于哪个会话：设置页的「离开会话时重置」要靠它把时间/距离一起还原，
+    // 不然改完就再也回不去了（只能在面板里把所有输入框清空）。
+    NSString *sess = SLCRSessionOfVC(SLCRChatVC(SLCRTopVC()));
+    if (sess.length) e[@"s"] = sess;
     if (e.count == 0) [SLMetaStore() removeObjectForKey:msgid];
     else SLMetaStore()[msgid] = e;
     SLMetaSync();
-    SLLog(@"META 保存 %@ 时间=[%@] 距离=[%@] 日期=[%@]", msgid, t ?: @"-", d ?: @"-", dt ?: @"-");
+    SLLog(@"META 保存 %@ 时间=[%@] 距离=[%@] 日期=[%@] 会话=%@", msgid, t ?: @"-", d ?: @"-", dt ?: @"-", sess ?: @"-");
     // 这里不再整表刷：调用方（面板）拿着「长按的那一格」，精确刷那一条就够。
     // 整表刷 + cell→msgid 反查不准 = 一改全变，这是 v0.5.19 踩过的坑。
+}
+
+// 离开会话时把这一会话改过的时间/距离全部撤掉（还原成陌陌原本那行）。
+// 认不出会话（老数据没记 s）就整份清掉 —— 用户要的是「能还原」，不是「尽量保留」。
+void SLChatMetaClearSession(NSString *session) {
+    if (!gSLMetaStore) SLMetaStore();          // 先确保已从磁盘读进来
+    if (!gSLMetaStore.count) return;
+    NSMutableArray *drop = [NSMutableArray array];
+    for (NSString *k in gSLMetaStore) {
+        id v = gSLMetaStore[k];
+        if (![v isKindOfClass:[NSDictionary class]]) { [drop addObject:k]; continue; }
+        NSString *s = ((NSDictionary *)v)[@"s"];
+        if (![s isKindOfClass:[NSString class]] || !s.length) { [drop addObject:k]; continue; }
+        if (session.length && [s isEqualToString:session]) [drop addObject:k];
+    }
+    if (!drop.count) return;
+    for (NSString *k in drop) [gSLMetaStore removeObjectForKey:k];
+    SLMetaSync();
+    SLLog(@"META 离开会话还原 %lu 条 (%@)", (unsigned long)drop.count, session ?: @"-");
 }
 
 // 形态判据：短串、含 km、无换行 —— 就是那行「时间 距离」。
@@ -493,19 +517,28 @@ static NSString *SLMetaMsgidByOriginalText(NSString *cur) {
 // 时间行原本只有 100pt 宽，距离一长（1125.95km）就被省略成「1125.9…」。
 // 设完字之后按真实宽度把它撑开：以中心为锚点左右一起长（时间行本来就是居中的），
 // 再挂上缩字兜底 —— 万一被陌陌的 layout 把宽度改回去，字也会自己缩到装得下。
+// 只挂「不省略」这组属性，不动 frame。
+// 单独拎出来是因为：认不出是哪条消息时也得挂 —— 不然长日期（10-31 12:00）
+// 或长距离（1125.95km）会直接变成「1125.9…」，用户看到的「日期改完也会被省略」。
+static void SLMetaMarkNoTruncate(UIView *row) {
+    if (![row isKindOfClass:[UILabel class]]) return;
+    UILabel *l = (UILabel *)row;
+    l.adjustsFontSizeToFitWidth = YES;
+    l.minimumScaleFactor = 0.7;                   // 缩到 70% 还装不下才轮到裁
+    l.lineBreakMode = NSLineBreakByClipping;      // 不要省略号
+    l.numberOfLines = 1;
+}
+
 static void SLMetaFitRowWidth(UIView *row, NSString *text) {
     if (![row isKindOfClass:[UILabel class]]) return;
     UILabel *l = (UILabel *)row;
+    SLMetaMarkNoTruncate(row);                    // 缩字兜底先挂上
     if (!text.length || !l.font) return;
-    // 缩字兜底：即使陌陌的 layout 把宽度改回去，字也会自己缩到装得下（不再出现「1125.9…」）
-    l.adjustsFontSizeToFitWidth = YES;
-    l.minimumScaleFactor = 0.75;
-    l.lineBreakMode = NSLineBreakByClipping;      // 不要省略号
     CGFloat need = ceil([text sizeWithAttributes:@{NSFontAttributeName: l.font}].width) + 6.0;
     CGRect f = l.frame;
     CGFloat w = CGRectGetWidth(f);
     if (need <= w + 0.5) return;                   // 装得下就别动排版
-    if (need > 180.0) need = 180.0;                // 别撑成一整行，最多放宽到 180
+    if (need > 220.0) need = 220.0;                // 别撑成一整行
     CGRect nf = CGRectMake(CGRectGetMidX(f) - need / 2.0, CGRectGetMinY(f),
                            need, CGRectGetHeight(f));
     // 收敛在父视图里，免得跑到 cell 外面
@@ -595,7 +628,12 @@ void SLChatMetaApplyCellAtIndex(UITableView *tv, UITableViewCell *cell, NSIndexP
     if (!mid.length) mid = SLCRMsgidOf(SLCRMessageOf(cell));
     // 重进会话那一刻 msgid 常常反查不到 → 用原文行做第二把钥匙，别让改好的时间被写回去
     if (!mid.length) mid = SLMetaMsgidByOriginalText(SLCRShownTextOf(SLMetaRowViewIn(cell, 6)));
-    if (!mid.length) return;
+    if (!mid.length) {
+        // 认不出是哪条也要做一件事：把这行「不许省略」挂上。
+        // 否则长日期 / 长距离会直接变「1125.9…」—— 用户说的「日期改完也会被省略」。
+        SLMetaMarkNoTruncate(SLMetaRowViewIn(cell, 6));
+        return;
+    }
     if (!SLMetaApplyOneMid(cell, mid)) return;
     // 陌陌在 willDisplay 之后还会自己 layout 一遍，把时间行按原始值重写回去 ——
     // 这就是「当时改好了、一滑就变回去」。补刷一次把它拉回来。
@@ -3224,6 +3262,9 @@ void SLChatRewriteDumpVisibleText(void) {
 void SLChatRewriteHandleLeave(UIViewController *vc) {
     if (!SLChatRewriteResetOnLeave()) return;
     NSString *session = SLCRSessionOfVC(SLCRChatVC(vc) ?: vc);
+    // 时间 / 距离的改动也一起还原 —— 不然改完时间就再也回不去了
+    // （只能在面板里把所有输入框清空，太绕）。
+    @try { SLChatMetaClearSession(session); } @catch (NSException *e) { }
     if (session.length) SLChatRewriteClearSession(session);
 }
 

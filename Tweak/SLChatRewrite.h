@@ -100,6 +100,9 @@ void SLMetaSave(NSString *_Nullable msgid, NSString *_Nullable time,
 /// 该消息是否已经有自定义时间 / 距离 / 日期
 BOOL SLMetaHasOverride(NSString *_Nullable msgid);
 
+/// 离开会话时把这一会话改过的时间 / 距离全部撤掉（设置页「离开会话时重置」用）
+void SLChatMetaClearSession(NSString *_Nullable session);
+
 /// 把整张表可见行的时间行按映射刷一遍（保存后 / cell 显示时调）
 void SLChatMetaApplyTable(UITableView *_Nullable tv);
 
