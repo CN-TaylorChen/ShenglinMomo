@@ -5,6 +5,7 @@
 
 #import "SLChatRewrite.h"
 #import <objc/runtime.h>
+#import <string.h>
 #import "SLGlass.h"
 #import "SLLog.h"
 #import "AWECAUtils.h"
@@ -23,7 +24,9 @@ BOOL SLChatRewriteEnabled(void) {
 
 BOOL SLChatRewriteResetOnLeave(void) {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    if (![d objectForKey:kSLCRResetKey]) return YES;    // 默认开：退出会话即复原，最不容易露
+    // 默认不还原：改聊天记录就是为了截图，一退会话全没 = 白改（用户反馈的「重置」）。
+    // 想一退就复原的，去设置里把开关打开。
+    if (![d objectForKey:kSLCRResetKey]) return NO;
     return [d boolForKey:kSLCRResetKey];
 }
 
@@ -77,24 +80,44 @@ static void SLCRFlush(NSDictionary *store) {
 // 所以一条改写要挂多个别名，body getter 拿哪个都能命中。
 // 用一张 alias -> entry 的表，避免每次 body 读都遍历整个 store。
 
+// 「原文 -> 新文」映射，给渲染层兜底用（气泡标签 / 排版模型只认字面，拿不到消息对象）
+static NSMutableDictionary *gSlcOrigMap = nil;
+
+static BOOL SLCRAliasLooksUnique(NSString *s);
+
 static void SLCRRebuildIndex(void) {
     NSMutableDictionary *idx = [NSMutableDictionary dictionary];
+    NSMutableDictionary *om = [NSMutableDictionary dictionary];
     NSDictionary *store = SLCRStore();
     [store enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) {
         (void)stop;
         if (![v isKindOfClass:[NSDictionary class]]) return;
         idx[k] = v;
+        NSString *orig = ((NSDictionary *)v)[@"o"];
+        NSString *text = ((NSDictionary *)v)[@"t"];
+        if ([orig isKindOfClass:[NSString class]] && orig.length &&
+            [text isKindOfClass:[NSString class]] && text.length) {
+            om[orig] = text;
+        }
         // 老版本只存了 "264-DB201489B738" 这种主键，没有 ids；
         // 这里顺手把段拆出来，升级前改过的记录也能继续命中。
         for (NSString *part in [(NSString *)k componentsSeparatedByString:@"-"]) {
-            if (part.length > 1 && !idx[part]) idx[part] = v;
+            if (SLCRAliasLooksUnique(part) && !idx[part]) idx[part] = v;
         }
         NSArray *ids = ((NSDictionary *)v)[@"ids"];
         if (![ids isKindOfClass:[NSArray class]]) return;
+        NSString *session = ((NSDictionary *)v)[@"s"];
         for (id a in ids) {
-            if ([a isKindOfClass:[NSString class]] && [(NSString *)a length]) idx[a] = v;
+            if (![a isKindOfClass:[NSString class]] || ![(NSString *)a length]) continue;
+            // v0.5.05 存进去的别名里有会话号（对方 uid），共用会把整会话的改写串成一锅，
+            // 这里按会话号剔掉，旧记录不用手动清。
+            if ([session isKindOfClass:[NSString class]] && session.length &&
+                [a isEqualToString:session]) continue;
+            if (!SLCRAliasLooksUnique(a) && ![a isEqualToString:k]) continue;
+            idx[a] = v;
         }
     }];
+    gSlcOrigMap = om;
     gSLCRIndex = idx;
 }
 
@@ -141,24 +164,56 @@ NSString *SLChatRewriteTextForIds(NSArray *ids, NSString *orig) {
     return orig;
 }
 
-// 一条改写要挂的 id 集合：消息对象上的每个 id 字段 + 菜单给的串 + 串里拆出来的段。
-// "264-DB201489B738" 拆成 264 / DB201489B738，body getter 用它拿到的任何一个都能命中。
+// 纯字符串替换：气泡标签最后拿到的就是一段字面，认不出是哪条消息，只能按原文对。
+// 返回 nil 表示没命中（调用方保留原值）。
+NSString *SLChatRewriteTextForPlainString(NSString *s) {
+    if (![s isKindOfClass:[NSString class]] || !s.length) return nil;
+    if (!SLChatRewriteEnabled()) return nil;
+    if (!gSLCRIndex) SLCRRebuildIndex();
+    id v = gSlcOrigMap[s];
+    if ([v isKindOfClass:[NSString class]] && [v length]) return v;
+    // 气泡上的字可能把首尾空白/换行吃掉，再按 trim 后的比一次
+    NSString *t = [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (t.length && ![t isEqualToString:s]) {
+        v = gSlcOrigMap[t];
+        if ([v isKindOfClass:[NSString class]] && [v length]) return v;
+    }
+    return nil;
+}
+
+// 一条改写要挂的 id 集合。
+//
+// **只能挂「这条消息独有」的字段** —— v0.5.05 把 remoteid / autoid 也挂上去了，代价是
+// 同一会话里所有消息共享 remoteid（对方 uid），于是：
+//   别名=[CFD-3E044B82E531 1173080448 211 CFD 3E044B82E531]
+//   另一条消息 05B 查表 → msgid 没中 → 落到 1173080448 → 命中了 CFD 那条改写
+// 表现就是「改 A，B 的字也变了」「改第二条，第一条像被重置」。
+// 现在只留 msgid / uuid（完整的 12 位以上串），外加菜单给的那串（本身就是完整 msgid）；
+// 拆段只在长度 ≥8 时才收（"CFD"/"05B" 这种 3 位序号撞车概率太高）。
+static BOOL SLCRAliasLooksUnique(NSString *s) {
+    if (![s isKindOfClass:[NSString class]] || !s.length) return NO;
+    if ([s containsString:@"-"]) return YES;          // 完整 msgid（seq-uuid）
+    return s.length >= 8;                             // uuid 段 / 老版本纯 uuid
+}
+
 NSArray *SLChatRewriteAliasesForMessage(id message, NSString *extra) {
     NSMutableArray *out = [NSMutableArray array];
-    NSArray *keys = @[@"msgid", @"uuid", @"remoteid", @"autoid"];
-    for (NSString *k in keys) {
-        id v = nil;
-        @try { v = [message valueForKey:k]; } @catch (NSException *e) { }
-        NSString *s = SLCRKeyOf(v);
-        if (s.length && ![out containsObject:s]) [out addObject:s];
-    }
+    // msgid 永远第一个：改写记录就是按它存的，查表必中
+    id mid = nil;
+    @try { mid = [message valueForKey:@"msgid"]; } @catch (NSException *e) { }
+    NSString *midKey = SLCRKeyOf(mid);
+    if (midKey.length) [out addObject:midKey];
+    id uid = nil;
+    @try { uid = [message valueForKey:@"uuid"]; } @catch (NSException *e) { }
+    NSString *uuidKey = SLCRKeyOf(uid);
+    if (SLCRAliasLooksUnique(uuidKey) && ![out containsObject:uuidKey]) [out addObject:uuidKey];
     if ([extra isKindOfClass:[NSString class]] && extra.length && ![out containsObject:extra]) {
         [out addObject:extra];
     }
     for (NSString *s in [out copy]) {
-        if (![s isKindOfClass:[NSString class]] || ![s containsString:@"-"]) continue;
+        if (![s containsString:@"-"]) continue;
         for (NSString *part in [s componentsSeparatedByString:@"-"]) {
-            if (part.length && ![out containsObject:part]) [out addObject:part];
+            if (SLCRAliasLooksUnique(part) && ![out containsObject:part]) [out addObject:part];
         }
     }
     return out;
@@ -379,6 +434,8 @@ void SLChatRewriteReloadChat(void) {
 @property (nonatomic, copy) NSString *msgid;
 @property (nonatomic, copy) NSArray *aliases;
 @property (nonatomic, copy) NSString *orig;
+/// 这条消息「当前显示」的字（第二次修改时是上次改完的结果，不是最初原文）
+@property (nonatomic, copy) NSString *current;
 @property (nonatomic, copy) NSString *session;
 @property (nonatomic, copy) void (^doneBlock)(BOOL changed);
 @end
@@ -404,7 +461,7 @@ void SLChatRewriteReloadChat(void) {
     _textView.textContainerInset = UIEdgeInsetsMake(12, 10, 12, 10);
     _textView.font = [UIFont systemFontOfSize:15];
     _textView.textColor = [UIColor labelColor];
-    _textView.text = self.orig ?: @"";
+    _textView.text = self.current.length ? self.current : (self.orig ?: @"");
     _textView.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
     [self.view addSubview:_textView];
 }
@@ -431,14 +488,30 @@ void SLChatRewriteReloadChat(void) {
 - (void)sl_save {
     NSString *text = _textView.text ?: @"";
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSString *current = [self.orig ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *shown = self.current.length ? self.current : (self.orig ?: @"");
+    NSString *current = [shown stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *origStr = self.orig ?: @"";
+    NSString *origTrim = [origStr stringByTrimmingCharactersInSet:
+                          [NSCharacterSet whitespaceAndNewlineCharacterSet]];
     BOOL changed = ![text isEqualToString:current];
     if (changed) {
-        SLChatRewriteSave(self.msgid, self.aliases, text, self.orig, self.session);
+        SLChatRewriteSave(self.msgid, self.aliases, text, origStr, self.session);
+        // 光 reloadData 不会重算气泡（字是建会话数据时解析进 cellViewModel 的），
+        // 必须把新文本直接写进活着的模型和标签。
+        // 两趟：原文一趟、上一次改完的字一趟 —— 第二次修改时模型里存的是后者。
+        SLChatRewritePatchLiveText(self.aliases, origStr, text);
+        if (![current isEqualToString:origTrim]) {
+            SLChatRewritePatchLiveText(self.aliases, current, text);
+        }
     }
     if (self.doneBlock) self.doneBlock(changed);
     [self dismissViewControllerAnimated:YES completion:^{
-        if (changed) SLChatRewriteReloadChat();
+        if (!changed) return;
+        SLChatRewriteReloadChat();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            SLChatRewriteDumpVisibleText();
+        });
     }];
 }
 
@@ -838,6 +911,7 @@ static void SLCROpenEditor(id message, NSString *fallbackKey, NSString *cellCls,
     editor.msgid = key;
     editor.aliases = aliases;
     editor.orig = orig;
+    editor.current = initial;      // 面板里显示「现在这条消息的字」，不是最初原文
     editor.session = session;
     editor.doneBlock = ^(BOOL changed) {
         SLLog(@"REWRITE 面板关闭 changed=%d", changed ? 1 : 0);
@@ -970,6 +1044,197 @@ void SLChatRewriteBeginFromMenu(UIView *menuView) {
     }
     NSString *cellCls = cell ? NSStringFromClass([cell class]) : SLCRHostCellClass(tv);
     SLCROpenEditor(message, menuMid, cellCls, hint);
+}
+
+#pragma mark - 渲染层补丁
+//
+// 为什么光靠 body getter 不够：气泡的字是在会话数据建好那一刻、由 mixItem 的
+// cellViewModel 解析成排版的（MDMixLabel 自绘表情混排），模型里存的是**解析好的字符串**。
+// reloadData 只是重新绑 cell，模型里的字没动，屏幕上就原样 ——
+// 这就是 v0.5.05「保存成功、界面照旧」的真正原因。
+// 所以保存后直接去改活着的对象图：模型里的字符串 + 已经排好版的气泡标签。
+
+// 替换物得留个强引用：object_setIvar 是裸存，不 retain
+static NSMutableArray *gSLCRPatchKeep = nil;
+
+static NSString *SLCRPropertyNameForIvar(const char *name) {
+    if (!name) return nil;
+    NSString *s = [NSString stringWithUTF8String:name];
+    if ([s hasPrefix:@"$__lazy_storage_$_"]) s = [s substringFromIndex:19];
+    while ([s hasPrefix:@"_"]) s = [s substringFromIndex:1];
+    return s.length ? s : nil;
+}
+
+static NSAttributedString *SLCRReplaceAttributed(NSAttributedString *src, NSString *repl) {
+    if (![src isKindOfClass:[NSAttributedString class]] || !repl.length) return nil;
+    NSDictionary *attrs = src.length ? [src attributesAtIndex:0 effectiveRange:NULL] : nil;
+    NSAttributedString *na = [[NSMutableAttributedString alloc] initWithString:repl attributes:attrs];
+    if (na && !gSLCRPatchKeep) gSLCRPatchKeep = [NSMutableArray array];
+    if (na) [gSLCRPatchKeep addObject:na];
+    return na;
+}
+
+static BOOL SLCRStringIs(NSString *a, NSString *b) {
+    if (![a isKindOfClass:[NSString class]] || ![b isKindOfClass:[NSString class]]) return NO;
+    if ([a isEqualToString:b]) return YES;
+    NSString *ta = [a stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *tb = [b stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return ta.length && [ta isEqualToString:tb];
+}
+
+static NSInteger gSLCRPatchBudget = 0;
+
+static NSInteger SLCRPatchModelStrings(id obj, NSInteger depth, NSString *orig, NSString *repl,
+                                       NSMutableString *trace) {
+    if (!obj || depth <= 0 || gSLCRPatchBudget <= 0) return 0;
+    if ([obj isKindOfClass:[NSString class]] || [obj isKindOfClass:[NSNumber class]] ||
+        [obj isKindOfClass:[NSData class]] || [obj isKindOfClass:[NSArray class]] ||
+        [obj isKindOfClass:[NSDictionary class]] || [obj isKindOfClass:[UIImage class]]) return 0;
+    gSLCRPatchBudget -= 1;
+    NSInteger hits = 0;
+    Class cls = object_getClass(obj);
+    NSInteger guard = 0;
+    while (cls && cls != [NSObject class] && guard < 12 && gSLCRPatchBudget > 0) {
+        unsigned int n = 0;
+        Ivar *ivars = class_copyIvarList(cls, &n);
+        for (unsigned int i = 0; i < n && gSLCRPatchBudget > 0; i++) {
+            const char *tn = ivar_getName(ivars[i]);
+            const char *te = ivar_getTypeEncoding(ivars[i]);
+            if (!te || te[0] != '@' || !tn || strstr(tn, "delegate")) continue;
+            id v = nil;
+            @try { v = object_getIvar(obj, ivars[i]); } @catch (NSException *e) { }
+            if (!v || v == obj) continue;
+            BOOL isView = [v isKindOfClass:[UIView class]] || [v isKindOfClass:[CALayer class]];
+            if (isView) continue;                       // 视图交给标签那一趟，别漫游整棵视图树
+            NSString *prop = SLCRPropertyNameForIvar(tn);
+            if ([v isKindOfClass:[NSString class]]) {
+                if (!SLCRStringIs((NSString *)v, orig)) continue;
+                BOOL ok = NO;
+                if (prop.length) { @try { [obj setValue:repl forKey:prop]; ok = YES; } @catch (NSException *e) { } }
+                if (!ok) { @try { object_setIvar(obj, ivars[i], repl); ok = YES; } @catch (NSException *e) { } }
+                if (ok) { hits += 1; if (trace) [trace appendFormat:@"%s ", tn]; }
+            } else if ([v isKindOfClass:[NSAttributedString class]]) {
+                if (!SLCRStringIs([(NSAttributedString *)v string], orig)) continue;
+                NSAttributedString *na = SLCRReplaceAttributed((NSAttributedString *)v, repl);
+                if (!na) continue;
+                BOOL ok = NO;
+                if (prop.length) { @try { [obj setValue:na forKey:prop]; ok = YES; } @catch (NSException *e) { } }
+                if (!ok) { @try { object_setIvar(obj, ivars[i], na); ok = YES; } @catch (NSException *e) { } }
+                if (ok) { hits += 1; if (trace) [trace appendFormat:@"%s ", tn]; }
+            } else {
+                hits += SLCRPatchModelStrings(v, depth - 1, orig, repl, trace);
+            }
+        }
+        if (ivars) free(ivars);
+        cls = class_getSuperclass(cls);
+        guard += 1;
+    }
+    return hits;
+}
+
+// 已经排好版的气泡标签：MDMixLabel 里 text / attributedString 就是屏幕上那行字
+static NSInteger SLCRPatchLabels(UIView *v, NSString *orig, NSString *repl) {
+    if (!v) return 0;
+    NSInteger hits = 0;
+    NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"MixLabel"] || [v isKindOfClass:[UILabel class]]) {
+        id t = nil;
+        @try { t = [v valueForKey:@"text"]; } @catch (NSException *e) { }
+        if ([t isKindOfClass:[NSString class]] && SLCRStringIs((NSString *)t, orig)) {
+            @try { [v setValue:repl forKey:@"text"]; hits += 1; } @catch (NSException *e) { }
+        } else {
+            id as = nil;
+            @try { as = [v valueForKey:@"attributedString"]; } @catch (NSException *e) { }
+            if ([as isKindOfClass:[NSAttributedString class]] &&
+                SLCRStringIs([(NSAttributedString *)as string], orig)) {
+                NSAttributedString *na = SLCRReplaceAttributed((NSAttributedString *)as, repl);
+                if (na) { @try { [v setValue:na forKey:@"attributedString"]; hits += 1; } @catch (NSException *e) { } }
+            }
+        }
+    }
+    for (UIView *sub in v.subviews) hits += SLCRPatchLabels(sub, orig, repl);
+    return hits;
+}
+
+static NSString *SLCRFirstMixLabelText(UIView *v) {
+    if (!v) return nil;
+    NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"MixLabel"] || [v isKindOfClass:[UILabel class]]) {
+        id t = nil;
+        @try { t = [v valueForKey:@"text"]; } @catch (NSException *e) { }
+        if ([t isKindOfClass:[NSString class]] && [(NSString *)t length]) return (NSString *)t;
+        id as = nil;
+        @try { as = [v valueForKey:@"attributedString"]; } @catch (NSException *e) { }
+        if ([as isKindOfClass:[NSAttributedString class]]) {
+            NSString *s = [(NSAttributedString *)as string];
+            if (s.length) return s;
+        }
+    }
+    for (UIView *sub in v.subviews) {
+        NSString *s = SLCRFirstMixLabelText(sub);
+        if (s.length) return s;
+    }
+    return nil;
+}
+
+void SLChatRewritePatchLiveText(NSArray *aliases, NSString *orig, NSString *repl) {
+    if (!orig.length || !repl.length || [orig isEqualToString:repl]) return;
+    UIViewController *chat = SLCRChatVC(SLCRTopVC());
+    UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
+    if (!tv) tv = SLCRChatTableAnywhere();
+    if (!tv) {
+        SLLog(@"REWRITE 渲染补丁：没找到聊天列表");
+        return;
+    }
+    NSInteger cells = 0, modelHits = 0, labelHits = 0;
+    for (UITableViewCell *cell in tv.visibleCells) {
+        id m = SLCRMessageOf(cell);
+        if (!m) continue;
+        NSArray *ids = SLChatRewriteAliasesForMessage(m, nil);
+        BOOL hit = NO;
+        for (NSString *a in ids) {
+            if ([aliases containsObject:a]) { hit = YES; break; }
+        }
+        if (!hit) {
+            NSString *mid = SLCRMsgidOf(m);
+            if (mid.length && [aliases containsObject:mid]) hit = YES;
+        }
+        if (!hit) continue;
+        cells += 1;
+
+        id dataItem = nil;
+        @try { dataItem = [cell valueForKey:@"dataItem"]; } @catch (NSException *e) { }
+        NSString *itemCls = dataItem ? NSStringFromClass([dataItem class]) : @"nil";
+
+        gSLCRPatchBudget = 900;
+        NSMutableString *trace = [NSMutableString string];
+        NSInteger mh = SLCRPatchModelStrings(cell, 5, orig, repl, trace);
+        NSInteger lh = SLCRPatchLabels(cell, orig, repl);
+        modelHits += mh;
+        labelHits += lh;
+        SLLog(@"REWRITE 渲染补丁 cell=%@ dataItem=%@ 模型 %ld 处 [%@] 标签 %ld 处",
+              NSStringFromClass([cell class]), itemCls, (long)mh,
+              trace.length ? trace : @"-", (long)lh);
+    }
+    if (!cells) SLLog(@"REWRITE 渲染补丁：可见 cell 里没找到这条消息（orig=%@）", SLCRPreview(orig, 16));
+    else SLLog(@"REWRITE 渲染补丁合计 %ld 个 cell，模型 %ld 处 / 标签 %ld 处",
+               (long)cells, (long)modelHits, (long)labelHits);
+}
+
+// 刷新后回读：屏幕上真正显示的字是什么。下次再出问题，这一行就能定性。
+void SLChatRewriteDumpVisibleText(void) {
+    UIViewController *chat = SLCRChatVC(SLCRTopVC());
+    UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
+    if (!tv) return;
+    NSInteger n = 0;
+    for (UITableViewCell *cell in tv.visibleCells) {
+        if (n >= 5) break;
+        id m = SLCRMessageOf(cell);
+        NSString *mid = SLCRMsgidOf(m) ?: @"-";
+        NSString *shown = SLCRFirstMixLabelText(cell) ?: SLCRLongestText(cell) ?: @"-";
+        SLLog(@"REWRITE 显示 %@ → [%@]", mid, SLCRPreview(shown, 20));
+        n += 1;
+    }
 }
 
 void SLChatRewriteHandleLeave(UIViewController *vc) {

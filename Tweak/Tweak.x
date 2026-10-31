@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.05"
+#define SLVersion @"0.5.06"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2937,6 +2937,33 @@ static id SLChatTextV2GetHook(id self, SEL _cmd) {
     return raw;
 }
 
+// 气泡上的字最终是 MDMixLabel 自绘的排版结果，body / textv2 这两层拦不到。
+// 保存后 reloadData 会让标签带着「原文」再排一次，这里把它换成新文 —— 渲染层最后一道闸。
+static void SLChatMixLabelSetTextHook(id self, SEL _cmd, id text) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    if (!orig) return;
+    if ([text isKindOfClass:[NSString class]]) {
+        NSString *rep = SLChatRewriteTextForPlainString((NSString *)text);
+        if (rep.length) text = rep;
+    }
+    ((void (*)(id, SEL, id))orig)(self, _cmd, text);
+}
+
+static void SLChatMixLabelSetAttributedHook(id self, SEL _cmd, id as) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    if (!orig) return;
+    if ([as isKindOfClass:[NSAttributedString class]]) {
+        NSString *s = [(NSAttributedString *)as string];
+        NSString *rep = SLChatRewriteTextForPlainString(s);
+        if (rep.length) {
+            NSDictionary *attrs = s.length ? [(NSAttributedString *)as attributesAtIndex:0
+                                                                         effectiveRange:NULL] : nil;
+            as = [[NSMutableAttributedString alloc] initWithString:rep attributes:attrs];
+        }
+    }
+    ((void (*)(id, SEL, id))orig)(self, _cmd, as);
+}
+
 // 陌陌的气泡菜单是自绘的 MDChatUIMenuView + MDChatUIMenuItem，
 // 往 items 数组尾部塞一项就能和原生项长得一模一样（字体/圆角/箭头都复用它的 cell）。
 static const void *kSLCRMenuIndexKey = &kSLCRMenuIndexKey;
@@ -3103,6 +3130,19 @@ static void SLInstallChatRewriteHooks(void) {
         SEL leave = NSSelectorFromString(@"viewWillDisappear:");
         if (SLRegisterMethod(chatVC, leave, (IMP)SLChatViewWillDisappearHook)) {
             [hits addObject:@"chatLeave"];
+        }
+    }
+
+    // 渲染层：气泡标签最后落字的那一步
+    Class mixLabel = SLClassByName("MDMixLabel");
+    if (mixLabel) {
+        if (SLRegisterMethod(mixLabel, NSSelectorFromString(@"setText:"),
+                             (IMP)SLChatMixLabelSetTextHook)) {
+            [hits addObject:@"mixText"];
+        }
+        if (SLRegisterMethod(mixLabel, NSSelectorFromString(@"setAttributedString:"),
+                             (IMP)SLChatMixLabelSetAttributedHook)) {
+            [hits addObject:@"mixAttr"];
         }
     }
 
