@@ -475,30 +475,56 @@ static BOOL SLCRLooksMessage(id obj) {
 }
 
 // 一个视图（或任何对象）身上挂的消息。
-// 文本气泡 cell 是 Swift 的 MDChatBusinessBase.MDSChatType2Cell，继承自 MDChatBaseCell：
-// 基类的 message getter 是空实现、真数据在 mixItem（MDMixItem.message）里，
-// 所以只读 message 会一路拿到 nil —— v0.5.03 就是这样「整条 cell 树 0 个候选」的。
-static id SLCRMessageOf(id obj) {
+//
+// 文本气泡 cell 是 Swift 的 MDChatBusinessBase.MDSChatType1Cell：
+// 它既没有 message（基类 MDChatBaseCell 那个 getter 是空实现），也没有 mixItem，
+// 真正的模型在 ivar `dataItem` 里（v0.5.04 把 ivar 名打出来才看见：
+// $__lazy_storage_$_contentLabel 一大堆懒加载控件 + delegate + dataItem）。
+// 所以这里既按名字试最常见的几个 key，也直接枚举对象型 ivar —— 不写死名字，
+// 深度 2 正好够 cell → item → message。
+static id SLCRMessageOfDepth(id obj, NSInteger depth);
+
+static id SLCRMessageViaIvars(id obj, NSInteger depth) {
+    if (!obj || depth <= 0 || [obj isKindOfClass:[NSString class]] ||
+        [obj isKindOfClass:[NSNumber class]] || [obj isKindOfClass:[NSData class]]) return nil;
+    Class cls = object_getClass(obj);
+    NSInteger guard = 0;
+    id found = nil;
+    while (cls && cls != [NSObject class] && guard < 8 && !found) {
+        unsigned int n = 0;
+        Ivar *ivars = class_copyIvarList(cls, &n);
+        for (unsigned int i = 0; i < n && !found; i++) {
+            const char *t = ivar_getTypeEncoding(ivars[i]);
+            if (!t || t[0] != '@') continue;
+            id v = nil;
+            @try { v = object_getIvar(obj, ivars[i]); } @catch (NSException *e) { }
+            if (!v || v == obj) continue;
+            found = SLCRMessageOfDepth(v, depth - 1);
+        }
+        if (ivars) free(ivars);
+        cls = class_getSuperclass(cls);
+        guard += 1;
+    }
+    return found;
+}
+
+static id SLCRMessageOfDepth(id obj, NSInteger depth) {
     if (!obj) return nil;
     if (SLCRLooksMessage(obj)) return obj;
-    id v = nil;
-    @try {
-        if ([obj respondsToSelector:NSSelectorFromString(@"message")]) v = [obj valueForKey:@"message"];
-    } @catch (NSException *e) { }
-    if (v && v != obj && SLCRLooksMessage(v)) return v;
-    id mi = nil;
-    @try {
-        if ([obj respondsToSelector:NSSelectorFromString(@"mixItem")]) mi = [obj valueForKey:@"mixItem"];
-    } @catch (NSException *e) { }
-    if (mi && mi != obj) {
-        if (SLCRLooksMessage(mi)) return mi;
-        id m2 = nil;
+    for (NSString *k in @[@"message", @"mixItem", @"dataItem"]) {
+        id v = nil;
         @try {
-            if ([mi respondsToSelector:NSSelectorFromString(@"message")]) m2 = [mi valueForKey:@"message"];
+            if ([obj respondsToSelector:NSSelectorFromString(k)]) v = [obj valueForKey:k];
         } @catch (NSException *e) { }
-        if (m2 && SLCRLooksMessage(m2)) return m2;
+        if (!v || v == obj) continue;
+        id m = SLCRMessageOfDepth(v, depth - 1);
+        if (m) return m;
     }
-    return nil;
+    return SLCRMessageViaIvars(obj, depth);
+}
+
+static id SLCRMessageOf(id obj) {
+    return SLCRMessageOfDepth(obj, 2);
 }
 
 // 在子树里收集挂着消息的视图。@try 必须包在单个视图上：

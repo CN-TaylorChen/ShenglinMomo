@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.04"
+#define SLVersion @"0.5.05"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2976,7 +2976,10 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
             if (!icon) icon = [UIImage systemImageNamed:@"pencil"];
             if (icon) [item setValue:icon forKey:@"image"];
         } else if ([sampleImage isKindOfClass:[NSString class]]) {
-            [item setValue:sampleImage forKey:@"image"];
+            // 陌陌自己的「编辑」图标叫 im_longPress_eit（就是它自己的拼写，别纠正成 edit）
+            NSString *name = sampleImage;
+            if ([name hasPrefix:@"im_longPress_"]) name = @"im_longPress_eit";
+            [item setValue:name forKey:@"image"];
         }
         SLLog(@"REWRITE 菜单项图标：原生 image=%@(%@) itemType=%ld",
               sampleImage ? NSStringFromClass([sampleImage class]) : @"nil",
