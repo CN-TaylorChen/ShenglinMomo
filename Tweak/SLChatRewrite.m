@@ -156,6 +156,12 @@ static NSRegularExpression *SLMetaPairRE(void) {
     return re;
 }
 
+// 撤回卡片 与 时间行长按热区 的 tag。
+// 提前定义：SLMetaRowViewIn 要排除这两个容器里的子视图 ——
+// 撤回卡片里的原文标签也含冒号（网址），单看文字签名会被误认成「时间行」。
+static const NSInteger kSLRecallCardTag = 0x5EC2;
+static const NSInteger kSLMetaHotTag = 0x5EC3;
+
 static NSString *const kSLMetaStoreKey = @"SLChatMetaStore";
 static NSMutableDictionary *gSLMetaStore = nil;
 static NSInteger gSLMetaLog = 0;
@@ -266,6 +272,54 @@ static NSString *SLMetaHeadFor(NSString *dtRaw, NSString *fallback) {
     return rel.length ? rel : dtRaw;               // 解析不出来就按用户写的原样贴
 }
 
+// 拆出「日期部分」：2026-10-31 12:00 → 2026-10-31；只给了 10-31 就 10-31。
+static NSString *SLMetaDatePart(NSString *s) {
+    if (![s isKindOfClass:[NSString class]] || !s.length) return nil;
+    static NSRegularExpression *re = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:
+              @"(\\d{2,4}[-/.]\\d{1,2}[-/.]\\d{1,2}|\\d{1,2}[-/.]\\d{1,2})"
+                                                     options:0 error:NULL];
+    });
+    NSTextCheckingResult *m = [re firstMatchInString:s options:0 range:NSMakeRange(0, s.length)];
+    return m ? [s substringWithRange:[m rangeAtIndex:1]] : nil;
+}
+
+// 拆出「时分部分」：2026-10-31 12:00 → 12:00；2026-10-31 → nil。
+static NSString *SLMetaTimePart(NSString *s) {
+    if (![s isKindOfClass:[NSString class]] || !s.length) return nil;
+    static NSRegularExpression *re = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"(\\d{1,2}:\\d{1,2})"
+                                                     options:0 error:NULL];
+    });
+    NSTextCheckingResult *m = [re firstMatchInString:s options:0 range:NSMakeRange(0, s.length)];
+    return m ? [s substringWithRange:[m rangeAtIndex:1]] : nil;
+}
+
+// 时间行的时刻由两栏合成（v0.5.22 起日期框只放日期，时间框只放时分，不重复）：
+//   日期 2026-10-31 + 时间 12:01 → 2026-10-31 12:01
+//   日期自己带时分（老数据 2026-10-31 12:00）→ 以它为准
+//   只改日期 → 钟点沿用原文那行里写的（fallbackHead），没有就用当前
+//   只改时间 → 今天
+static NSString *SLMetaComposeWhen(NSString *dateRaw, NSString *timeRaw, NSString *fallbackHead) {
+    NSString *dp = SLMetaDatePart(dateRaw);
+    NSString *tp = SLMetaTimePart(dateRaw);
+    if (!tp.length) tp = SLMetaTimePart(timeRaw);
+    if (!dp.length && !tp.length) return nil;
+    if (dp.length && !tp.length) tp = SLMetaTimePart(fallbackHead);
+    if (dp.length && tp.length) return [NSString stringWithFormat:@"%@ %@", dp, tp];
+    if (tp.length) return tp;
+    if (dp.length) {
+        NSDateFormatter *f = [[NSDateFormatter alloc] init];
+        f.dateFormat = @"HH:mm";
+        return [NSString stringWithFormat:@"%@ %@", dp, [f stringFromDate:[NSDate date]]];
+    }
+    return nil;
+}
+
 NSString *SLMetaTimeFor(NSString *msgid) {
     if (![msgid isKindOfClass:[NSString class]] || !msgid.length) return nil;
     NSDictionary *e = SLMetaStore()[msgid];
@@ -339,6 +393,14 @@ static BOOL SLMetaRowLooksLike(NSString *s) {
 //   2. 文字还没就位时，用「层级更深 + 更靠上 + 尺寸像」兜底：
 //      时间行嵌在气泡 replay 视图里（tree 实测深度 5），而昵称是 contentView 的直接子视图
 //      （深度 1）—— 单看 100x14 的尺寸会把昵称误判成时间行，所以必须比深度。
+// v 是不是挂在某个 tag 容器里面（往上走到 stop 为止）
+static BOOL SLViewHasTaggedAncestor(UIView *v, UIView *stop, NSInteger tag) {
+    for (UIView *p = v; p && p != stop; p = p.superview) {
+        if (p.tag == tag) return YES;
+    }
+    return NO;
+}
+
 static id SLMetaRowViewIn(UIView *v, NSInteger depth) {
     if (!v || depth <= 0) return nil;
     __block id best = nil;
@@ -352,6 +414,10 @@ static id SLMetaRowViewIn(UIView *v, NSInteger depth) {
     scan = ^(UIView *root, NSInteger d) {
         if (!root || d <= 0) return;
         if (SLCRIsLabelLike(root)) {
+            // 撤回卡片和热区里的标签一律不算「时间行」：
+            // 卡片里的原文常含冒号（网址 http://…）会被文字签名误判，热区是空的。
+            if (!SLViewHasTaggedAncestor(root, v, kSLRecallCardTag) &&
+                !SLViewHasTaggedAncestor(root, v, kSLMetaHotTag)) {
             CGRect af = [root convertRect:root.bounds toView:v];
             CGFloat h = CGRectGetHeight(af);
             CGFloat w = CGRectGetWidth(af);
@@ -370,6 +436,7 @@ static id SLMetaRowViewIn(UIView *v, NSInteger depth) {
                     bestY = top;
                     best = root;
                 }
+            }
             }
         }
         for (UIView *s in root.subviews) weakScan(s, d - 1);
@@ -400,6 +467,54 @@ BOOL SLMetaIsTimeRowText(NSString *s) {
 // 而 cell 上那个「共享对象」会让一整屏 cell 都反查成同一条 —— 于是改一条、
 // 全屏同一条时间都变（用户 v0.5.19 实测「一改所有时间都一样」的真根因）。
 // 传进来的 mid 来自「长按的那条」或「indexPath → 数据源」，都是准的。
+// 换一把钥匙认这条消息：按「这行原本是什么」反查。
+//
+// 为什么需要：退出会话再进来，陌陌会用自己的数据源把整屏重排一遍，那一刻
+// cell → msgid 经常反查不到（日志里 `REWRITE 显示 - → [16:32 35.95km]` 就是这种），
+// 于是改好的时间全被写回原文 —— 用户看到的「退出去再进来就刷新了」。
+// 原文那串是陌陌给的、稳定的，所以拿它当第二把钥匙。**只有唯一命中才用**，
+// 命中多条直接放弃：宁可这条不刷，也不能像 v0.5.19 那样一改全变。
+static NSString *SLMetaMsgidByOriginalText(NSString *cur) {
+    if (![cur isKindOfClass:[NSString class]] || !cur.length) return nil;
+    NSString *found = nil;
+    NSInteger hits = 0;
+    for (NSString *k in SLMetaStore()) {
+        id e = SLMetaStore()[k];
+        if (![e isKindOfClass:[NSDictionary class]]) continue;
+        NSString *o = ((NSDictionary *)e)[@"o"];
+        if (![o isKindOfClass:[NSString class]] || ![o isEqualToString:cur]) continue;
+        hits += 1;
+        found = k;
+        if (hits > 1) return nil;
+    }
+    return (hits == 1) ? found : nil;
+}
+
+// 时间行原本只有 100pt 宽，距离一长（1125.95km）就被省略成「1125.9…」。
+// 设完字之后按真实宽度把它撑开：以中心为锚点左右一起长（时间行本来就是居中的），
+// 再挂上缩字兜底 —— 万一被陌陌的 layout 把宽度改回去，字也会自己缩到装得下。
+static void SLMetaFitRowWidth(UIView *row, NSString *text) {
+    if (![row isKindOfClass:[UILabel class]]) return;
+    UILabel *l = (UILabel *)row;
+    if (!text.length || !l.font) return;
+    // 缩字兜底：即使陌陌的 layout 把宽度改回去，字也会自己缩到装得下（不再出现「1125.9…」）
+    l.adjustsFontSizeToFitWidth = YES;
+    l.minimumScaleFactor = 0.75;
+    l.lineBreakMode = NSLineBreakByClipping;      // 不要省略号
+    CGFloat need = ceil([text sizeWithAttributes:@{NSFontAttributeName: l.font}].width) + 6.0;
+    CGRect f = l.frame;
+    CGFloat w = CGRectGetWidth(f);
+    if (need <= w + 0.5) return;                   // 装得下就别动排版
+    if (need > 180.0) need = 180.0;                // 别撑成一整行，最多放宽到 180
+    CGRect nf = CGRectMake(CGRectGetMidX(f) - need / 2.0, CGRectGetMinY(f),
+                           need, CGRectGetHeight(f));
+    // 收敛在父视图里，免得跑到 cell 外面
+    CGFloat parentW = CGRectGetWidth(l.superview.bounds);
+    if (CGRectGetMinX(nf) < 0.0) nf.origin.x = 0.0;
+    if (parentW > 0.0 && CGRectGetMaxX(nf) > parentW) nf.origin.x = parentW - need;
+    l.frame = nf;
+}
+
 static BOOL SLMetaApplyOneMid(UITableViewCell *cell, NSString *mid) {
     if (!cell) return NO;
     if (![mid isKindOfClass:[NSString class]] || !mid.length) return NO;
@@ -430,6 +545,7 @@ static BOOL SLMetaApplyOneMid(UITableViewCell *cell, NSString *mid) {
         // 用户把输入框都清空了 → 复原成原文
         if ([orig isKindOfClass:[NSString class]] && orig.length && ![orig isEqualToString:cur]) {
             if (SLCRSetShownText(rowView, orig)) {
+                SLMetaFitRowWidth(rowView, orig);
                 SLLog(@"META 复原 %@ → [%@]", mid, orig);
                 return YES;
             }
@@ -450,17 +566,20 @@ static BOOL SLMetaApplyOneMid(UITableViewCell *cell, NSString *mid) {
             dist = [orig substringWithRange:[m2 rangeAtIndex:2]];
         }
     }
-    // 日期 / 时间都按「陌陌的算法」现算：一小时内 →「X分钟前」，超过 →「HH:mm」。
-    // 所以填 18:35 而当前 18:40，屏幕上会是「5分钟前」；填 10:03 就是「10:03」。
-    // 每次渲染都重算，时间会自己往前走。
-    NSString *headOut = dt.length ? SLMetaHeadFor(dt, head)
-                      : (tt.length ? SLMetaHeadFor(tt, tt) : head);
+    // 时刻 = 「日期栏 + 时间栏」合成，再按陌陌的算法现算：
+    // 一小时内 →「X分钟前」，超过 →「HH:mm」。每次渲染都重算，时间会自己往前走。
+    NSString *when = SLMetaComposeWhen(dt, tt, head);
+    NSString *headOut = when.length ? SLMetaHeadFor(when, head) : head;
     NSString *nd = nil;
     if (dd.length) nd = [dd.lowercaseString hasSuffix:@"km"] ? dd : [dd stringByAppendingString:@"km"];
     else nd = dist;                 // 这一行原本就没有距离，别硬塞一个 "km" 上去
     NSString *out = nd.length ? [NSString stringWithFormat:@"%@ %@", headOut, nd] : headOut;
-    if ([out isEqualToString:cur]) return NO;
+    if ([out isEqualToString:cur]) {
+        SLMetaFitRowWidth(rowView, out);       // 字虽然没变，宽度可能被 layout 改回去了
+        return NO;
+    }
     if (!SLCRSetShownText(rowView, out)) return NO;
+    SLMetaFitRowWidth(rowView, out);           // 距离一长就撑开，不再被省略成「1125.9…」
     if (gSLMetaLog < 12) {
         gSLMetaLog += 1;
         SLLog(@"META 时间距离 [%@] → [%@] (msgid=%@)", cur, out, mid);
@@ -474,6 +593,9 @@ void SLChatMetaApplyCellAtIndex(UITableView *tv, UITableViewCell *cell, NSIndexP
     if (!cell || !SLMetaStore().count) return;
     NSString *mid = SLCRMsgidAtIndexPath(tv, ip);
     if (!mid.length) mid = SLCRMsgidOf(SLCRMessageOf(cell));
+    // 重进会话那一刻 msgid 常常反查不到 → 用原文行做第二把钥匙，别让改好的时间被写回去
+    if (!mid.length) mid = SLMetaMsgidByOriginalText(SLCRShownTextOf(SLMetaRowViewIn(cell, 6)));
+    if (!mid.length) return;
     if (!SLMetaApplyOneMid(cell, mid)) return;
     // 陌陌在 willDisplay 之后还会自己 layout 一遍，把时间行按原始值重写回去 ——
     // 这就是「当时改好了、一滑就变回去」。补刷一次把它拉回来。
@@ -1291,9 +1413,9 @@ void SLChatRewriteReloadChat(void) {
 
     _labels = [NSMutableArray array];
     _fields = [NSMutableArray array];
-    [self sl_addRow:@"时间" placeholder:@"12:01 / 5分钟前" value:self.initialTime];
-    [self sl_addRow:@"距离" placeholder:@"96.96（km 会自动补）" value:self.initialDist];
-    [self sl_addRow:@"日期" placeholder:@"2026-10-31 12:00" value:self.initialDate];
+    [self sl_addRow:@"时间" placeholder:@"12:01" value:self.initialTime];
+    [self sl_addRow:@"距离" placeholder:@"96.96" value:self.initialDist];
+    [self sl_addRow:@"日期" placeholder:@"2026-10-31" value:self.initialDate];
 }
 
 - (UITextField *)sl_addRow:(NSString *)title placeholder:(NSString *)ph value:(NSString *)v {
@@ -2017,9 +2139,13 @@ void SLChatMetaBeginFromMenu(UIView *menuView) {
         }
     }
 
-    NSString *t0 = SLMetaTimeFor(mid) ?: (head.length ? head : @"");
+    // 日期框只放日期、时间框只放时分 —— 两栏不重复（日期框里再把时间写一遍是废话）
+    NSString *dtRaw = SLMetaDateFor(mid);
+    NSString *dtDay = SLMetaDatePart(dtRaw);
+    NSString *dtHm  = SLMetaTimePart(dtRaw);
+    NSString *t0 = SLMetaTimeFor(mid) ?: dtHm ?: (head.length ? head : @"");
     NSString *d0 = SLMetaDistFor(mid) ?: (dist.length ? dist : @"");
-    NSString *dt0 = SLMetaDateFor(mid) ?: @"";
+    NSString *dt0 = dtDay ?: @"";
 
     SLLog(@"META 打开面板 msgid=%@ 当前行=[%@] 预填 时间=[%@] 距离=[%@] 日期=[%@] cell=%@",
           mid, SLCRPreview(cur, 20), t0, d0, dt0,
@@ -2090,9 +2216,13 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
             SLMetaSync();
         }
     }
-    NSString *t0 = SLMetaTimeFor(mid) ?: (head.length ? head : @"");
+    // 日期框只放日期、时间框只放时分 —— 两栏不重复（日期框里再把时间写一遍是废话）
+    NSString *dtRaw = SLMetaDateFor(mid);
+    NSString *dtDay = SLMetaDatePart(dtRaw);
+    NSString *dtHm  = SLMetaTimePart(dtRaw);
+    NSString *t0 = SLMetaTimeFor(mid) ?: dtHm ?: (head.length ? head : @"");
     NSString *d0 = SLMetaDistFor(mid) ?: (dist.length ? dist : @"");
-    NSString *dt0 = SLMetaDateFor(mid) ?: @"";
+    NSString *dt0 = dtDay ?: @"";
 
     SLLog(@"META 长按时间行进入 msgid=%@ 当前行=[%@] 预填 时间=[%@] 距离=[%@] 日期=[%@]",
           mid, SLCRPreview(cur, 20), t0, d0, dt0);
@@ -2200,6 +2330,9 @@ static BOOL gSLMetaInLabelHook = NO;
 
 void SLChatMetaAttachTimeLongPressForLabel(UIView *label) {
     if (!label || !SLChatRewriteEnabled()) return;
+    // 撤回卡片里的原文也「像时间行」（网址带冒号）→ 别给它挂长按，
+    // 否则长按撤回原文会弹「时间 / 距离」面板。
+    if (SLViewHasTaggedAncestor(label, nil, kSLRecallCardTag)) return;
     SLMetaAttachLPToLabel(label, @"labelText");
     // 光挂 label 不够：这颗粒标签在 UITextField 内部，文本框自带的文本交互会抢长按，
     // 于是「有时能按、有时按不动」。顺着父链找到 cell，在它上层盖一块热区。
@@ -2222,6 +2355,9 @@ void SLChatMetaAttachTimeLongPressForLabel(UIView *label) {
     objc_setAssociatedObject(cell, kApplyKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     gSLMetaInLabelHook = YES;                 // SLCRSetShownText 会再触发 setText:，必须防重入
     NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
+    // 第二把钥匙：文案刚落地的这一刻，cell→msgid 往往还拿不到（会话刚重进、正在重排），
+    // 用「这行原本是啥」反查，才接得住「退出私聊再进来」那一下。
+    if (!mid.length) mid = SLMetaMsgidByOriginalText(SLCRShownTextOf(label));
     if (mid.length) SLMetaApplyOneMid(cell, mid);
     gSLMetaInLabelHook = NO;
 }
@@ -2232,7 +2368,7 @@ void SLChatMetaAttachTimeLongPressForLabel(UIView *label) {
 // 内部的标签），文本框自带的文本交互（日志里那条 UITextSelectionInteraction
 // #_handleMultiTapGesture）会在部分时机把我们的长按抢走 —— 实测就是「有时候能按、
 // 有时候按了没反应」。热区挂在 contentView 最上层，先接到触摸，稳。
-static const NSInteger kSLMetaHotTag = 0x5EC3;
+
 
 static void SLMetaInstallHotZone(UITableViewCell *cell, UIView *row) {
     if (!cell || !row) return;
@@ -3100,7 +3236,7 @@ void SLChatRewriteHandleLeave(UIViewController *vc) {
 //   2. 在画回来的气泡上贴一枚「已拦截」小标，让人一眼看出这条是被我们拦下的。
 // 系统原来那行「对方撤回了一条消息」不动，就留在上面。
 static NSInteger gSLRecallRepaintLog = 0;
-static const NSInteger kSLRecallCardTag = 0x5EC2;
+
 
 // 被拦的撤回在陌陌里是系统消息 cell（MDSChatsystemProCell 之类），不是气泡。
 // 甲样式：在这类 cell 上盖一张居中浅灰卡片，红色「已拦截」小徽章（不压字）+ 浅灰
@@ -3145,18 +3281,27 @@ static void SLRecallShowSystemContent(UITableViewCell *cell) {
 // 用户要的是「文字平移滚动」，不是上下滚 —— 上下滚在 42pt 的行里看着像两张卡片叠在一起。
 static void SLRecallStartScroll(UILabel *body, UIView *clip) {
     if (!body || !clip) return;
-    [body.layer removeAnimationForKey:@"sl_scroll"];
     CGFloat textW = CGRectGetWidth(body.frame);
     CGFloat winW = CGRectGetWidth(clip.bounds);
-    if (winW < 8.0 || textW <= winW + 1.0) return;      // 装得下就不滚
+    if (winW < 8.0 || textW <= winW + 1.0) {          // 装得下就不滚
+        [body.layer removeAnimationForKey:@"sl_scroll"];
+        return;
+    }
     CGFloat dist = textW - winW;
+    // ★ 已经在跑、滚动距离也没变 → 直接返回，绝对不要重建。
+    // 之前每刷一次卡片就 remove + 重新 add 一遍，而起点又设成「1.2 秒之后」，
+    // 而卡片一秒会被刷好几次 —— 动画永远停在起点之前，看起来就是「根本不会滚」。
+    CABasicAnimation *old = (CABasicAnimation *)[body.layer animationForKey:@"sl_scroll"];
+    if (old && fabs([old.toValue doubleValue] + dist) < 1.0) return;
+    [body.layer removeAnimationForKey:@"sl_scroll"];
+
     CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
     a.fromValue = @(0);
     a.toValue = @(-dist);
     a.duration = MAX(3.0, (double)dist / 18.0);         // 18pt/s，比人眼跟读稍慢一点
     a.autoreverses = YES;
     a.repeatCount = 1.0e9f;
-    a.beginTime = CACurrentMediaTime() + 1.2;           // 先让人读开头
+    a.beginTime = 0;                                    // 立刻开始，别再等
     a.fillMode = kCAFillModeBoth;
     a.removedOnCompletion = NO;
     a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
