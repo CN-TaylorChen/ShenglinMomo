@@ -116,7 +116,7 @@ NSString *SLApplyRealShotEdits(NSString *json) {
     return out;
 }
 
-#pragma mark - 消息下方那行「时间 + 距离」
+#pragma mark - 消息上方那行「时间 + 距离」
 
 // 这几个辅助函数定义在文件后半段，这里先用着，得先声明（C99 隐式声明是 error）
 static UIViewController *SLCRTopVC(void);
@@ -124,12 +124,20 @@ static UIViewController *SLCRChatVC(UIViewController *start);
 static UITableView *SLCRChatTable(UIView *root);
 static void SLCRDumpStyleOnce(UIView *root, NSString *tag);
 static NSAttributedString *SLCRReplaceAttributed(NSAttributedString *src, NSString *repl);
+static BOOL SLCRIsLabelLike(id v);
+static NSString *SLCRShownTextOf(id v);
+static BOOL SLCRSetShownText(id v, NSString *target);
+static NSString *SLCRTextAnywhere(UIView *v, NSInteger depth);
+static id SLCRMessageOf(id obj);
+static NSString *SLCRMsgidOf(id message);
 
-// 聊天界面上每条消息底下那行 `1分钟前 35.95km` / `12:48 35.95km`。
-// 它不在任何 JSON 里 —— App 拿消息发送时间和当前位置的经纬度现场算出来的，
-// 所以改 body 一点用没有（v0.5.08 就是改错了地方）。
-// 唯一稳的入口是「最终显示的那串字」：整串按形态拆成「时间描述 + 数字km」，
-// 时间整段换掉、距离整段换掉，输出「新时间 新距离」。
+// 聊天界面上每条消息上方那行 `12:48 35.95km` / `5分钟前 96.96km`。
+// 它不在任何 JSON 里 —— App 拿这条消息的发送时间和当时的经纬度现场算出来的，
+// 所以「改 body」对它一点用没有（v0.5.08 就改错了地方），
+// 而且**每条消息都不一样**：给它做成一个全局设置只会把所有气泡刷成同一串（v0.5.10 的错）。
+//
+// v0.5.11 起改成一条一条改：长按气泡 → 「改时间」→ 只作用于这一条。
+// 映射按 msgid 存，渲染时按「这条消息上方最近的那格」贴回去。
 static NSRegularExpression *SLMetaPairRE(void) {
     static NSRegularExpression *re = nil;
     static dispatch_once_t once;
@@ -141,77 +149,214 @@ static NSRegularExpression *SLMetaPairRE(void) {
     return re;
 }
 
+static NSString *const kSLMetaStoreKey = @"SLChatMetaStore";
+static NSMutableDictionary *gSLMetaStore = nil;
 static NSInteger gSLMetaLog = 0;
 
-NSString *SLApplyMetaEdits(NSString *s) {
-    if (![s isKindOfClass:[NSString class]]) return s;
-    if (s.length < 4 || s.length > 40) return s;                 // 长文本是正文，不碰
-    if ([s rangeOfString:@"\n"].location != NSNotFound) return s;
-    if ([s rangeOfString:@"km" options:NSCaseInsensitiveSearch].location == NSNotFound) return s;
-    NSString *tt = SLRealShotTime();
-    NSString *dd = SLRealShotDistance();
-    if (!tt.length && !dd.length) return s;
-
-    NSString *distTpl = nil;
-    if (dd.length) {
-        distTpl = [dd.lowercaseString hasSuffix:@"km"] ? dd : [dd stringByAppendingString:@"km"];
-    }
-    NSRange all = NSMakeRange(0, s.length);
-
-    NSTextCheckingResult *m = [SLMetaPairRE() firstMatchInString:s options:0 range:all];
-    if (m && m.numberOfRanges >= 3) {
-        NSString *head = [s substringWithRange:[m rangeAtIndex:1]];
-        NSString *dist = [s substringWithRange:[m rangeAtIndex:2]];
-        NSString *out = [NSString stringWithFormat:@"%@ %@",
-                         tt.length ? tt : head, distTpl ?: dist];
-        if (![out isEqualToString:s]) {
-            if (gSLMetaLog < 10) {
-                gSLMetaLog += 1;
-                SLLog(@"META 时间距离改写 [%@] → [%@]", s, out);
+static NSMutableDictionary *SLMetaStore(void) {
+    if (gSLMetaStore) return gSLMetaStore;
+    gSLMetaStore = [NSMutableDictionary dictionary];
+    NSDictionary *saved = [[NSUserDefaults standardUserDefaults] dictionaryForKey:kSLMetaStoreKey];
+    if ([saved isKindOfClass:[NSDictionary class]]) {
+        for (id k in saved) {
+            id v = saved[k];
+            if ([k isKindOfClass:[NSString class]] && [v isKindOfClass:[NSDictionary class]]) {
+                gSLMetaStore[k] = [v mutableCopy];
             }
-            return out;
         }
-        return s;
     }
-    if (distTpl) {
-        NSString *out = [s stringByReplacingOccurrencesOfString:@"[0-9]+(?:\\.[0-9]+)?\\s*[kK][mM]"
-                                                     withString:distTpl
-                                                        options:NSRegularExpressionSearch
-                                                          range:all];
-        if (![out isEqualToString:s]) return out;
+    // v0.5.10 的两个全局值是个错误设计（所有消息会被刷成同一串 3581248454km），
+    // 升级上来的一次性清掉，免得残留在老用户机上继续污染。
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    if ([d objectForKey:kSLRealShotTimeKey] || [d objectForKey:kSLRealShotDistKey]) {
+        [d removeObjectForKey:kSLRealShotTimeKey];
+        [d removeObjectForKey:kSLRealShotDistKey];
+        SLLog(@"META 清掉旧的全局时间/距离设置（改为按条修改）");
     }
+    return gSLMetaStore;
+}
+
+static void SLMetaSync(void) {
+    [[NSUserDefaults standardUserDefaults] setObject:gSLMetaStore ?: @{} forKey:kSLMetaStoreKey];
+}
+
+NSString *SLMetaTimeFor(NSString *msgid) {
+    if (![msgid isKindOfClass:[NSString class]] || !msgid.length) return nil;
+    NSDictionary *e = SLMetaStore()[msgid];
+    if (![e isKindOfClass:[NSDictionary class]]) return nil;
+    return SLTrimmed(e[@"t"]);
+}
+
+NSString *SLMetaDistFor(NSString *msgid) {
+    if (![msgid isKindOfClass:[NSString class]] || !msgid.length) return nil;
+    NSDictionary *e = SLMetaStore()[msgid];
+    if (![e isKindOfClass:[NSDictionary class]]) return nil;
+    return SLTrimmed(e[@"d"]);
+}
+
+BOOL SLMetaHasOverride(NSString *msgid) {
+    return SLMetaTimeFor(msgid).length > 0 || SLMetaDistFor(msgid).length > 0;
+}
+
+void SLMetaSave(NSString *msgid, NSString *time, NSString *dist) {
+    if (![msgid isKindOfClass:[NSString class]] || !msgid.length) return;
+    NSString *t = SLTrimmed(time);
+    NSString *d = SLTrimmed(dist);
+    id raw = SLMetaStore()[msgid];
+    NSMutableDictionary *e = [raw isKindOfClass:[NSMutableDictionary class]]
+                             ? (NSMutableDictionary *)raw : [NSMutableDictionary dictionary];
+    // e[@"o"] 是「这行原本写的是什么」—— 清空两个输入框时靠它复原，别删
+    [e removeObjectForKey:@"t"];
+    [e removeObjectForKey:@"d"];
+    if (t.length) e[@"t"] = t;
+    if (d.length) e[@"d"] = d;
+    if (e.count == 0) [SLMetaStore() removeObjectForKey:msgid];
+    else SLMetaStore()[msgid] = e;
+    SLMetaSync();
+    SLLog(@"META 保存 %@ 时间=[%@] 距离=[%@]", msgid, t ?: @"-", d ?: @"-");
+    // 会话列表 / 搜索结果里的预览也读同一份，这里不管；聊天页当场刷
+    dispatch_async(dispatch_get_main_queue(), ^{ SLChatMetaApplyTable(nil); });
+}
+
+// 形态判据：短串、含 km、无换行 —— 就是那行「时间 距离」。
+static BOOL SLMetaRowLooksLike(NSString *s) {
+    if (![s isKindOfClass:[NSString class]]) return NO;
+    if (s.length < 6 || s.length > 44) return NO;
+    if ([s rangeOfString:@"\n"].location != NSNotFound) return NO;
+    return [s rangeOfString:@"km" options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+// 在一格 cell 里找「形态像时间行」的那个可写标签（UILabel / MDMixLabel 都算）
+static id SLMetaRowViewIn(UIView *v, NSInteger depth) {
+    if (!v || depth <= 0) return nil;
+    if (SLCRIsLabelLike(v) && SLMetaRowLooksLike(SLCRShownTextOf(v))) return v;
+    for (UIView *sub in v.subviews) {
+        id r = SLMetaRowViewIn(sub, depth - 1);
+        if (r) return r;
+    }
+    return nil;
+}
+
+// 这条消息的时间行贴在哪一格：往上找最近的、能认出形态的那格。
+// 陌陌的时间行通常紧贴在消息上方（ip.row-1），但连续同一时段的消息会共用几格，
+// 所以最多往上找 4 格 —— 找到谁算谁，不往下找（往下就是下一条消息的了）。
+static id SLMetaRowViewAbove(UITableView *tv, NSIndexPath *ip) {
+    if (!tv || !ip) return nil;
+    for (NSInteger k = 1; k <= 4; k++) {
+        NSInteger r = ip.row - k;
+        if (r < 0) break;
+        NSIndexPath *prev = [NSIndexPath indexPathForRow:r inSection:ip.section];
+        UITableViewCell *pc = [tv cellForRowAtIndexPath:prev];
+        if (!pc) continue;
+        id v = SLMetaRowViewIn(pc, 6);
+        if (v) return v;
+    }
+    return nil;
+}
+
+// v0.5.11：全局替换已废弃。这个符号还留着是因为 Tweak.x 的 `UILabel setText:`
+// 钩子在用 —— 现在恒等于原样返回（本来也没值可替），真正的替换在
+// SLChatMetaApplyTable() 里按 msgid 精确做。
+NSString *SLApplyMetaEdits(NSString *s) {
     return s;
 }
 
-// 把当前屏幕上所有「时间+距离」按设置刷一遍。设置改完立刻调，不必退出会话。
-void SLChatMetaSweep(UIView *root) {
-    if (!root) {
-        UIViewController *chat = SLCRChatVC(SLCRTopVC());
-        root = chat.view;
+// 把某条消息的时间行按它的映射刷一遍。返回是否真的改了。
+static BOOL SLMetaApplyOne(UITableView *tv, NSIndexPath *ip, BOOL *outFound) {
+    UITableViewCell *cell = [tv cellForRowAtIndexPath:ip];
+    if (!cell) return NO;
+    NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
+    if (!mid.length) return NO;
+    NSString *tt = SLMetaTimeFor(mid);
+    NSString *dd = SLMetaDistFor(mid);
+    NSDictionary *entry = SLMetaStore()[mid];
+    NSString *orig = [entry isKindOfClass:[NSDictionary class]] ? entry[@"o"] : nil;
+    BOOL hasOverride = (tt.length || dd.length);
+    // 既没有覆盖、也没历史原文 → 这条就跟我们无关
+    if (!hasOverride && !([orig isKindOfClass:[NSString class]] && orig.length)) return NO;
+    id rowView = SLMetaRowViewAbove(tv, ip);
+    if (!rowView) {
+        if (outFound) *outFound = NO;
+        return NO;
     }
-    if (!root) return;
-    if (!SLRealShotTime().length && !SLRealShotDistance().length) return;
-    NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
-    NSInteger budget = 4000;
-    while (queue.count && budget-- > 0) {
-        UIView *v = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-        if ([v isKindOfClass:[UILabel class]]) {
-            UILabel *l = (UILabel *)v;
-            NSString *cur = l.attributedText.length ? l.attributedText.string : l.text;
-            NSString *out = SLApplyMetaEdits(cur);
-            if (out && ![out isEqualToString:cur]) {
-                if (l.attributedText.length) {
-                    NSAttributedString *na = SLCRReplaceAttributed(l.attributedText, out);
-                    if (na) l.attributedText = na; else l.text = out;
-                } else {
-                    l.text = out;
+    if (outFound) *outFound = YES;
+    NSString *cur = SLCRShownTextOf(rowView) ?: @"";
+    // 把「这行原样是什么」记下来，清空输入框时才能复原
+    if (![orig isKindOfClass:[NSString class]] || !orig.length) {
+        NSMutableDictionary *e = [entry isKindOfClass:[NSMutableDictionary class]]
+                                 ? (NSMutableDictionary *)entry : [NSMutableDictionary dictionary];
+        if (cur.length) {
+            e[@"o"] = cur;
+            SLMetaStore()[mid] = e;
+            SLMetaSync();
+            orig = cur;
+        }
+    } else if (hasOverride && [orig isKindOfClass:[NSString class]] && ![orig isEqualToString:cur]) {
+        // 已经换过一次了：cur 是被我们改过的串，原文仍在 orig 里
+    }
+    if (!hasOverride) {
+        // 用户把两个框都清空了 → 复原成原文
+        if (![orig isKindOfClass:[NSString class]] || ![orig isEqualToString:cur]) {
+            if ([orig isKindOfClass:[NSString class]] && orig.length) {
+                if (SLCRSetShownText(rowView, orig)) {
+                    SLLog(@"META 复原 %@ → [%@]", mid, orig);
+                    return YES;
                 }
-                [l setNeedsDisplay];
             }
         }
-        for (UIView *sub in v.subviews) [queue addObject:sub];
+        return NO;
     }
+    NSString *head = cur, *dist = nil;
+    NSTextCheckingResult *m = [SLMetaPairRE() firstMatchInString:cur options:0
+                                                           range:NSMakeRange(0, cur.length)];
+    if (m && m.numberOfRanges >= 3) {
+        head = [cur substringWithRange:[m rangeAtIndex:1]];
+        dist = [cur substringWithRange:[m rangeAtIndex:2]];
+    } else if ([orig isKindOfClass:[NSString class]] && orig.length) {
+        // 现在是原文（形态对得上也拆一次，拆不出就用原文的头）
+        NSTextCheckingResult *m2 = [SLMetaPairRE() firstMatchInString:orig options:0
+                                                                range:NSMakeRange(0, orig.length)];
+        if (m2 && m2.numberOfRanges >= 3) {
+            head = [orig substringWithRange:[m2 rangeAtIndex:1]];
+            dist = [orig substringWithRange:[m2 rangeAtIndex:2]];
+        }
+    }
+    NSString *nd = nil;
+    if (dd.length) nd = [dd.lowercaseString hasSuffix:@"km"] ? dd : [dd stringByAppendingString:@"km"];
+    else nd = dist ?: @"km";
+    NSString *out = [NSString stringWithFormat:@"%@ %@", tt.length ? tt : head, nd];
+    if ([out isEqualToString:cur]) return NO;
+    if (!SLCRSetShownText(rowView, out)) return NO;
+    if (gSLMetaLog < 12) {
+        gSLMetaLog += 1;
+        SLLog(@"META 时间距离 [%@] → [%@] (msgid=%@)", cur, out, mid);
+    }
+    return YES;
+}
+
+void SLChatMetaApplyTable(UITableView *tv) {
+    if (!SLMetaStore().count) return;
+    if (!tv) {
+        UIViewController *chat = SLCRChatVC(SLCRTopVC());
+        tv = chat ? SLCRChatTable(chat.view) : nil;
+    }
+    if (!tv) return;
+    NSInteger applied = 0, misses = 0;
+    for (NSIndexPath *ip in tv.indexPathsForVisibleRows) {
+        BOOL found = YES;
+        if (SLMetaApplyOne(tv, ip, &found)) applied += 1;
+        else if (!found) misses += 1;
+    }
+    if ((applied || misses) && gSLMetaLog < 20) {
+        gSLMetaLog += 1;
+        SLLog(@"META 应用 已刷 %ld 行 / 未找到时间行 %ld", (long)applied, (long)misses);
+    }
+}
+
+// 老的整页扫描入口：留着给「改完立刻刷」调用，内部已经改成按 msgid 走。
+void SLChatMetaSweep(UIView *root) {
+    (void)root;
+    SLChatMetaApplyTable(nil);
 }
 
 #pragma mark - 防撤回
@@ -253,11 +398,21 @@ NSString *SLRecallGuardBody(NSString *mid, NSString *body) {
             gSLRecallLog += 1;
             SLLog(@"RECALL-GUARD 顶回原文 %@ → [%@]", mid, SLCRPreview(old, 14));
         }
-        // 字顶回来了，但 cell 还是「撤回态」的灰胶囊 —— 等它画完再整形一次
-        dispatch_async(dispatch_get_main_queue(), ^{
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
-                           dispatch_get_main_queue(), ^{ SLRecallStyleSweep(); });
-        });
+        // 顶回 body 只是「模型里对了」。屏幕还是那行撤回提示 ——
+        // 得走一遍「跟改文字同样的重绑」才画得出来（v0.5.10 就是只顶不刷）。
+        // 同一条消息一次撤回会走七八遍 getter，这里按 mid 节流，只排一次重绘。
+        static NSString *pendingMid = nil;
+        static NSUInteger pendingGen = 0;
+        if (![pendingMid isEqualToString:mid]) {
+            pendingMid = [mid copy];
+            pendingGen += 1;
+            NSUInteger gen = pendingGen;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (gen != pendingGen) return;      // 期间又撤回了别的，交给后来那次
+                @try { SLRecallRepaintVisible(); } @catch (NSException *e) { }
+            });
+        }
         return old;
     }
     return body;
@@ -859,6 +1014,125 @@ void SLChatRewriteReloadChat(void) {
 
 @end
 
+#pragma mark - 时间 / 距离面板（一条一条改，不是全局设置）
+
+// 每条消息发出的时刻、离你多远都不一样，所以这必须跟着消息走：
+// 长按哪条就改哪条，存的是 msgid → 「时间 + 距离」。
+// 界面上只有两个输入框，和「修改文字」是同一套毛玻璃样式，不额外造一套视觉。
+@interface SLChatMetaEditorController : UIViewController <UITextFieldDelegate>
+@property (nonatomic, copy) NSString *msgid;
+@property (nonatomic, copy) NSString *initialTime;
+@property (nonatomic, copy) NSString *initialDist;
+- (void)sl_cancel;
+- (void)sl_save;
+- (UITextField *)sl_addRow:(NSString *)title placeholder:(NSString *)ph value:(NSString *)v;
+- (NSString *)sl_trim:(NSString *)s;
+@end
+
+@implementation SLChatMetaEditorController {
+    UIView *_card;
+    NSMutableArray<UILabel *> *_labels;
+    NSMutableArray<UITextField *> *_fields;
+    UIView *_divider;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    SLInstallGlassBackdrop(self.view);
+    self.navigationItem.titleView = SLPillTitleView(@"时间 / 距离");
+    self.navigationItem.leftBarButtonItem = SLPillBarItem(@"取消", self, @selector(sl_cancel));
+    self.navigationItem.rightBarButtonItem = SLPillBarItem(@"保存", self, @selector(sl_save));
+
+    _card = [[UIView alloc] initWithFrame:CGRectZero];
+    _card.backgroundColor = SLGlassCellColor();
+    _card.layer.cornerRadius = 14.0;
+    _card.layer.cornerCurve = kCACornerCurveContinuous;
+    _card.layer.borderWidth = 0.8;
+    _card.layer.borderColor = SLGlassHairlineColor().CGColor;
+    _card.layer.masksToBounds = YES;
+    [self.view addSubview:_card];
+
+    _divider = [[UIView alloc] initWithFrame:CGRectZero];
+    _divider.backgroundColor = SLGlassHairlineColor();
+    [_card addSubview:_divider];
+
+    _labels = [NSMutableArray array];
+    _fields = [NSMutableArray array];
+    [self sl_addRow:@"时间" placeholder:@"12:01 / 5分钟前 / 10-28 15:19" value:self.initialTime];
+    [self sl_addRow:@"距离" placeholder:@"96.96（km 会自动补）" value:self.initialDist];
+}
+
+- (UITextField *)sl_addRow:(NSString *)title placeholder:(NSString *)ph value:(NSString *)v {
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectZero];
+    lab.text = title;
+    lab.font = [UIFont systemFontOfSize:14];
+    lab.textColor = [UIColor secondaryLabelColor];
+    [_card addSubview:lab];
+    [_labels addObject:lab];
+
+    UITextField *tf = [[UITextField alloc] initWithFrame:CGRectZero];
+    tf.font = [UIFont systemFontOfSize:15];
+    tf.textColor = [UIColor labelColor];
+    tf.attributedPlaceholder =
+        [[NSAttributedString alloc] initWithString:ph
+                                        attributes:@{NSForegroundColorAttributeName:
+                                                         [UIColor tertiaryLabelColor]}];
+    tf.text = v.length ? v : @"";
+    tf.clearButtonMode = UITextFieldViewModeWhileEditing;
+    tf.autocorrectionType = UITextAutocorrectionTypeNo;
+    tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    tf.spellCheckingType = UITextSpellCheckingTypeNo;
+    tf.returnKeyType = UIReturnKeyDone;
+    tf.delegate = self;
+    [_card addSubview:tf];
+    [_fields addObject:tf];
+    return tf;
+}
+
+- (BOOL)textFieldShouldReturn:(UITextField *)tf {
+    [tf resignFirstResponder];
+    return YES;
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGRect b = self.view.bounds;
+    UIEdgeInsets safe = self.view.safeAreaInsets;
+    CGFloat top = safe.top + 14.0;
+    CGFloat w = b.size.width - 32.0;
+    CGFloat rowH = 48.0;
+    _card.frame = CGRectMake(16, top, w, rowH * 2.0);
+    _divider.frame = CGRectMake(14, rowH, w - 28.0, 0.5);
+    for (NSInteger i = 0; i < 2; i++) {
+        CGFloat y = rowH * (CGFloat)i;
+        _labels[i].frame = CGRectMake(14, y, 44, rowH);
+        _fields[i].frame = CGRectMake(62, y, w - 62 - 14, rowH);
+    }
+}
+
+- (void)sl_cancel {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (NSString *)sl_trim:(NSString *)s {
+    if (![s isKindOfClass:[NSString class]]) return @"";
+    return [s stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (void)sl_save {
+    NSString *t = [self sl_trim:_fields.count > 0 ? _fields[0].text : @""];
+    NSString *d = [self sl_trim:_fields.count > 1 ? _fields[1].text : @""];
+    NSString *mid = [self.msgid copy];
+    SLMetaSave(mid, t, d);
+    [self dismissViewControllerAnimated:YES completion:^{
+        SLChatMetaApplyTable(nil);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{ SLChatMetaApplyTable(nil); });
+    }];
+}
+
+@end
+
 #pragma mark - 反查被长按的那条消息
 
 static NSString *SLCRMsgidOf(id message);
@@ -1388,6 +1662,118 @@ void SLChatRewriteBeginFromMenu(UIView *menuView) {
     SLCROpenEditor(message, menuMid, cellCls, hint);
 }
 
+#pragma mark - 改时间 / 距离（长按菜单第二项）
+
+// 和「修改」共用同一套锚点反查：菜单只记得 targetView / targetViewFrame /
+// targetViewCenter / msgid，气泡本身不在菜单的视图链上。
+// 这里只多一步 —— 顺手把这行「时间 + 距离」拆开，当作面板的预填值。
+void SLChatMetaBeginFromMenu(UIView *menuView) {
+    if (!menuView) return;
+    if (!SLChatRewriteEnabled()) {
+        SLLog(@"META 未开启，忽略菜单入口");
+        return;
+    }
+
+    UIView *tv = nil;
+    CGRect tvFrame = CGRectNull;
+    CGPoint tvCenter = CGPointZero;
+    BOOL hasCenter = NO;
+    NSString *menuMid = nil;
+    @try {
+        id v = [menuView valueForKey:@"targetView"];
+        if ([v isKindOfClass:[UIView class]]) tv = (UIView *)v;
+    } @catch (NSException *e) { }
+    @try {
+        id v = [menuView valueForKey:@"targetViewFrame"];
+        if ([v isKindOfClass:[NSValue class]]) tvFrame = [(NSValue *)v CGRectValue];
+    } @catch (NSException *e) { }
+    @try {
+        id v = [menuView valueForKey:@"targetViewCenter"];
+        if ([v isKindOfClass:[NSValue class]]) {
+            tvCenter = [(NSValue *)v CGPointValue];
+            hasCenter = (tvCenter.x != 0.0 || tvCenter.y != 0.0);
+        }
+    } @catch (NSException *e) { }
+    @try { menuMid = SLCRKeyOf([menuView valueForKey:@"msgid"]); } @catch (NSException *e) { }
+
+    if (!hasCenter && tv) {
+        if (!CGRectIsNull(tvFrame) && !CGRectIsEmpty(tvFrame)) {
+            CGPoint c = CGPointMake(CGRectGetMidX(tvFrame), CGRectGetMidY(tvFrame));
+            if (CGRectContainsRect(tv.bounds, tvFrame)) c = [tv convertPoint:c toView:nil];
+            tvCenter = c;
+        } else {
+            tvCenter = [tv convertPoint:CGPointMake(CGRectGetMidX(tv.bounds),
+                                                   CGRectGetMidY(tv.bounds)) toView:nil];
+        }
+        hasCenter = YES;
+    }
+
+    UITableViewCell *cell = nil;
+    NSString *hint = nil;
+    id message = nil;
+    if (hasCenter) message = SLCRHitAtScreenPoint(tvCenter, &cell, &hint);
+    if (!message) message = SLCRMessageNearPoint(tv, menuMid, tvCenter, hasCenter);
+    NSString *mid = SLCRMsgidOf(message) ?: menuMid;
+    if (!mid.length) {
+        SLLog(@"META 反查失败：拿不到 msgid，不打开面板");
+        [AWECAUtils showToast:@"没认出这条消息，再试一次" duration:2.0];
+        return;
+    }
+
+    // 预填：优先用「这条消息已经改过的值」，否则用屏幕上那行的真实值
+    UITableView *table = SLCRChatTableAnywhere();
+    NSIndexPath *ip = (cell && table) ? [table indexPathForCell:cell] : nil;
+    NSString *cur = @"";
+    if (ip) {
+        id rv = SLMetaRowViewAbove(table, ip);
+        cur = SLCRShownTextOf(rv) ?: @"";
+    }
+    NSString *head = cur, *dist = nil;
+    if (cur.length) {
+        NSTextCheckingResult *m = [SLMetaPairRE() firstMatchInString:cur options:0
+                                                               range:NSMakeRange(0, cur.length)];
+        if (m && m.numberOfRanges >= 3) {
+            head = [cur substringWithRange:[m rangeAtIndex:1]];
+            dist = [cur substringWithRange:[m rangeAtIndex:2]];
+        }
+    }
+    // 记下原文：面板里清空两个框 = 复原成这串
+    if (cur.length) {
+        NSMutableDictionary *e = SLMetaStore()[mid];
+        if (![e isKindOfClass:[NSMutableDictionary class]]) e = [NSMutableDictionary dictionary];
+        NSString *o = e[@"o"];
+        if (![o isKindOfClass:[NSString class]] || !o.length) {
+            e[@"o"] = cur;
+            SLMetaStore()[mid] = e;
+            SLMetaSync();
+        }
+    }
+
+    NSString *t0 = SLMetaTimeFor(mid) ?: (head.length ? head : @"");
+    NSString *d0 = SLMetaDistFor(mid) ?: (dist.length ? dist : @"");
+
+    SLLog(@"META 打开面板 msgid=%@ 当前行=[%@] 预填 时间=[%@] 距离=[%@] cell=%@ ip=%@",
+          mid, SLCRPreview(cur, 20), t0, d0,
+          cell ? NSStringFromClass([cell class]) : @"nil",
+          ip ? [NSString stringWithFormat:@"%ld-%ld", (long)ip.section, (long)ip.row] : @"nil");
+
+    SLChatMetaEditorController *editor = [[SLChatMetaEditorController alloc] init];
+    editor.msgid = mid;
+    editor.initialTime = t0;
+    editor.initialDist = d0;
+
+    UIViewController *host = SLCRTopVC();
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:editor];
+    nav.modalPresentationStyle = UIModalPresentationPageSheet;
+    if (@available(iOS 15.0, *)) {
+        if (nav.sheetPresentationController) {
+            nav.sheetPresentationController.detents = @[[UISheetPresentationControllerDetent mediumDetent]];
+            nav.sheetPresentationController.prefersGrabberVisible = YES;
+        }
+    }
+    [host presentViewController:nav animated:YES completion:nil];
+}
+
 #pragma mark - 渲染层补丁
 //
 // 为什么光靠 body getter 不够：气泡的字是在会话数据建好那一刻、由 mixItem 的
@@ -1740,6 +2126,54 @@ static void SLCRDropLayoutCache(id dataItem, UITableViewCell *cell) {
 
 // 没标签时让 cell 自己按新模型重绑一次（下面 SLCRTryRebindCell 干的活）。
 
+// 重绑会让 cell 走一遍「高亮 / 选中」的配色流程，于是对方那条白气泡会被刷成蓝色
+// （v0.5.10 用户实测：改完字气泡变蓝、还停在右侧样式）。
+// 修法不猜实现：重绑前把整棵子树的底色按「遍历顺序 + 类名」记一份，重绑后逐一还原。
+// 顺序稳定（同一棵树同样的子视图层级），所以按下标对得上。
+static NSArray *SLCRSnapshotBackgrounds(UIView *root) {
+    NSMutableArray *out = [NSMutableArray array];
+    if (!root) return out;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 500;
+    while (q.count && budget-- > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        UIColor *bg = v.backgroundColor;
+        if (bg && CGColorGetAlpha(bg.CGColor) > 0.01) {
+            [out addObject:@[NSStringFromClass([v class]), bg]];
+        } else {
+            [out addObject:@[NSStringFromClass([v class])]];
+        }
+        for (UIView *s in v.subviews) [q addObject:s];
+    }
+    return out;
+}
+
+static NSInteger SLCRRestoreBackgrounds(UIView *root, NSArray *snap) {
+    if (!root || !snap.count) return 0;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 500, i = 0, fixed = 0;
+    while (q.count && budget-- > 0 && i < (NSInteger)snap.count) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        id item = snap[i];
+        i += 1;
+        if ([item isKindOfClass:[NSArray class]]) {
+            NSArray *pair = (NSArray *)item;
+            if (pair.count >= 2 && [pair[0] isKindOfClass:[NSString class]]) {
+                UIColor *want = pair[1];
+                if ([NSStringFromClass([v class]) isEqualToString:pair[0]] &&
+                    v.backgroundColor != want) {
+                    v.backgroundColor = want;
+                    fixed += 1;
+                }
+            }
+        }
+        for (UIView *s in v.subviews) [q addObject:s];
+    }
+    return fixed;
+}
+
 // 标签换不动时的正解：让 cell 按「改过的模型」重绑一次。
 //
 // v0.5.07 日志打出来 cell 的方法表：`bindWithItem:` / `rebindCustomViewModel` /
@@ -1748,6 +2182,7 @@ static void SLCRDropLayoutCache(id dataItem, UITableViewCell *cell) {
 // 现在按优先级调真正的绑数据入口；签名必须是「一个对象参数、返回 void」。
 static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
     if (!cell) return @"-";
+    NSArray *bgSnap = SLCRSnapshotBackgrounds(cell);
     // 先扔旧排版产物：不扔的话 bindWithItem: 会原样复用，改多少遍屏幕都不动
     SLCRDropLayoutCache(dataItem, cell);
     NSMutableArray *tried = [NSMutableArray array];
@@ -1786,6 +2221,13 @@ static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
             [inv invoke];
             [tried addObject:name];
         } @catch (NSException *e) { }
+    }
+    // 重绑把长按时的「高亮 / 选中」状态留在了 cell 上，先按正常态收回来
+    @try { [cell setHighlighted:NO animated:NO]; } @catch (NSException *e) { }
+    @try { [cell setSelected:NO animated:NO]; } @catch (NSException *e) { }
+    NSInteger fixed = SLCRRestoreBackgrounds(cell, bgSnap);
+    if (fixed > 0) {
+        SLLog(@"REWRITE 重绑后底色还原 %ld 处（白↔蓝）", (long)fixed);
     }
     return tried.count ? [tried componentsJoinedByString:@","] : @"-";
 }
@@ -1986,8 +2428,8 @@ void SLChatRewriteDumpVisibleText(void) {
     UIViewController *chat = SLCRChatVC(SLCRTopVC());
     UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
     if (!tv) return;
-    // 刷新之后顺带把「时间 + 距离」那行也按设置刷一遍
-    SLChatMetaSweep(tv);
+    // 刷新之后顺带把「时间 + 距离」那行也按每条消息的映射刷一遍
+    SLChatMetaApplyTable(tv);
     SLRecallStyleSweep();
     NSInteger n = 0;
     for (UITableViewCell *cell in tv.visibleCells) {
@@ -2009,6 +2451,118 @@ void SLChatRewriteHandleLeave(UIViewController *vc) {
     if (!SLChatRewriteResetOnLeave()) return;
     NSString *session = SLCRSessionOfVC(SLCRChatVC(vc) ?: vc);
     if (session.length) SLChatRewriteClearSession(session);
+}
+
+#pragma mark - 撤回重绘：原文画回气泡 + 「已拦截」标
+
+// 陌陌撤回的最终表现是「整条气泡被替换成一行居中的小灰字」，
+// 只在 body getter 上顶回原文是改不到显示的（v0.5.10 打了 7 次 RECALL-GUARD，
+// 屏幕照旧）。这里做两件事：
+//   1. 跟「修改文字」走完全一样的重绑路 —— body 已经是原文，重绑画出来就是原文；
+//   2. 在画回来的气泡上贴一枚「已拦截」小标，让人一眼看出这条是被我们拦下的。
+// 系统原来那行「对方撤回了一条消息」不动，就留在上面。
+static NSInteger gSLRecallRepaintLog = 0;
+static const NSInteger kSLRecallBadgeTag = 0x5EC1;
+
+static UIView *SLCRBubbleViewIn(UIView *root) {
+    UIView *best = nil;
+    CGFloat bestArea = 0;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 400;
+    while (q.count && budget-- > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        if (v != root && ![v isKindOfClass:[UILabel class]]) {
+            CGFloat area = v.frame.size.width * v.frame.size.height;
+            if (v.layer.cornerRadius >= 6.0 && area > bestArea && area > 600.0) {
+                best = v;
+                bestArea = area;
+            }
+        }
+        for (UIView *s in v.subviews) [q addObject:s];
+    }
+    return best;
+}
+
+static void SLRecallAttachBadge(UITableViewCell *cell) {
+    if (!cell) return;
+    if ([cell.contentView viewWithTag:kSLRecallBadgeTag]) return;
+    UIView *bubble = SLCRBubbleViewIn(cell.contentView);
+    if (!bubble) return;
+    UILabel *badge = [[UILabel alloc] initWithFrame:CGRectZero];
+    badge.tag = kSLRecallBadgeTag;
+    badge.text = @"已拦截";
+    badge.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    badge.textColor = [UIColor whiteColor];
+    badge.textAlignment = NSTextAlignmentCenter;
+    badge.backgroundColor = [UIColor colorWithRed:1.0 green:0.29 blue:0.25 alpha:1.0];
+    badge.layer.cornerRadius = 7.0;
+    badge.layer.masksToBounds = YES;
+    CGSize ts = [badge.text sizeWithAttributes:@{NSFontAttributeName: badge.font}];
+    CGRect bf = [bubble convertRect:bubble.bounds toView:cell.contentView];
+    CGFloat h = 14.0;
+    CGFloat w = ts.width + 12.0;
+    CGFloat x = bf.origin.x + 3.0;
+    CGFloat y = bf.origin.y - h - 2.0;
+    if (y < 1.0) y = bf.origin.y + 4.0;          // 顶到 cell 上沿就贴在内侧
+    CGFloat maxX = cell.contentView.bounds.size.width - w - 2.0;
+    if (x > maxX) x = maxX;
+    if (x < 2.0) x = 2.0;
+    badge.frame = CGRectMake(x, y, w, h);
+    [cell.contentView addSubview:badge];
+}
+
+void SLRecallRepaintVisible(void) {
+    if (!SLRecallGuardEnabled()) return;
+    if (!gSLRecallCache.count) return;
+    UIViewController *chat = SLCRChatVC(SLCRTopVC());
+    UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
+    if (!tv) {
+        SLLog(@"RECALL-REPAINT 没找到聊天列表");
+        return;
+    }
+    // 复用会串：先把上一次贴的标全摘掉，再按当前可见内容重新贴
+    for (UITableViewCell *c in tv.visibleCells) {
+        UIView *old = [c.contentView viewWithTag:kSLRecallBadgeTag];
+        if (old) [old removeFromSuperview];
+    }
+    NSInteger n = 0;
+    for (UITableViewCell *cell in tv.visibleCells) {
+        id m = SLCRMessageOf(cell);
+        NSString *mid = SLCRMsgidOf(m);
+        if (!mid.length) continue;
+        NSString *orig = gSLRecallCache[mid];
+        if (![orig isKindOfClass:[NSString class]] || !orig.length) continue;
+        NSString *shown = SLCRTextAnywhere(cell, 6);
+        NSString *trimmed = [shown stringByTrimmingCharactersInSet:
+                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        BOOL same = (trimmed.length && [trimmed isEqualToString:orig]);
+        if (!same) {
+            id dataItem = nil;
+            @try { dataItem = [cell valueForKey:@"dataItem"]; } @catch (NSException *e) { }
+            gSLCRPatchBudget = 500;
+            NSString *how = SLCRTryRebindCell(cell, dataItem);
+            [cell setNeedsLayout];
+            [cell layoutIfNeeded];
+            // 重绑之后还留着「撤回」这种提示字的话，按形态直接换成原文
+            if (trimmed.length && ![trimmed isEqualToString:orig]) {
+                SLCRPatchLabelsInView(cell, trimmed, orig, nil, NULL);
+                SLCRPatchLayers(cell.layer, trimmed, orig, nil, 5);
+            }
+            if (gSLRecallRepaintLog < 8) {
+                gSLRecallRepaintLog += 1;
+                SLLog(@"RECALL-REPAINT %@ 重绑=%@ 前=[%@] 后=[%@]", mid, how,
+                      SLCRPreview(trimmed, 12),
+                      SLCRPreview(SLCRTextAnywhere(cell, 4), 12));
+            }
+            n += 1;
+        }
+        SLRecallAttachBadge(cell);
+    }
+    if (n && gSLRecallRepaintLog < 12) {
+        gSLRecallRepaintLog += 1;
+        SLLog(@"RECALL-REPAINT 共重绘 %ld 条", (long)n);
+    }
 }
 
 #pragma mark - 已修改列表

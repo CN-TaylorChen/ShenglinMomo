@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.10"
+#define SLVersion @"0.5.11"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -3026,24 +3026,47 @@ static void SLChatLabelSetAttributedHook(id self, SEL _cmd, id as) {
 // 往 items 数组尾部塞一项就能和原生项长得一模一样（字体/圆角/箭头都复用它的 cell）。
 static const void *kSLCRMenuIndexKey = &kSLCRMenuIndexKey;
 
+// 造一项原生样式的菜单项。图标照抄现有项的类型（UIImage 还是包内图片名），
+// 抄不到就留空 —— 宁可没图标，也不能让菜单闪退。
+static id SLCRMakeMenuItem(Class itemCls, NSString *title, id sampleImage,
+                           NSString *sysSymbol, NSString *fallbackAsset) {
+    id item = [[itemCls alloc] init];
+    [item setValue:title forKey:@"title"];
+    if ([sampleImage isKindOfClass:[UIImage class]]) {
+        UIImage *icon = sysSymbol.length ? [UIImage systemImageNamed:sysSymbol] : nil;
+        if (icon) [item setValue:icon forKey:@"image"];
+    } else if ([sampleImage isKindOfClass:[NSString class]]) {
+        NSString *name = sampleImage;
+        if ([name hasPrefix:@"im_longPress_"]) name = fallbackAsset ?: name;
+        [item setValue:name forKey:@"image"];
+    }
+    return item;
+}
+
 static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
     if (!SLChatRewriteEnabled()) return items;
     if (![items isKindOfClass:[NSArray class]]) return items;
     Class itemCls = NSClassFromString(@"MDChatUIMenuItem");
     if (!itemCls) return items;
     @try {
-        // 陌陌会连着走两个入口（一次构造、一次过滤），同一批项不能塞两遍
+        // 陌陌会连着走两个入口（一次构造、一次过滤），同一批项不能塞两遍。
+        // 以最后一项「改时间」为准 —— 它在就说明这一批已经补过了。
         for (id it in items) {
             NSString *t = nil;
             @try { t = [it valueForKey:@"title"]; } @catch (NSException *e) { }
-            if ([t isEqualToString:@"修改"]) return items;
+            if ([t isEqualToString:@"改时间"]) return items;
         }
-        id item = [[itemCls alloc] init];
-        [item setValue:@"修改" forKey:@"title"];
+        for (id it in items) {
+            NSString *t = nil;
+            @try { t = [it valueForKey:@"title"]; } @catch (NSException *e) { }
+            if ([t isEqualToString:@"修改"]) {
+                // 旧版本留下的半截状态：清掉标记，下面按「还没有改时间」补上
+                objc_setAssociatedObject(menuView, kSLCRMenuIndexKey, nil,
+                                         OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                break;
+            }
+        }
 
-        // 图标：菜单是自绘 cell，image 为空就只剩一行字，跟原生项放一起很突兀。
-        // 原生项用的什么类型（UIImage 还是包里的图片名）我们照抄，否则 cell 那边会崩；
-        // 实在借不到就留空 —— 宁可没图标，也不能让菜单闪退。
         id sampleImage = nil;
         NSInteger sampleType = -1;
         for (id it in items) {
@@ -3056,22 +3079,11 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
             @try { im = [it valueForKey:@"image"]; } @catch (NSException *e) { }
             if (im) { sampleImage = im; break; }
         }
-        if ([sampleImage isKindOfClass:[UIImage class]]) {
-            UIImage *icon = [UIImage systemImageNamed:@"square.and.pencil"];
-            if (!icon) icon = [UIImage systemImageNamed:@"pencil"];
-            if (icon) [item setValue:icon forKey:@"image"];
-        } else if ([sampleImage isKindOfClass:[NSString class]]) {
-            // 陌陌自己的「编辑」图标叫 im_longPress_eit（就是它自己的拼写，别纠正成 edit）
-            NSString *name = sampleImage;
-            if ([name hasPrefix:@"im_longPress_"]) name = @"im_longPress_eit";
-            [item setValue:name forKey:@"image"];
-        }
         SLLog(@"REWRITE 菜单项图标：原生 image=%@(%@) itemType=%ld",
               sampleImage ? NSStringFromClass([sampleImage class]) : @"nil",
               [sampleImage isKindOfClass:[NSString class]] ? sampleImage : @"-",
               (long)sampleType);
 
-        // 把原生菜单的项名列出来：有了这张表才能决定「修改」插在哪一项后面最自然
         NSMutableArray *titles = [NSMutableArray array];
         for (id it in items) {
             NSString *t = nil;
@@ -3079,9 +3091,10 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
             [titles addObject:t ?: @"?"];
         }
         SLLog(@"REWRITE 菜单原有项：[%@]", [titles componentsJoinedByString:@" | "]);
+
         NSMutableArray *out = [NSMutableArray arrayWithArray:items];
-        // 插在「拷贝」后面：这几项里只有它是就地改文本，放一起最顺手；
-        // 没有「拷贝」（语音/卡片菜单）就放末尾。
+        // 「修改」插在「拷贝」后面（都是就地改文本，放一起最顺手）；
+        // 「改时间」紧跟其后 —— 这两项都是「只动这一条消息」。
         NSUInteger at = out.count;
         for (NSUInteger i = 0; i < out.count; i++) {
             NSString *t = nil;
@@ -3089,11 +3102,39 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
             if ([t isEqualToString:@"拷贝"]) { at = i + 1; break; }
         }
         if (at > out.count) at = out.count;
-        [out insertObject:item atIndex:at];
+
+        // 已有「修改」时不再重复插，只补「改时间」（升级上来的会话状态）
+        BOOL hasEdit = NO;
+        for (id it in out) {
+            NSString *t = nil;
+            @try { t = [it valueForKey:@"title"]; } @catch (NSException *e) { }
+            if ([t isEqualToString:@"修改"]) { hasEdit = YES; break; }
+        }
+        NSUInteger editIdx = NSNotFound;
+        if (!hasEdit) {
+            id editItem = SLCRMakeMenuItem(itemCls, @"修改", sampleImage,
+                                           @"square.and.pencil", @"im_longPress_eit");
+            [out insertObject:editItem atIndex:at];
+            editIdx = at;
+            at += 1;
+        } else {
+            for (NSUInteger i = 0; i < out.count; i++) {
+                NSString *t = nil;
+                @try { t = [out[i] valueForKey:@"title"]; } @catch (NSException *e) { }
+                if ([t isEqualToString:@"修改"]) { editIdx = i; break; }
+            }
+            if (at <= editIdx) at = editIdx + 1;
+        }
+        id timeItem = SLCRMakeMenuItem(itemCls, @"改时间", sampleImage, @"clock", @"im_longPress_eit");
+        if (at > out.count) at = out.count;
+        [out insertObject:timeItem atIndex:at];
+
         objc_setAssociatedObject(menuView, kSLCRMenuIndexKey,
-                                 @(at), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        SLLog(@"REWRITE 菜单注入：原 %lu 项 → 现 %lu 项（修改在第 %lu 位）",
-              (unsigned long)items.count, (unsigned long)out.count, (unsigned long)at);
+                                 @[@(editIdx == NSNotFound ? -1 : (NSInteger)editIdx), @((NSInteger)at)],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        SLLog(@"REWRITE 菜单注入：原 %lu 项 → 现 %lu 项（修改@%ld 改时间@%ld）",
+              (unsigned long)items.count, (unsigned long)out.count,
+              editIdx == NSNotFound ? -1L : (long)editIdx, (long)at);
         return out;
     } @catch (NSException *e) {
         SLLog(@"REWRITE 菜单注入失败：%@", e.reason);
@@ -3117,19 +3158,28 @@ static id SLChatMenuShowHook3(id self, SEL _cmd, id by, NSArray *items, CGFloat 
 
 static void SLChatMenuDidSelectHook(id self, SEL _cmd, id cv, id ip) {
     IMP orig = SLGetOrigIMP(self, _cmd);
-    NSNumber *mine = objc_getAssociatedObject(self, kSLCRMenuIndexKey);
+    NSArray *mine = objc_getAssociatedObject(self, kSLCRMenuIndexKey);
     NSInteger tapped = -1;
     @try { tapped = [[ip valueForKey:@"item"] integerValue]; } @catch (NSException *e) { }
-    if (mine && tapped == (NSInteger)mine.integerValue) {
-        objc_setAssociatedObject(self, kSLCRMenuIndexKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        SEL hideSel = NSSelectorFromString(@"hideMenu");
-        if ([(id)self respondsToSelector:hideSel]) {
-            IMP hideImp = [(id)self methodForSelector:hideSel];
-            if (hideImp) ((void (*)(id, SEL))hideImp)(self, hideSel);
+    if ([mine isKindOfClass:[NSArray class]] && mine.count == 2 && tapped >= 0) {
+        NSInteger editIdx = [mine[0] integerValue];
+        NSInteger timeIdx = [mine[1] integerValue];
+        if (tapped == editIdx || tapped == timeIdx) {
+            objc_setAssociatedObject(self, kSLCRMenuIndexKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            SEL hideSel = NSSelectorFromString(@"hideMenu");
+            if ([(id)self respondsToSelector:hideSel]) {
+                IMP hideImp = [(id)self methodForSelector:hideSel];
+                if (hideImp) ((void (*)(id, SEL))hideImp)(self, hideSel);
+            }
+            if (tapped == timeIdx) {
+                SLLog(@"REWRITE 点中「改时间」 menu=%@", NSStringFromClass([self class]));
+                SLChatMetaBeginFromMenu((UIView *)self);
+            } else {
+                SLLog(@"REWRITE 点中「修改」 menu=%@", NSStringFromClass([self class]));
+                SLChatRewriteBeginFromMenu((UIView *)self);
+            }
+            return;
         }
-        SLLog(@"REWRITE 点中「修改」 menu=%@", NSStringFromClass([self class]));
-        SLChatRewriteBeginFromMenu((UIView *)self);
-        return;
     }
     if (orig) ((void (*)(id, SEL, id, id))orig)(self, _cmd, cv, ip);
 }
@@ -3138,6 +3188,22 @@ static void SLChatViewWillDisappearHook(id self, SEL _cmd, BOOL animated) {
     IMP orig = SLGetOrigIMP(self, _cmd);
     @try { SLChatRewriteHandleLeave((UIViewController *)self); } @catch (NSException *e) { }
     if (orig) ((void (*)(id, SEL, BOOL))orig)(self, _cmd, animated);
+}
+
+// 时间行是 cell 复用时现场拼的（不是模型里的字段），所以每显示一格就按 msgid 刷一次：
+// 「改过的那几条」贴自己存的值，没改过的原样。没改过任何一条时这里是一次字典查、直接返回。
+static void SLChatWillDisplayCellHook(id self, SEL _cmd, UITableView *tv,
+                                      UITableViewCell *cell, NSIndexPath *ip) {
+    IMP orig = SLGetOrigIMP(self, _cmd);
+    if (orig) {
+        ((void (*)(id, SEL, UITableView *, UITableViewCell *, NSIndexPath *))orig)(
+            self, _cmd, tv, cell, ip);
+    }
+    static NSTimeInterval lastT = 0;
+    NSTimeInterval nowT = [[NSDate date] timeIntervalSince1970];
+    if (lastT > 0 && nowT - lastT < 0.08) return;      // 一次滚动会连发十几下，节流
+    lastT = nowT;
+    @try { SLChatMetaApplyTable(tv); } @catch (NSException *e) { }
 }
 
 static BOOL SLCRTypeHas(Class cls, SEL sel, const char *needle) {
@@ -3188,6 +3254,19 @@ static void SLInstallChatRewriteHooks(void) {
         SEL leave = NSSelectorFromString(@"viewWillDisappear:");
         if (SLRegisterMethod(chatVC, leave, (IMP)SLChatViewWillDisappearHook)) {
             [hits addObject:@"chatLeave"];
+        }
+    }
+
+    // 单聊页的 willDisplayCell：时间行（"12:48 35.95km"）在 cell 复用时才算出来，
+    // 没有它就只能在「保存那一刻」刷一次，滚一下又变回原样。
+    NSArray *cellVCs = @[@"MDChatSingleViewController", @"MDChatUniverseViewController",
+                         @"MDChatGroupViewController"];
+    for (NSString *n in cellVCs) {
+        Class c = SLClassByName([n UTF8String]);
+        if (!c) continue;
+        if (SLRegisterMethod(c, NSSelectorFromString(@"tableView:willDisplayCell:forRowAtIndexPath:"),
+                             (IMP)SLChatWillDisplayCellHook)) {
+            [hits addObject:[n stringByAppendingString:@".willDisplay"]];
         }
     }
 

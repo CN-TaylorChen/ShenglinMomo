@@ -78,9 +78,35 @@ void SLChatRewritePatchLiveText(NSArray *_Nullable aliases, NSString *_Nullable 
 /// 刷新后回读可见气泡上真正显示的字（诊断用）
 void SLChatRewriteDumpVisibleText(void);
 
+#pragma mark - 每条消息自己的「时间 / 距离」
+//
+// 聊天界面上每条消息上方那行 `12:48 35.95km` 是 App 拿这条消息的发送时间 +
+// 当时的经纬度现场算的，每条都不一样 —— 所以只能一条一条改，绝不能放一个全局开关。
+// 映射按 msgid 存，渲染时按「这条消息上方最近的那行」贴回去。
+//
+// v0.5.11 起取代设置页里那两个全局输入框（已删除，旧值一并清掉）。
+
+/// 这条消息自定义的时间描述（"12:01" / "10-28 15:19" / "5分钟前"），没有则 nil
+NSString *_Nullable SLMetaTimeFor(NSString *_Nullable msgid);
+/// 这条消息自定义的距离（"96.96km" 或 "96.96"），没有则 nil
+NSString *_Nullable SLMetaDistFor(NSString *_Nullable msgid);
+
+/// 记一条（都为空的等于删除该条）
+void SLMetaSave(NSString *_Nullable msgid, NSString *_Nullable time, NSString *_Nullable dist);
+
+/// 该消息是否已经有自定义时间 / 距离
+BOOL SLMetaHasOverride(NSString *_Nullable msgid);
+
+/// 把整张表可见行的时间行按映射刷一遍（保存后 / cell 显示时调）
+void SLChatMetaApplyTable(UITableView *_Nullable tv);
+
+/// 从气泡菜单进入「改时间 / 距离」面板（跟「修改」同一套锚点反查）
+void SLChatMetaBeginFromMenu(UIView *_Nullable menuView);
+
 #pragma mark - 实拍卡片（knock_type28）
 
 /// 卡片上的时间 / 公里数。空字符串 = 不改。
+/// v0.5.11 起这两个全局值不再由界面写入，只保留给卡片 JSON 做兼容读。
 NSString *_Nullable SLRealShotTime(void);
 NSString *_Nullable SLRealShotDistance(void);
 void SLRealShotSetTime(NSString *_Nullable v);
@@ -109,6 +135,10 @@ NSString *_Nullable SLRecallGuardBody(NSString *_Nullable mid, NSString *_Nullab
 
 /// 撤回态整形：灰底刷白、字号提回正文，再贴一句「对方撤回了一条消息」。
 void SLRecallStyleSweep(void);
+
+/// 撤回后「把原文重新画出来」：跟改文字走同一条重绑路，刷新问题一并解决。
+/// 画完在气泡上贴一枚「已拦截」小标 —— 系统那行「对方撤回了一条消息」保留不动。
+void SLRecallRepaintVisible(void);
 
 @interface SLChatRewriteListController : UITableViewController
 @end
