@@ -68,7 +68,7 @@ static UIImage *SLThinSliderThumb(void) {
 #define kSLFillShortKey @"SLFillShort"
 // v0.4.85：合成失败 / 取消时把口令写回输入框（跟 Tweak.x 里的 kSLKeepTextKey 同一个键）
 #define kSLKeepTextKey @"SLKeepTextOnFail"
-#define SLVersion @"0.5.24"
+#define SLVersion @"0.5.25"
 
 // v0.4.52：单元格玻璃色搬到 SLGlass（全站二级页共用同一个数），这里不再重复定义。
 
@@ -214,26 +214,25 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tv {
     (void)tv;
-    // v0.5.11：删掉「消息时间 / 距离」那一组 —— 每条消息的发送时刻/距离都不一样，
-    // 一个全局输入框只会把所有气泡刷成同一串。改成长按气泡 → 菜单「改时间」。
-    return 7;
+    // v0.5.25：按功能归堆，7 段并成 5 段 —— 语音一条线，杂项收进底部两段。
+    // v0.5.11 删掉的那组「消息时间 / 距离」不再恢复：每条消息时刻不同，
+    // 全局输入框只会把所有气泡刷成同一串，改走长按时间行。
+    return 5;
 }
 
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)section {
     (void)tv;
-    if (section == 0) return 4;   // 开关 + 引擎 + 语音包 + 悬浮球图标
-    if (section == 1) return 4;   // 音色库 + 情绪 + 语速 + 音量
-    if (section == 2) return 4;   // 合成口令 + 短录音补全 + 合成后先试听 + 失败时放回输入框
-    if (section == 3) return 1;   // API 凭证
-    if (section == 4) return 3;   // 虚拟定位：开关 + 选点 + 清除
-    if (section == 5) return 5;   // 聊天记录：开关 + 离开重置 + 防撤回 + 隐藏拦截标记 + 已修改 N 条
-    if (section == 6) return 1;   // 运行日志（诊断永远放最底下）
+    if (section == 0) return 7;   // 语音：开关 + 引擎 + 语音包 + 音色库 + 情绪 + 语速 + 音量
+    if (section == 1) return 4;   // 发送：合成口令 + 短录音补全 + 合成后先试听 + 失败时放回输入框
+    if (section == 2) return 5;   // 聊天记录：防撤回 + 隐藏拦截标记 + 修改开关 + 离开重置 + 已修改 N 条
+    if (section == 3) return 3;   // 虚拟定位：开关 + 选点 + 清除
+    if (section == 4) return 3;   // 其它：悬浮球图标 + API 凭证 + 运行日志
     return 1;
 }
 
 - (NSString *)sl_headerForSection:(NSInteger)section {
-    if (section < 0 || section > 6) return @"";
-    return @[@"基本设置", @"音色与情绪", @"发送方式", @"凭证", @"虚拟定位", @"聊天记录", @"诊断"][section];
+    if (section < 0 || section > 4) return @"";
+    return @[@"语音", @"发送", @"聊天记录", @"虚拟定位", @"其它"][section];
 }
 
 - (UIView *)tableView:(UITableView *)tv viewForHeaderInSection:(NSInteger)section {
@@ -299,7 +298,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 
     AWECATTSManager *mgr = [AWECATTSManager shared];
 
-    if (ip.section == 0) {
+    if (ip.section == 0) {                     // 语音
         if (ip.row == 0) {
             cell.textLabel.text = @"文字转语音";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
@@ -317,10 +316,8 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.accessoryView = seg;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else if (ip.row == 2) {
-            // v0.4.52：恢复成正常的「语音包」入口（上一版把它删了，用户要求加回来）。
-            // 右侧只显示状态词，「直发」那个开关搬到「发送方式」里。
+            // 右侧只显示状态词，「直发」那个开关在「发送」段里。
             cell.textLabel.text = @"语音包";
-            // v0.4.52：显示「这一发装的是谁」。没装填就是原声（默认状态）。
             if (![SLVoicePack isOneShotPending]) {
                 cell.detailTextLabel.text = @"原声";
             } else {
@@ -328,29 +325,20 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
                 cell.detailTextLabel.text = active ? (active[@"name"] ?: @"已装填") : @"原声";
             }
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        } else {
-            cell.textLabel.text = @"悬浮球图标";
-            cell.detailTextLabel.text = SLFloatIconSummary();
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        }
-        return cell;
-    }
-
-    if (ip.section == 1) {
-        if (ip.row == 0) {
+        } else if (ip.row == 3) {
             NSString *voice = mgr.fishEngine
                 ? (mgr.fishVoiceName.length ? mgr.fishVoiceName : @"未选择，点这里添加")
                 : (mgr.voiceName.length ? mgr.voiceName : @"未选择");
             cell.textLabel.text = @"音色库";
             cell.detailTextLabel.text = voice;
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        } else if (ip.row == 1) {
+        } else if (ip.row == 4) {
             cell.textLabel.text = @"情绪";
             cell.detailTextLabel.text = mgr.fishEmotionSel.count
                 ? [NSString stringWithFormat:@"已选 %lu 个", (unsigned long)mgr.fishEmotionSel.count]
                 : @"未启用";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        } else if (ip.row == 2) {
+        } else if (ip.row == 5) {
             cell.textLabel.text = @"语速";
             cell.accessoryView = [self sl_ratioAccessory:YES];
         } else {
@@ -360,14 +348,13 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return cell;
     }
 
-    if (ip.section == 2) {
+    if (ip.section == 1) {                     // 发送
         if (ip.row == 0) {
             cell.textLabel.text = @"合成口令";
             cell.detailTextLabel.text = [self sl_command];
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         } else if (ip.row == 1) {
-            // v0.4.52：语音包口令与「直发」开关都删了 ——
-            // 现在点一条包就装好一发，发完自动回原声，不需要任何开关或口令。
+            // 点一条包就装好一发，发完自动回原声，不需要口令。
             cell.textLabel.text = @"短录音补全";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
@@ -383,8 +370,7 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
             cell.accessoryView = sw;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
         } else {
-            // v0.4.85：合成失败 / 取消时把口令写回输入框（默认开）。
-            // 关掉就只复制到剪贴板 —— 有人嫌它会抢输入框、把刚打的字顶掉。
+            // 合成失败 / 取消时把口令写回输入框（默认开）；关掉就只复制到剪贴板。
             cell.textLabel.text = @"失败时放回输入框";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
             NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
@@ -396,16 +382,55 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return cell;
     }
 
-    if (ip.section == 3) {
-        cell.textLabel.text = @"API 凭证";
-        cell.detailTextLabel.text = mgr.fishEngine
-            ? (mgr.fishAPIKey.length ? @"Fish Audio 已配置" : @"未配置 Fish Audio")
-            : (mgr.appID.length ? @"火山已配置" : @"未配置火山");
+    if (ip.section == 2) {                     // 聊天记录：防撤回排第一（用得最多）
+        if (ip.row == 0) {
+            cell.textLabel.text = @"防撤回";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLRecallGuardEnabled();
+            [sw addTarget:self action:@selector(sl_recallGuardChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
+        if (ip.row == 1) {
+            cell.textLabel.text = @"隐藏拦截标记";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLRecallHidden();
+            [sw addTarget:self action:@selector(sl_recallHideChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
+        if (ip.row == 2) {
+            cell.textLabel.text = @"修改聊天记录";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLChatRewriteEnabled();
+            [sw addTarget:self action:@selector(sl_chatRewriteChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
+        if (ip.row == 3) {
+            cell.textLabel.text = @"离开会话时重置";
+            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
+            sw.on = SLChatRewriteResetOnLeave();
+            [sw addTarget:self action:@selector(sl_chatRewriteResetChanged:)
+                forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            return cell;
+        }
+        cell.textLabel.text = @"已修改的消息";
+        NSInteger rwN = SLChatRewriteCount();
+        cell.detailTextLabel.text = rwN > 0 ? [NSString stringWithFormat:@"%ld 条", (long)rwN] : @"暂无";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
 
-    if (ip.section == 4) {
+    if (ip.section == 3) {                     // 虚拟定位
         if (ip.row == 0) {
             cell.textLabel.text = @"虚拟定位";
             UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
@@ -430,56 +455,22 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
         return cell;
     }
 
-    if (ip.section == 6) {
-        cell.textLabel.text = @"运行日志";
-        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-        return cell;
-    }
-
-    if (ip.section == 5) {
+    if (ip.section == 4) {                     // 其它
         if (ip.row == 0) {
-            cell.textLabel.text = @"修改聊天记录";
-            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-            sw.on = SLChatRewriteEnabled();
-            [sw addTarget:self action:@selector(sl_chatRewriteChanged:)
-                forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.textLabel.text = @"悬浮球图标";
+            cell.detailTextLabel.text = SLFloatIconSummary();
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             return cell;
         }
         if (ip.row == 1) {
-            cell.textLabel.text = @"离开会话时重置";
-            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-            sw.on = SLChatRewriteResetOnLeave();
-            [sw addTarget:self action:@selector(sl_chatRewriteResetChanged:)
-                forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.textLabel.text = @"API 凭证";
+            cell.detailTextLabel.text = mgr.fishEngine
+                ? (mgr.fishAPIKey.length ? @"Fish Audio 已配置" : @"未配置 Fish Audio")
+                : (mgr.appID.length ? @"火山已配置" : @"未配置火山");
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             return cell;
         }
-        if (ip.row == 2) {
-            cell.textLabel.text = @"防撤回";
-            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-            sw.on = SLRecallGuardEnabled();
-            [sw addTarget:self action:@selector(sl_recallGuardChanged:)
-                forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            return cell;
-        }
-        if (ip.row == 3) {
-            cell.textLabel.text = @"隐藏拦截标记";
-            UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectZero];
-            sw.on = SLRecallHidden();
-            [sw addTarget:self action:@selector(sl_recallHideChanged:)
-                forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            return cell;
-        }
-        cell.textLabel.text = @"已修改的消息";
-        NSInteger rwN = SLChatRewriteCount();
-        cell.detailTextLabel.text = rwN > 0 ? [NSString stringWithFormat:@"%ld 条", (long)rwN] : @"暂无";
+        cell.textLabel.text = @"运行日志";
         cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
@@ -490,70 +481,61 @@ static UIView *SLMakeHeader(NSString *text, CGFloat x, CGFloat width) {
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [tv deselectRowAtIndexPath:ip animated:YES];
 
-    if (ip.section == 0 && ip.row == 2) {
-        [self.navigationController pushViewController:[[SLVoicePackController alloc] init] animated:YES];
-        return;
-    }
-    if (ip.section == 0 && ip.row == 3) {
-        [self.navigationController pushViewController:[[SLFloatIconController alloc] init] animated:YES];
-        return;
-    }
-    if (ip.section == 1 && ip.row == 0) {
-        AWECATTSVoiceListController *vc = [[AWECATTSVoiceListController alloc] init];
-        vc.fishMode = [AWECATTSManager shared].fishEngine;   // 关键：跟着引擎走，否则只能看到火山音色
-        [self.navigationController pushViewController:vc animated:YES];
-        return;
-    }
-    if (ip.section == 1 && ip.row == 1) {
-        AWECATTSVoiceListController *vc = [[AWECATTSVoiceListController alloc] init];
-        vc.emotionMode = YES;
-        [self.navigationController pushViewController:vc animated:YES];
-        return;
-    }
-    if (ip.section == 1 && ip.row == 2) {
-        [self sl_editRatio:YES];
-        return;
-    }
-    if (ip.section == 1 && ip.row == 3) {
-        [self sl_editRatio:NO];
-        return;
-    }
-    if (ip.section == 2 && ip.row == 0) {
-        [self sl_editCommand];
-        return;
-    }
-    if (ip.section == 3) {
-        AWECAAPISettingsController *vc = [[AWECAAPISettingsController alloc] init];
-        [self.navigationController pushViewController:vc animated:YES];
-        return;
-    }
-    if (ip.section == 4) {
-        if (ip.row == 0) {
-            [self sl_applyVirtualLoc:![SLVirtualLocation isOn]];
+    // v0.5.25：5 段结构 —— 语音 / 发送 / 聊天记录 / 虚拟定位 / 其它
+    if (ip.section == 0) {                                  // 语音
+        if (ip.row == 2) {                                  // 语音包
+            [self.navigationController pushViewController:[[SLVoicePackController alloc] init] animated:YES];
             return;
         }
-        if (ip.row == 1) {
-            [self sl_pickLocation];
+        if (ip.row == 3) {                                  // 音色库
+            AWECATTSVoiceListController *vc = [[AWECATTSVoiceListController alloc] init];
+            vc.fishMode = [AWECATTSManager shared].fishEngine;   // 跟着引擎走，否则只能看到火山音色
+            [self.navigationController pushViewController:vc animated:YES];
             return;
         }
-        [self sl_clearLocation];
-        return;
+        if (ip.row == 4) {                                  // 情绪
+            AWECATTSVoiceListController *vc = [[AWECATTSVoiceListController alloc] init];
+            vc.emotionMode = YES;
+            [self.navigationController pushViewController:vc animated:YES];
+            return;
+        }
+        if (ip.row == 5) { [self sl_editRatio:YES]; return; }    // 语速
+        if (ip.row == 6) { [self sl_editRatio:NO];  return; }    // 音量
+        return;                                                  // 0/1 是开关与分段控件
     }
-    if (ip.section == 2 && (ip.row == 1 || ip.row == 2)) return;   // 两个开关行
-    if (ip.section == 6) {
-        SLLogViewController *vc = [[SLLogViewController alloc] init];
-        [self.navigationController pushViewController:vc animated:YES];
-        return;
+
+    if (ip.section == 1) {                                  // 发送
+        if (ip.row == 0) [self sl_editCommand];             // 合成口令
+        return;                                             // 其余三行都是开关
     }
-    if (ip.section == 5) {
-        if (ip.row == 4) {
+
+    if (ip.section == 2) {                                  // 聊天记录
+        if (ip.row == 4) {                                  // 已修改的消息
             [self.navigationController pushViewController:[[SLChatRewriteListController alloc] init]
                                                  animated:YES];
         }
+        return;                                             // 前四行都是开关
+    }
+
+    if (ip.section == 3) {                                  // 虚拟定位
+        if (ip.row == 0) { [self sl_applyVirtualLoc:![SLVirtualLocation isOn]]; return; }
+        if (ip.row == 1) { [self sl_pickLocation]; return; }
+        [self sl_clearLocation];
         return;
     }
-    if (ip.section == 7) {
-        // v0.5.11：这一组已经删掉（改成按条长按修改）
+
+    if (ip.section == 4) {                                  // 其它
+        if (ip.row == 0) {                                  // 悬浮球图标
+            [self.navigationController pushViewController:[[SLFloatIconController alloc] init] animated:YES];
+            return;
+        }
+        if (ip.row == 1) {                                  // API 凭证
+            AWECAAPISettingsController *vc = [[AWECAAPISettingsController alloc] init];
+            [self.navigationController pushViewController:vc animated:YES];
+            return;
+        }
+        SLLogViewController *vc = [[SLLogViewController alloc] init];   // 运行日志
+        [self.navigationController pushViewController:vc animated:YES];
         return;
     }
 }
