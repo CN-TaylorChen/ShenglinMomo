@@ -394,8 +394,8 @@ void SLChatRewriteBeginFromBubble(UIView *view) {
     nav.modalPresentationStyle = UIModalPresentationPageSheet;
     if (@available(iOS 15.0, *)) {
         if (nav.sheetPresentationController) {
-            nav.sheetPresentationController.detents = @[UISheetPresentationControllerDetentMediumDetent,
-                                                        UISheetPresentationControllerDetentLargeDetent];
+            nav.sheetPresentationController.detents = @[[UISheetPresentationControllerDetent mediumDetent],
+                                                        [UISheetPresentationControllerDetent largeDetent]];
         }
     }
     [host presentViewController:nav animated:YES completion:nil];

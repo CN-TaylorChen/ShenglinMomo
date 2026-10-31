@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.4.98"
+#define SLVersion @"0.4.99"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
