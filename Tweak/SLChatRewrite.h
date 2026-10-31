@@ -41,6 +41,10 @@ NSString *SLChatRewriteCurrentSessionKey(void);
 /// 从气泡（或其子视图）反查消息，弹出修改面板
 void SLChatRewriteBeginFromBubble(UIView *_Nullable view);
 
+/// 从 MDChatUIMenuView 进入：靠 targetView / targetViewFrame / targetViewCenter / msgid
+/// 四路反查被长按的那条消息（气泡本身不在菜单的视图链上，不能从点击视图往上爬）
+void SLChatRewriteBeginFromMenu(UIView *_Nullable menuView);
+
 /// 聊天页离开时调用：按开关决定是否清掉本会话的改写
 void SLChatRewriteHandleLeave(UIViewController *_Nullable vc);
 

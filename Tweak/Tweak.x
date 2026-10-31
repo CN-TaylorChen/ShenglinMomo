@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.4.99"
+#define SLVersion @"0.5.00"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2905,6 +2905,13 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
     Class itemCls = NSClassFromString(@"MDChatUIMenuItem");
     if (!itemCls) return items;
     @try {
+        // 陌陌会连着走两个入口（一次构造、一次过滤），同一批项不能塞两遍
+        id last = items.lastObject;
+        if (last) {
+            NSString *t = nil;
+            @try { t = [last valueForKey:@"title"]; } @catch (NSException *e) { }
+            if ([t isEqualToString:@"修改"]) return items;
+        }
         id item = [[itemCls alloc] init];
         [item setValue:@"修改" forKey:@"title"];
         NSMutableArray *out = [NSMutableArray arrayWithArray:items];
@@ -2912,7 +2919,7 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
         objc_setAssociatedObject(menuView, kSLCRMenuIndexKey,
                                  @(out.count - 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         SLLog(@"REWRITE 菜单注入：原 %lu 项 → 现 %lu 项（修改在第 %lu 位）",
-              (unsigned long)items.count, (unsigned long)out.count, (unsigned long)out.count);
+              (unsigned long)items.count, (unsigned long)out.count, (unsigned long)(out.count - 1));
         return out;
     } @catch (NSException *e) {
         SLLog(@"REWRITE 菜单注入失败：%@", e.reason);
@@ -2941,15 +2948,13 @@ static void SLChatMenuDidSelectHook(id self, SEL _cmd, id cv, id ip) {
     @try { tapped = [[ip valueForKey:@"item"] integerValue]; } @catch (NSException *e) { }
     if (mine && tapped == (NSInteger)mine.integerValue) {
         objc_setAssociatedObject(self, kSLCRMenuIndexKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        UIView *target = nil;
-        @try { target = [self valueForKey:@"targetView"]; } @catch (NSException *e) { }
         SEL hideSel = NSSelectorFromString(@"hideMenu");
         if ([(id)self respondsToSelector:hideSel]) {
             IMP hideImp = [(id)self methodForSelector:hideSel];
             if (hideImp) ((void (*)(id, SEL))hideImp)(self, hideSel);
         }
-        SLLog(@"REWRITE 点中「修改」 target=%@", target);
-        SLChatRewriteBeginFromBubble(target);
+        SLLog(@"REWRITE 点中「修改」 menu=%@", NSStringFromClass([self class]));
+        SLChatRewriteBeginFromMenu((UIView *)self);
         return;
     }
     if (orig) ((void (*)(id, SEL, id, id))orig)(self, _cmd, cv, ip);

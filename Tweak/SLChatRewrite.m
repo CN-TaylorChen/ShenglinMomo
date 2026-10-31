@@ -328,58 +328,119 @@ void SLChatRewriteReloadChat(void) {
 
 @end
 
-void SLChatRewriteBeginFromBubble(UIView *view) {
-    if (!view) return;
-    if (!SLChatRewriteEnabled()) {
-        SLLog(@"REWRITE 未开启，忽略长按入口");
-        return;
-    }
+#pragma mark - 反查被长按的那条消息
 
-    // 从气泡往上找持有 message 的 cell
-    id message = nil;
-    UIView *cur = view;
-    NSInteger guard = 0;
-    while (cur && guard < 12) {
-        guard += 1;
-        if ([cur respondsToSelector:NSSelectorFromString(@"message")]) {
-            @try {
-                id m = [cur valueForKey:@"message"];
-                if (m) { message = m; break; }
-            } @catch (NSException *e) { }
+static NSString *SLCRMsgidOf(id message);
+
+// 在子树里收集「message 非空」的视图。@try 必须包在单个视图上：
+// 陌陌里大量 Swift 类，valueForKey 撞到不存在的 key 会抛 NSUnknownKeyException，
+// 整个 BFS 外面只包一层的话，一条不认的视图就能把整趟扫描吞掉。
+static void SLCRCollectMessageViews(UIView *v, NSInteger depth, NSInteger *budget,
+                                    NSMutableArray *out) {
+    if (!v || *budget <= 0 || depth > 24) return;
+    *budget -= 1;
+    @try {
+        // 用 NSSelectorFromString 而不是 @selector(message)：后者在没有声明的编译单元里
+        // 会触发 -Wundeclared-selector，-Werror 下直接报错。
+        if ([v respondsToSelector:NSSelectorFromString(@"message")]) {
+            id m = [v valueForKey:@"message"];
+            if (m) [out addObject:v];
         }
-        if (![cur isKindOfClass:[UIView class]]) break;
-        cur = [cur superview];
+    } @catch (NSException *e) { }
+    for (UIView *sub in v.subviews) {
+        if (*budget <= 0) break;
+        SLCRCollectMessageViews(sub, depth + 1, budget, out);
     }
-    if (!message) {
-        SLLog(@"REWRITE 找不到消息对象（气泡链上没有 message）");
+}
+
+// root 子树里离 anchor 最近、且带 message 的那个视图。
+// 菜单位置就是「气泡中心」，拿距离最近的一条，不会误伤相邻气泡。
+// wantKey 非空时只认这个 msgid —— 菜单自己记的 msgid 是权威值，宁可不改也不能改错人。
+static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint anchor, BOOL hasAnchor) {
+    if (!root) return nil;
+    NSMutableArray *hits = [NSMutableArray array];
+    NSInteger budget = 900;
+    SLCRCollectMessageViews(root, 0, &budget, hits);
+    SLLog(@"REWRITE 子树扫描 %@：带 message 的视图 %lu 个（预算余 %ld）want=%@",
+          NSStringFromClass([root class]), (unsigned long)hits.count, (long)budget, wantKey ?: @"-");
+    if (!hits.count) return nil;
+
+    // 先用 msgid 精确定位（最可靠）
+    if (wantKey.length) {
+        for (UIView *v in hits) {
+            id m = nil;
+            @try { m = [v valueForKey:@"message"]; } @catch (NSException *e) { }
+            if (!m) continue;
+            if ([SLCRMsgidOf(m) isEqualToString:wantKey]) {
+                SLLog(@"REWRITE 按 msgid 命中 %@ frame=%@", NSStringFromClass([v class]),
+                      NSStringFromCGRect([v convertRect:v.bounds toView:root]));
+                return m;
+            }
+        }
+        SLLog(@"REWRITE 子树里没有 msgid=%@ 的消息视图", wantKey);
+        return nil;
+    }
+
+    UIView *best = nil;
+    CGFloat bestD = CGFLOAT_MAX;
+    CGFloat bestArea = 0;
+    for (UIView *v in hits) {
+        CGRect r = [v convertRect:v.bounds toView:root];
+        if (CGRectIsEmpty(r)) continue;
+        if (!hasAnchor) {
+            CGFloat area = r.size.width * r.size.height;
+            if (area > bestArea) { bestArea = area; best = v; }
+            continue;
+        }
+        CGFloat dx = CGRectGetMidX(r) - anchor.x;
+        CGFloat dy = CGRectGetMidY(r) - anchor.y;
+        CGFloat d = dx * dx + dy * dy;
+        if (d < bestD) { bestD = d; best = v; }
+    }
+    if (!best) best = hits.firstObject;
+    SLLog(@"REWRITE 选中 %@ frame=%@ 离锚点 %.0f",
+          NSStringFromClass([best class]),
+          NSStringFromCGRect([best convertRect:best.bounds toView:root]),
+          (hasAnchor && bestD < CGFLOAT_MAX) ? sqrt(bestD) : -1.0);
+
+    id m = nil;
+    @try { m = [best valueForKey:@"message"]; } @catch (NSException *e) { }
+    return m;
+}
+
+static NSString *SLCRMsgidOf(id message) {
+    if (!message) return nil;
+    id mid = nil;
+    @try { mid = [message valueForKey:@"msgid"]; } @catch (NSException *e) { }
+    if (!SLCRKeyOf(mid)) { @try { mid = [message valueForKey:@"uuid"]; } @catch (NSException *e) { } }
+    return SLCRKeyOf(mid);
+}
+
+static void SLCROpenEditor(id message, NSString *fallbackKey) {
+    NSString *key = SLCRMsgidOf(message) ?: fallbackKey;
+    if (!key.length) {
+        SLLog(@"REWRITE 打不开：既没有 message 也没有 msgid");
         return;
     }
 
-    id msgid = nil;
     NSString *body = nil;
-    @try { msgid = [message valueForKey:@"msgid"]; } @catch (NSException *e) { }
     @try { body = [message valueForKey:@"body"]; } @catch (NSException *e) { }
-    if (!SLCRKeyOf(msgid)) {
-        @try { msgid = [message valueForKey:@"uuid"]; } @catch (NSException *e) { }
-    }
     if (![body isKindOfClass:[NSString class]]) body = @"";
 
-    NSString *key = SLCRKeyOf(msgid);
     NSString *orig = body;
     NSString *initial = body;
-    if (key.length) {
-        NSDictionary *entry = SLCRStore()[key];
-        if ([entry isKindOfClass:[NSDictionary class]]) {
-            NSString *o = entry[@"o"];
-            NSString *t = entry[@"t"];
-            if ([o isKindOfClass:[NSString class]] && [o length]) orig = o;
-            if ([t isKindOfClass:[NSString class]] && [t length]) initial = t;
-        }
+    NSDictionary *entry = SLCRStore()[key];
+    if ([entry isKindOfClass:[NSDictionary class]]) {
+        NSString *o = entry[@"o"];
+        NSString *t = entry[@"t"];
+        if ([o isKindOfClass:[NSString class]] && [o length]) orig = o;
+        if ([t isKindOfClass:[NSString class]] && [t length]) initial = t;
     }
 
     UIViewController *chat = SLCRChatVC(SLCRTopVC());
     NSString *session = SLCRSessionOfVC(chat);
-    SLLog(@"REWRITE 打开修改 msgid=%@ 会话=%@ 现长 %lu", key ?: @"-", session ?: @"-", (unsigned long)initial.length);
+    SLLog(@"REWRITE 打开修改 msgid=%@ 会话=%@ 现长 %lu",
+          key, session ?: @"-", (unsigned long)initial.length);
 
     SLChatRewriteEditorController *editor = [[SLChatRewriteEditorController alloc] init];
     editor.msgid = key;
@@ -399,6 +460,99 @@ void SLChatRewriteBeginFromBubble(UIView *view) {
         }
     }
     [host presentViewController:nav animated:YES completion:nil];
+}
+
+void SLChatRewriteBeginFromBubble(UIView *view) {
+    if (!view) return;
+    if (!SLChatRewriteEnabled()) {
+        SLLog(@"REWRITE 未开启，忽略长按入口");
+        return;
+    }
+
+    // 先从气泡往上爬（原生多数版本气泡自身就挂 message）
+    id message = nil;
+    UIView *cur = view;
+    NSInteger guard = 0;
+    while (cur && guard < 12) {
+        guard += 1;
+        if ([cur respondsToSelector:NSSelectorFromString(@"message")]) {
+            @try {
+                id m = [cur valueForKey:@"message"];
+                if (m) { message = m; break; }
+            } @catch (NSException *e) { }
+        }
+        if (![cur isKindOfClass:[UIView class]]) break;
+        cur = [cur superview];
+    }
+    if (!message) message = SLCRMessageNearPoint(view, nil, CGPointZero, NO);
+    if (!message) {
+        SLLog(@"REWRITE 找不到消息对象（气泡链与子树都没有 message）");
+        return;
+    }
+    SLCROpenEditor(message, nil);
+}
+
+void SLChatRewriteBeginFromMenu(UIView *menuView) {
+    if (!menuView) return;
+    if (!SLChatRewriteEnabled()) {
+        SLLog(@"REWRITE 未开启，忽略菜单入口");
+        return;
+    }
+
+    // 气泡不在菜单的视图链上（菜单是挂在根 VC 上的浮层），
+    // 只能靠菜单自己记下的锚点：targetView + targetViewFrame / targetViewCenter。
+    UIView *tv = nil;
+    CGRect tvFrame = CGRectNull;
+    CGPoint tvCenter = CGPointZero;
+    BOOL hasCenter = NO;
+    NSString *menuMid = nil;
+
+    @try {
+        id v = [menuView valueForKey:@"targetView"];
+        if ([v isKindOfClass:[UIView class]]) tv = (UIView *)v;
+    } @catch (NSException *e) { }
+    @try {
+        id v = [menuView valueForKey:@"targetViewFrame"];
+        if ([v isKindOfClass:[NSValue class]]) tvFrame = [(NSValue *)v CGRectValue];
+    } @catch (NSException *e) { }
+    @try {
+        id v = [menuView valueForKey:@"targetViewCenter"];
+        if ([v isKindOfClass:[NSValue class]]) {
+            tvCenter = [(NSValue *)v CGPointValue];
+            hasCenter = (tvCenter.x != 0.0 || tvCenter.y != 0.0);
+        }
+    } @catch (NSException *e) { }
+    @try { menuMid = SLCRKeyOf([menuView valueForKey:@"msgid"]); } @catch (NSException *e) { }
+
+    SLLog(@"REWRITE 菜单锚点 targetView=%@ frame=%@ center=%@ msgid=%@",
+          tv ? NSStringFromClass([tv class]) : @"nil",
+          CGRectIsNull(tvFrame) ? @"-" : NSStringFromCGRect(tvFrame),
+          hasCenter ? NSStringFromCGPoint(tvCenter) : @"-",
+          menuMid ?: @"-");
+
+    // center 是 targetView 坐标系；frame 可能是屏幕坐标，落不进 bounds 就转一次。
+    if (!hasCenter && !CGRectIsNull(tvFrame) && !CGRectIsEmpty(tvFrame) && tv) {
+        if (CGRectContainsRect(tv.bounds, tvFrame)) {
+            tvCenter = CGPointMake(CGRectGetMidX(tvFrame), CGRectGetMidY(tvFrame));
+        } else {
+            tvCenter = [tv convertPoint:CGPointMake(CGRectGetMidX(tvFrame),
+                                                  CGRectGetMidY(tvFrame)) fromView:nil];
+        }
+        hasCenter = YES;
+    }
+
+    id message = SLCRMessageNearPoint(tv, menuMid, tvCenter, hasCenter);
+    if (!message && menuMid.length) {
+        // 兜底：菜单自己记了 msgid（有 msgid 就能改写，正文之后由 body 钩子读）
+        SLLog(@"REWRITE 反查失败，退化为菜单 msgid=%@", menuMid);
+        SLCROpenEditor(nil, menuMid);
+        return;
+    }
+    if (!message) {
+        SLLog(@"REWRITE 找不到消息对象（菜单锚点上没有 message，msgid 也是空）");
+        return;
+    }
+    SLCROpenEditor(message, menuMid);
 }
 
 void SLChatRewriteHandleLeave(UIViewController *vc) {
