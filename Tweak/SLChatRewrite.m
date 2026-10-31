@@ -447,22 +447,68 @@ void SLChatRewriteReloadChat(void) {
 #pragma mark - 反查被长按的那条消息
 
 static NSString *SLCRMsgidOf(id message);
+static NSString *SLCRPreview(NSString *s, NSUInteger max);
 
-// 在子树里收集「message 非空」的视图。@try 必须包在单个视图上：
+// 消息对象身上一定有 body 这个字符串。反过来用就是最稳的识别方式 ——
+// 不认类名，只认「谁身上有 body」。
+static NSString *SLCRBodyOf(id obj) {
+    if (!obj) return nil;
+    id v = nil;
+    @try {
+        if ([obj respondsToSelector:NSSelectorFromString(@"body")]) v = [obj valueForKey:@"body"];
+    } @catch (NSException *e) { }
+    return [v isKindOfClass:[NSString class]] ? (NSString *)v : nil;
+}
+
+// 真的是「消息」而不只是「有个 body 字段的模型」：消息一定有 msgid / uuid。
+// 少了这道判断，一个文本排版模型也会被当成消息收下，改完照样不生效。
+static BOOL SLCRLooksMessage(id obj) {
+    if (!SLCRBodyOf(obj)) return NO;
+    id mid = nil;
+    @try {
+        if ([obj respondsToSelector:NSSelectorFromString(@"msgid")]) mid = [obj valueForKey:@"msgid"];
+        if (!mid && [obj respondsToSelector:NSSelectorFromString(@"uuid")]) {
+            mid = [obj valueForKey:@"uuid"];
+        }
+    } @catch (NSException *e) { }
+    return mid != nil;
+}
+
+// 一个视图（或任何对象）身上挂的消息。
+// 文本气泡 cell 是 Swift 的 MDChatBusinessBase.MDSChatType2Cell，继承自 MDChatBaseCell：
+// 基类的 message getter 是空实现、真数据在 mixItem（MDMixItem.message）里，
+// 所以只读 message 会一路拿到 nil —— v0.5.03 就是这样「整条 cell 树 0 个候选」的。
+static id SLCRMessageOf(id obj) {
+    if (!obj) return nil;
+    if (SLCRLooksMessage(obj)) return obj;
+    id v = nil;
+    @try {
+        if ([obj respondsToSelector:NSSelectorFromString(@"message")]) v = [obj valueForKey:@"message"];
+    } @catch (NSException *e) { }
+    if (v && v != obj && SLCRLooksMessage(v)) return v;
+    id mi = nil;
+    @try {
+        if ([obj respondsToSelector:NSSelectorFromString(@"mixItem")]) mi = [obj valueForKey:@"mixItem"];
+    } @catch (NSException *e) { }
+    if (mi && mi != obj) {
+        if (SLCRLooksMessage(mi)) return mi;
+        id m2 = nil;
+        @try {
+            if ([mi respondsToSelector:NSSelectorFromString(@"message")]) m2 = [mi valueForKey:@"message"];
+        } @catch (NSException *e) { }
+        if (m2 && SLCRLooksMessage(m2)) return m2;
+    }
+    return nil;
+}
+
+// 在子树里收集挂着消息的视图。@try 必须包在单个视图上：
 // 陌陌里大量 Swift 类，valueForKey 撞到不存在的 key 会抛 NSUnknownKeyException，
 // 整个 BFS 外面只包一层的话，一条不认的视图就能把整趟扫描吞掉。
 static void SLCRCollectMessageViews(UIView *v, NSInteger depth, NSInteger *budget,
                                     NSMutableArray *out) {
     if (!v || *budget <= 0 || depth > 24) return;
     *budget -= 1;
-    @try {
-        // 用 NSSelectorFromString 而不是 @selector(message)：后者在没有声明的编译单元里
-        // 会触发 -Wundeclared-selector，-Werror 下直接报错。
-        if ([v respondsToSelector:NSSelectorFromString(@"message")]) {
-            id m = [v valueForKey:@"message"];
-            if (m) [out addObject:v];
-        }
-    } @catch (NSException *e) { }
+    if (SLCRMessageOf(v)) [out addObject:v];
     for (UIView *sub in v.subviews) {
         if (*budget <= 0) break;
         SLCRCollectMessageViews(sub, depth + 1, budget, out);
@@ -499,52 +545,106 @@ static UITableView *SLCRChatTable(UIView *root) {
     return best;
 }
 
-// 按屏幕坐标取被长按的那条消息。
-// 菜单给的 targetViewCenter 就是屏幕坐标（和 targetViewFrame 中心一致），
-// 拿到坐标后直接问列表要 indexPath，比在 targetView 子树里翻可靠得多：
-// cell 里常驻的复用视图会把上一张卡片留下来当候选。
-static id SLCRMessageAtScreenPoint(CGPoint pt) {
-    if (CGPointEqualToPoint(pt, CGPointZero)) return nil;
+// cell 上最长的可见文字。文字气泡里那就是气泡本身，用来兜原文、也用来
+// 校验「按坐标取到的 cell 到底是不是用户按的那条」。
+static NSString *SLCRLongestText(UIView *v) {
+    if (!v) return nil;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:v];
+    NSString *best = nil;
+    NSInteger budget = 400;
+    while (stack.count && budget-- > 0) {
+        UIView *cur = [stack lastObject];
+        [stack removeLastObject];
+        if (cur.hidden || cur.alpha < 0.05) continue;
+        NSString *t = nil;
+        if ([cur isKindOfClass:[UILabel class]]) {
+            UILabel *l = (UILabel *)cur;
+            t = l.attributedText.length ? l.attributedText.string : l.text;
+        } else if ([cur isKindOfClass:[UITextView class]]) {
+            t = ((UITextView *)cur).text;
+        }
+        t = [t stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (t.length && (!best || t.length > best.length)) best = t;
+        for (UIView *sub in cur.subviews) [stack addObject:sub];
+    }
+    return best;
+}
+
+// 认不出消息时把 cell 的 ivar 名打出来。下一版就不用再猜它把数据放哪了。
+static NSString *SLCRIvarNames(id obj) {
+    if (!obj) return @"-";
+    NSMutableArray *out = [NSMutableArray array];
+    Class cls = object_getClass(obj);
+    NSInteger guard = 0;
+    while (cls && cls != [NSObject class] && guard < 6) {
+        unsigned int n = 0;
+        Ivar *ivars = class_copyIvarList(cls, &n);
+        for (unsigned int i = 0; i < n && out.count < 48; i++) {
+            const char *nm = ivar_getName(ivars[i]);
+            if (!nm) continue;
+            [out addObject:[NSString stringWithUTF8String:nm]];
+        }
+        if (ivars) free(ivars);
+        cls = class_getSuperclass(cls);
+        guard += 1;
+    }
+    return out.count ? [out componentsJoinedByString:@" "] : @"-";
+}
+
+// 找聊天列表：先问聊天页，认不出来再在所有窗口里挑面积最大的
+static UITableView *SLCRChatTableAnywhere(void) {
     UIViewController *chat = SLCRChatVC(SLCRTopVC());
     UITableView *table = chat ? SLCRChatTable(chat.view) : nil;
-    if (!table) {
-        // 聊天页认不出来时，退一步在所有窗口里找面积最大的列表
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                if (w.hidden) continue;
-                table = SLCRChatTable(w);
-                if (table) break;
-            }
-            if (table) break;
+    if (table) return table;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w.hidden) continue;
+            table = SLCRChatTable(w);
+            if (table) return table;
         }
     }
+    return nil;
+}
+
+// 按屏幕坐标取被长按的那条消息。
+// targetView 是整个聊天页、targetViewFrame 才是气泡矩形，所以坐标这条路是唯一可靠的定位；
+// 之前从 targetView 子树里翻候选，翻到的全是页面里常驻的旧卡片。
+static id SLCRHitAtScreenPoint(CGPoint pt, UITableViewCell **outCell, NSString **outText) {
+    if (outCell) *outCell = nil;
+    if (outText) *outText = nil;
+    if (CGPointEqualToPoint(pt, CGPointZero)) return nil;
+    UITableView *table = SLCRChatTableAnywhere();
     if (!table) {
-        SLLog(@"REWRITE 坐标反查：没找到聊天列表（chat=%@）",
-              chat ? NSStringFromClass([chat class]) : @"nil");
+        SLLog(@"REWRITE 坐标反查：没找到聊天列表");
         return nil;
     }
     CGPoint p = [table convertPoint:pt fromView:nil];
     NSIndexPath *ip = [table indexPathForRowAtPoint:p];
-    SLLog(@"REWRITE 坐标反查 pt=(%.0f,%.0f) → 表内 (%.0f,%.0f) ip=%@",
+    SLLog(@"REWRITE 坐标反查 pt=(%.0f,%.0f) → 表内 (%.0f,%.0f) ip=%@ 表=%@",
           pt.x, pt.y, p.x, p.y,
-          ip ? [NSString stringWithFormat:@"%ld-%ld", (long)ip.section, (long)ip.row] : @"nil");
+          ip ? [NSString stringWithFormat:@"%ld-%ld", (long)ip.section, (long)ip.row] : @"nil",
+          NSStringFromClass([table class]));
     if (!ip) return nil;
 
     UITableViewCell *cell = [table cellForRowAtIndexPath:ip];
-    if (!cell) return nil;
-
-    id m = nil;
-    if ([cell respondsToSelector:NSSelectorFromString(@"message")]) {
-        @try { m = [cell valueForKey:@"message"]; } @catch (NSException *e) { }
+    if (!cell) {
+        SLLog(@"REWRITE 坐标命中 ip 但 cell 为空");
+        return nil;
     }
+    if (outCell) *outCell = cell;
+    NSString *text = SLCRLongestText(cell);
+    if (outText) *outText = text;
+
+    id m = SLCRMessageOf(cell);
     if (m) {
-        SLLog(@"REWRITE 坐标命中 cell=%@ 类=%@ frame=%@", NSStringFromClass([cell class]),
-              NSStringFromClass([m class]), NSStringFromCGRect(cell.frame));
+        SLLog(@"REWRITE 坐标命中 cell=%@ 消息=%@ 文字=%@",
+              NSStringFromClass([cell class]), NSStringFromClass([m class]),
+              SLCRPreview(text, 18));
         return m;
     }
 
-    // cell 自己不挂 message 时，回到它子树里找，并且只认看得见的
+    // cell 自己不挂消息时，回到它子树里找，并且只认看得见的
     NSMutableArray *hits = [NSMutableArray array];
     NSInteger budget = 300;
     SLCRCollectMessageViews(cell, 0, &budget, hits);
@@ -557,13 +657,14 @@ static id SLCRMessageAtScreenPoint(CGPoint pt) {
         if (d < bestD) { bestD = d; best = v; }
     }
     if (!best) {
-        SLLog(@"REWRITE 坐标命中 cell 但子树里没有可见消息（候选 %lu）", (unsigned long)hits.count);
+        SLLog(@"REWRITE 坐标命中 cell=%@ 但挖不出消息（候选 %lu / 文字=%@）ivars=%@",
+              NSStringFromClass([cell class]), (unsigned long)hits.count,
+              SLCRPreview(text, 18), SLCRIvarNames(cell));
         return nil;
     }
-    @try { m = [best valueForKey:@"message"]; } @catch (NSException *e) { }
     SLLog(@"REWRITE 坐标命中 cell=%@ 子视图=%@ 偏 %.0f",
           NSStringFromClass([cell class]), NSStringFromClass([best class]), bestD);
-    return m;
+    return SLCRMessageOf(best);
 }
 
 // 兜底：在 root 子树里找带 message 的可见视图。
@@ -595,8 +696,7 @@ static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint screenAn
             if (part.length && ![wantAliases containsObject:part]) [wantAliases addObject:part];
         }
         for (UIView *v in live) {
-            id m = nil;
-            @try { m = [v valueForKey:@"message"]; } @catch (NSException *e) { }
+            id m = SLCRMessageOf(v);
             if (!m) continue;
             NSArray *ids = SLChatRewriteAliasesForMessage(m, nil);
             for (NSString *a in ids) {
@@ -637,8 +737,7 @@ static id SLCRMessageNearPoint(UIView *root, NSString *wantKey, CGPoint screenAn
           NSStringFromCGRect([best convertRect:best.bounds toView:nil]),
           (hasAnchor && bestD < CGFLOAT_MAX) ? sqrt(bestD) : -1.0);
 
-    id m = nil;
-    @try { m = [best valueForKey:@"message"]; } @catch (NSException *e) { }
+    id m = SLCRMessageOf(best);
     return m;
 }
 
@@ -659,7 +758,7 @@ static NSString *SLCRPreview(NSString *s, NSUInteger max) {
     return [[t substringToIndex:max] stringByAppendingString:@"…"];
 }
 
-static void SLCROpenEditor(id message, NSString *fallbackKey, NSString *cellCls) {
+static void SLCROpenEditor(id message, NSString *fallbackKey, NSString *cellCls, NSString *hint) {
     NSString *key = SLCRMsgidOf(message) ?: fallbackKey;
     if (!key.length) {
         SLLog(@"REWRITE 打不开：既没有 message 也没有 msgid");
@@ -673,6 +772,8 @@ static void SLCROpenEditor(id message, NSString *fallbackKey, NSString *cellCls)
     NSString *body = nil;
     @try { body = [message valueForKey:@"body"]; } @catch (NSException *e) { }
     if (![body isKindOfClass:[NSString class]]) body = @"";
+    // body 拿不到时用 cell 上最长的那行文字兜底 —— 至少编辑器里不会是空的
+    NSString *display = body.length ? body : (hint.length ? hint : @"");
 
     // 类型探针：这一段是「改了没变」时的唯一证据源。
     // cell 类名 + type/contentType 一起打，下一版就能按白名单精确放行。
@@ -686,14 +787,14 @@ static void SLCROpenEditor(id message, NSString *fallbackKey, NSString *cellCls)
           message ? NSStringFromClass([message class]) : @"nil",
           cellCls ?: @"-", typeStr, cateStr, ctStr, SLCRPreview(body, 32));
 
-    if (message && !SLChatRewriteMessageIsText(message)) {
+    if (message && body.length && !SLChatRewriteMessageIsText(message)) {
         SLLog(@"REWRITE 拒绝：非文字消息（body 长度 %lu，看上面类型行）", (unsigned long)body.length);
         [AWECAUtils showToast:@"这条不是文字消息，改不了" duration:2.0];
         return;
     }
 
-    NSString *orig = body;
-    NSString *initial = body;
+    NSString *orig = display;
+    NSString *initial = display;
     NSDictionary *entry = SLCRLookup(key);
     if ([entry isKindOfClass:[NSDictionary class]]) {
         NSString *o = entry[@"o"];
@@ -757,12 +858,8 @@ void SLChatRewriteBeginFromBubble(UIView *view) {
     NSInteger guard = 0;
     while (cur && guard < 12) {
         guard += 1;
-        if ([cur respondsToSelector:NSSelectorFromString(@"message")]) {
-            @try {
-                id m = [cur valueForKey:@"message"];
-                if (m) { message = m; break; }
-            } @catch (NSException *e) { }
-        }
+        id m = SLCRMessageOf(cur);
+        if (m) { message = m; break; }
         if (![cur isKindOfClass:[UIView class]]) break;
         cur = [cur superview];
     }
@@ -771,7 +868,7 @@ void SLChatRewriteBeginFromBubble(UIView *view) {
         SLLog(@"REWRITE 找不到消息对象（气泡链与子树都没有 message）");
         return;
     }
-    SLCROpenEditor(message, nil, SLCRHostCellClass(view));
+    SLCROpenEditor(message, nil, SLCRHostCellClass(view), nil);
 }
 
 void SLChatRewriteBeginFromMenu(UIView *menuView) {
@@ -832,15 +929,21 @@ void SLChatRewriteBeginFromMenu(UIView *menuView) {
     // 先按坐标问列表要那条消息，再退回子树扫描。
     // cell 里的复用视图会让子树扫描翻到「上一次渲染的那条」，坐标路径没有这个毛病。
     id message = nil;
-    if (hasCenter) message = SLCRMessageAtScreenPoint(tvCenter);
-    if (!message) message = SLCRMessageNearPoint(tv, menuMid, tvCenter, hasCenter);
+    UITableViewCell *cell = nil;
+    NSString *hint = nil;
+    if (hasCenter) message = SLCRHitAtScreenPoint(tvCenter, &cell, &hint);
     if (!message) {
-        // 不再「拿菜单 msgid 硬开面板」：没拿到 message 就没有原文、也判不出类型，
-        // 打开一个空编辑器改完必然不生效（v0.5.00 就是这么空改了一次）。
-        SLLog(@"REWRITE 反查失败：锚点子树里没有 message，不打开面板（msgid=%@）", menuMid ?: @"-");
+        // 坐标这条路走不通时，才退回「在 targetView 子树里按 id 找」。
+        // 注意 targetView 其实是整个聊天页，页里常驻的旧卡片也会被扫到，所以必须 id 匹配。
+        message = SLCRMessageNearPoint(tv, menuMid, tvCenter, hasCenter);
+    }
+    if (!message) {
+        SLLog(@"REWRITE 反查失败：坐标与子树都没拿到消息，不打开面板（msgid=%@ 文字=%@）",
+              menuMid ?: @"-", SLCRPreview(hint, 18));
         return;
     }
-    SLCROpenEditor(message, menuMid, SLCRHostCellClass(tv));
+    NSString *cellCls = cell ? NSStringFromClass([cell class]) : SLCRHostCellClass(tv);
+    SLCROpenEditor(message, menuMid, cellCls, hint);
 }
 
 void SLChatRewriteHandleLeave(UIViewController *vc) {

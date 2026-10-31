@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.03"
+#define SLVersion @"0.5.04"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2948,10 +2948,9 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
     if (!itemCls) return items;
     @try {
         // 陌陌会连着走两个入口（一次构造、一次过滤），同一批项不能塞两遍
-        id last = items.lastObject;
-        if (last) {
+        for (id it in items) {
             NSString *t = nil;
-            @try { t = [last valueForKey:@"title"]; } @catch (NSException *e) { }
+            @try { t = [it valueForKey:@"title"]; } @catch (NSException *e) { }
             if ([t isEqualToString:@"修改"]) return items;
         }
         id item = [[itemCls alloc] init];
@@ -2979,8 +2978,10 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
         } else if ([sampleImage isKindOfClass:[NSString class]]) {
             [item setValue:sampleImage forKey:@"image"];
         }
-        SLLog(@"REWRITE 菜单项图标：原生 image=%@ itemType=%ld",
-              sampleImage ? NSStringFromClass([sampleImage class]) : @"nil", (long)sampleType);
+        SLLog(@"REWRITE 菜单项图标：原生 image=%@(%@) itemType=%ld",
+              sampleImage ? NSStringFromClass([sampleImage class]) : @"nil",
+              [sampleImage isKindOfClass:[NSString class]] ? sampleImage : @"-",
+              (long)sampleType);
 
         // 把原生菜单的项名列出来：有了这张表才能决定「修改」插在哪一项后面最自然
         NSMutableArray *titles = [NSMutableArray array];
@@ -2991,11 +2992,20 @@ static NSArray *SLChatMenuPatchedItems(id menuView, NSArray *items) {
         }
         SLLog(@"REWRITE 菜单原有项：[%@]", [titles componentsJoinedByString:@" | "]);
         NSMutableArray *out = [NSMutableArray arrayWithArray:items];
-        [out addObject:item];
+        // 插在「拷贝」后面：这几项里只有它是就地改文本，放一起最顺手；
+        // 没有「拷贝」（语音/卡片菜单）就放末尾。
+        NSUInteger at = out.count;
+        for (NSUInteger i = 0; i < out.count; i++) {
+            NSString *t = nil;
+            @try { t = [out[i] valueForKey:@"title"]; } @catch (NSException *e) { }
+            if ([t isEqualToString:@"拷贝"]) { at = i + 1; break; }
+        }
+        if (at > out.count) at = out.count;
+        [out insertObject:item atIndex:at];
         objc_setAssociatedObject(menuView, kSLCRMenuIndexKey,
-                                 @(out.count - 1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                                 @(at), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         SLLog(@"REWRITE 菜单注入：原 %lu 项 → 现 %lu 项（修改在第 %lu 位）",
-              (unsigned long)items.count, (unsigned long)out.count, (unsigned long)(out.count - 1));
+              (unsigned long)items.count, (unsigned long)out.count, (unsigned long)at);
         return out;
     } @catch (NSException *e) {
         SLLog(@"REWRITE 菜单注入失败：%@", e.reason);
