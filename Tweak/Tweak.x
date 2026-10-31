@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.4.97"
+#define SLVersion @"0.4.98"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -2943,7 +2943,11 @@ static void SLChatMenuDidSelectHook(id self, SEL _cmd, id cv, id ip) {
         objc_setAssociatedObject(self, kSLCRMenuIndexKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         UIView *target = nil;
         @try { target = [self valueForKey:@"targetView"]; } @catch (NSException *e) { }
-        @try { [(id)self performSelector:NSSelectorFromString(@"hideMenu")]; } @catch (NSException *e) { }
+        SEL hideSel = NSSelectorFromString(@"hideMenu");
+        if ([(id)self respondsToSelector:hideSel]) {
+            IMP hideImp = [(id)self methodForSelector:hideSel];
+            if (hideImp) ((void (*)(id, SEL))hideImp)(self, hideSel);
+        }
         SLLog(@"REWRITE 点中「修改」 target=%@", target);
         SLChatRewriteBeginFromBubble(target);
         return;
@@ -2973,12 +2977,12 @@ static void SLInstallChatRewriteHooks(void) {
     NSArray *msgClasses = @[@"MDBaseMessage", @"MDTextChatMessage", @"MDSingleMessage",
                             @"MDGroupMessage", @"MDUniverseMessage", @"MDFastChatMessage"];
     for (NSString *n in msgClasses) {
-        Class c = SLClassByName(n);
+        Class c = SLClassByName([n UTF8String]);
         if (!c) continue;
         if (SLRegisterMethod(c, NSSelectorFromString(@"body"), (IMP)SLChatBodyGetHook)) [hits addObject:n];
     }
 
-    Class menu = SLClassByName(@"MDChatUIMenuView");
+    Class menu = SLClassByName("MDChatUIMenuView");
     if (menu) {
         SEL s4 = NSSelectorFromString(@"showBy:withItems:rect:bottomHeight:");
         if (SLCRTypeHas(menu, s4, "{CGRect=") &&
@@ -2995,7 +2999,7 @@ static void SLInstallChatRewriteHooks(void) {
         }
     }
 
-    Class chatVC = SLClassByName(@"MDChatBaseViewController");
+    Class chatVC = SLClassByName("MDChatBaseViewController");
     if (chatVC) {
         SEL leave = NSSelectorFromString(@"viewWillDisappear:");
         if (SLRegisterMethod(chatVC, leave, (IMP)SLChatViewWillDisappearHook)) {
