@@ -243,12 +243,11 @@ static NSString *SLMetaWhenText(NSTimeInterval ts) {
     NSCalendar *cal = [NSCalendar currentCalendar];
     NSDateFormatter *f = [[NSDateFormatter alloc] init];
     f.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
-    if ([cal isDate:d inSameDayAsDate:nowD]) {
-        // 同一天：一小时内上面的「X分钟前」更贴近陌陌；再往上按小时说
-        return [NSString stringWithFormat:@"%d小时前", (int)(diff / 3600)];
-    }
     f.dateFormat = @"HH:mm";
     NSString *hm = [f stringFromDate:d];
+    // 陌陌的规则就是这样：**一小时内才说「X分钟前」，超过一小时就只说 HH:mm**。
+    // 之前我按「X小时前」写，和陌陌对不上，用户一眼就看出来不对。
+    if ([cal isDate:d inSameDayAsDate:nowD]) return hm;
     NSDate *yday = [cal dateByAddingUnit:NSCalendarUnitDay value:-1 toDate:nowD options:0];
     if (yday && [cal isDate:d inSameDayAsDate:yday]) {
         return [NSString stringWithFormat:@"昨天 %@", hm];
@@ -451,9 +450,11 @@ static BOOL SLMetaApplyOneMid(UITableViewCell *cell, NSString *mid) {
             dist = [orig substringWithRange:[m2 rangeAtIndex:2]];
         }
     }
-    // 日期优先：填了「2026-10-31 12:00」就按当前时刻算成「X分钟前」/「昨天 12:00」，
-    // 而且每次渲染都重算 —— 这样它会随着时间自己往前走，不是死字符串。
-    NSString *headOut = dt.length ? SLMetaHeadFor(dt, head) : (tt.length ? tt : head);
+    // 日期 / 时间都按「陌陌的算法」现算：一小时内 →「X分钟前」，超过 →「HH:mm」。
+    // 所以填 18:35 而当前 18:40，屏幕上会是「5分钟前」；填 10:03 就是「10:03」。
+    // 每次渲染都重算，时间会自己往前走。
+    NSString *headOut = dt.length ? SLMetaHeadFor(dt, head)
+                      : (tt.length ? SLMetaHeadFor(tt, tt) : head);
     NSString *nd = nil;
     if (dd.length) nd = [dd.lowercaseString hasSuffix:@"km"] ? dd : [dd stringByAppendingString:@"km"];
     else nd = dist;                 // 这一行原本就没有距离，别硬塞一个 "km" 上去
@@ -473,7 +474,16 @@ void SLChatMetaApplyCellAtIndex(UITableView *tv, UITableViewCell *cell, NSIndexP
     if (!cell || !SLMetaStore().count) return;
     NSString *mid = SLCRMsgidAtIndexPath(tv, ip);
     if (!mid.length) mid = SLCRMsgidOf(SLCRMessageOf(cell));
-    SLMetaApplyOneMid(cell, mid);
+    if (!SLMetaApplyOneMid(cell, mid)) return;
+    // 陌陌在 willDisplay 之后还会自己 layout 一遍，把时间行按原始值重写回去 ——
+    // 这就是「当时改好了、一滑就变回去」。补刷一次把它拉回来。
+    NSString *keepMid = [mid copy];
+    __weak UITableViewCell *weakCell = cell;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UITableViewCell *c = weakCell;
+        if (c) SLMetaApplyOneMid(c, keepMid);
+    });
 }
 
 void SLChatMetaApplyTable(UITableView *tv) {
@@ -2184,9 +2194,36 @@ static void SLMetaAttachLPToLabel(UIView *lab, NSString *why) {
 // 从「标签文本落地」这条路上挂。这是唯一确定装得上的时机 ——
 // willDisplayCell 那对钩子在 Momo 上根本没装到（真正的 delegate 不是 VC），
 // 靠它挂手势等于永远挂不上。
+static void SLMetaInstallHotZone(UITableViewCell *cell, UIView *row);
+
+static BOOL gSLMetaInLabelHook = NO;
+
 void SLChatMetaAttachTimeLongPressForLabel(UIView *label) {
     if (!label || !SLChatRewriteEnabled()) return;
     SLMetaAttachLPToLabel(label, @"labelText");
+    // 光挂 label 不够：这颗粒标签在 UITextField 内部，文本框自带的文本交互会抢长按，
+    // 于是「有时能按、有时按不动」。顺着父链找到 cell，在它上层盖一块热区。
+    // 这条路由 setText: 钩子驱动，比 willDisplay 稳（willDisplay 那对钩子不一定装得上）。
+    UITableViewCell *cell = nil;
+    for (UIView *p = label.superview; p; p = p.superview) {
+        if ([p isKindOfClass:[UITableViewCell class]]) { cell = (UITableViewCell *)p; break; }
+    }
+    if (cell) SLMetaInstallHotZone(cell, label);
+
+    // 时间行文本刚落地的这一刻，就是「把它换成我们存的值」的最佳时机 ——
+    // 不用等 willDisplayCell（那对钩子在陌陌上时灵时不灵，这正是「滑一下/重进就变回去」的根因）。
+    if (gSLMetaInLabelHook || !cell) return;
+    if (!SLMetaStore().count) return;
+    // setText: 是高频钩子（每次排版都会走），反查消息要递归翻 ivar，很重 —— 按 cell 限流
+    static const void *kApplyKey = &kApplyKey;
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSNumber *last = objc_getAssociatedObject(cell, kApplyKey);
+    if ([last isKindOfClass:[NSNumber class]] && now - last.doubleValue < 0.05) return;
+    objc_setAssociatedObject(cell, kApplyKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    gSLMetaInLabelHook = YES;                 // SLCRSetShownText 会再触发 setText:，必须防重入
+    NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
+    if (mid.length) SLMetaApplyOneMid(cell, mid);
+    gSLMetaInLabelHook = NO;
 }
 
 // 常驻热区：透明，直接盖在「时间 + 距离」那一行上，吃触摸。
@@ -2226,6 +2263,13 @@ static void SLMetaInstallHotZone(UITableViewCell *cell, UIView *row) {
         lp.delegate = gSLMetaLPRelay;
         [hot addGestureRecognizer:lp];
         hot.userInteractionEnabled = YES;
+        static NSInteger hotLog = 0;
+        if (hotLog < 6) {
+            hotLog += 1;
+            SLLog(@"META 热区 已装 cell=%@ rect=(%.0f,%.0f %.0fx%.0f)",
+                  NSStringFromClass([cell class]), r.origin.x, r.origin.y,
+                  r.size.width, r.size.height);
+        }
     } else {
         hot.frame = r;
     }
@@ -2599,6 +2643,22 @@ static void SLCRDropLayoutCache(id dataItem, UITableViewCell *cell) {
     }
 }
 
+// 这条消息是「我发的（右侧）」还是「对方发的（左侧）」。
+// 不猜字段名，看头像位置：cell 里那颗 28~56 的方形 UIImageView，在右半就是自己发的。
+static BOOL SLCRCellIsSelfSide(UITableViewCell *cell) {
+    if (!cell) return NO;
+    CGFloat w = CGRectGetWidth(cell.contentView.bounds);
+    if (w < 40.0) return NO;
+    for (UIView *v in cell.contentView.subviews) {
+        if (![v isKindOfClass:[UIImageView class]]) continue;
+        CGSize s = v.frame.size;
+        if (s.width < 28.0 || s.width > 56.0) continue;
+        if (fabs(s.width - s.height) > 8.0) continue;
+        return (CGRectGetMidX(v.frame) > w / 2.0);
+    }
+    return NO;
+}
+
 // 没标签时让 cell 自己按新模型重绑一次（下面 SLCRTryRebindCell 干的活）。
 
 // 重绑会让 cell 走一遍「高亮 / 选中」的配色流程，于是对方那条白气泡会被刷成蓝色
@@ -2751,7 +2811,19 @@ static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
             } @catch (NSException *e) { }
         }
     }
-    NSArray *noArg = @[@"rebindCustomViewModel", @"updateLeftBubble", @"updateRightBubble"];
+    // ★ 蓝气泡真凶（v0.5.21 定论）：
+    // `updateLeftBubble` / `updateRightBubble` 不是「刷新气泡内容」，而是
+    // **把这个气泡重新画成左边 / 右边的样式**。对方的消息被调一次 updateRightBubble，
+    // 就当场变成自己发送的蓝色气泡 —— 日志里那句
+    // `重绑=bindWithItem:,rebindCustomViewModel,updateLeftBubble,updateRightBubble`
+    // 就是完整证据：我们四个全调，等于每次都把气泡往右画一遍。
+    //
+    // 现在的规矩：bindWithItem: 走通了就什么都不补；走不通才补一刀，
+    // 而且只补「跟这条消息方向一致」的那一个（对方消息永远不碰 updateRightBubble）。
+    NSArray *noArg = @[];
+    if (tried.count == 0) {
+        noArg = @[SLCRCellIsSelfSide(cell) ? @"updateRightBubble" : @"updateLeftBubble"];
+    }
     for (NSString *name in noArg) {
         SEL sel = NSSelectorFromString(name);
         if (![cell respondsToSelector:sel]) continue;
@@ -3069,24 +3141,25 @@ static void SLRecallShowSystemContent(UITableViewCell *cell) {
     [hid removeAllObjects];
 }
 
-// 原文比窗口高 → 让它自己慢慢上下滚（12pt/s，走到底停一下再回来）。
-// 用 layer 动画而不是 UIView 动画：cell 反复复用、列表动来动去都不会打断它。
+// 原文比窗口宽 → 横向平移跑马灯（一行字从右往左，走到底停一下再回来）。
+// 用户要的是「文字平移滚动」，不是上下滚 —— 上下滚在 42pt 的行里看着像两张卡片叠在一起。
 static void SLRecallStartScroll(UILabel *body, UIView *clip) {
     if (!body || !clip) return;
     [body.layer removeAnimationForKey:@"sl_scroll"];
-    CGFloat contentH = CGRectGetHeight(body.frame);
-    CGFloat winH = CGRectGetHeight(clip.bounds);
-    if (winH < 6.0 || contentH <= winH + 1.0) return;      // 装得下就不滚
-    CGFloat dist = contentH - winH;
-    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.translation.y"];
+    CGFloat textW = CGRectGetWidth(body.frame);
+    CGFloat winW = CGRectGetWidth(clip.bounds);
+    if (winW < 8.0 || textW <= winW + 1.0) return;      // 装得下就不滚
+    CGFloat dist = textW - winW;
+    CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
     a.fromValue = @(0);
     a.toValue = @(-dist);
-    a.duration = MAX(2.4, (double)dist / 12.0);
+    a.duration = MAX(3.0, (double)dist / 18.0);         // 18pt/s，比人眼跟读稍慢一点
     a.autoreverses = YES;
     a.repeatCount = 1.0e9f;
-    a.beginTime = CACurrentMediaTime() + 1.0;   // 先让人读到第一行，再开始走
+    a.beginTime = CACurrentMediaTime() + 1.2;           // 先让人读开头
     a.fillMode = kCAFillModeBoth;
     a.removedOnCompletion = NO;
+    a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
     [body.layer addAnimation:a forKey:@"sl_scroll"];
 }
 
@@ -3143,7 +3216,8 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
     UILabel *pre   = [card viewWithTag:12];
     UILabel *body  = [card viewWithTag:13];
     UIView  *clip  = [card viewWithTag:14];
-    body.text = orig;
+    // 横向跑马灯只走一行，原文里的换行压成空格，否则会被行首截断
+    body.text = [orig stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
 
     CGFloat cw = CGRectGetWidth(cell.contentView.bounds) - 32.0;
     if (cw < 120.0) cw = 120.0;
@@ -3180,15 +3254,14 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
         CGFloat bodyX = preX + preW + 4.0;
         CGFloat bodyW = cardW - bodyX - pad;
         if (bodyW < 24.0) bodyW = 24.0;
-        // 不再单行截断（用户实测「长文字只剩一行，多的看不到」）。
-        // label 按全文长度铺开，容器只露一行高 —— 超出就滚。
-        body.numberOfLines = 0;
-        body.lineBreakMode = NSLineBreakByWordWrapping;
+        // 一行、不截断：文字按真实宽度铺出去，超出的部分靠横向平移看
+        body.numberOfLines = 1;
+        body.lineBreakMode = NSLineBreakByClipping;
         body.font = [UIFont systemFontOfSize:12];
-        CGFloat naturalH = ceil([body sizeThatFits:CGSizeMake(bodyW, CGFLOAT_MAX)].height);
-        if (naturalH < rowH) naturalH = rowH;
+        CGFloat naturalW = ceil([body.text sizeWithAttributes:@{NSFontAttributeName: body.font}].width) + 2.0;
+        if (naturalW < bodyW) naturalW = bodyW;
         clip.frame = CGRectMake(bodyX, y, bodyW, rowH);
-        body.frame = CGRectMake(0, 0, bodyW, naturalH);
+        body.frame = CGRectMake(0, 0, naturalW, rowH);
         SLRecallStartScroll(body, clip);
 
         CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 2.0;
@@ -3210,18 +3283,21 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
     pre.frame = CGRectMake(pad + badgeW + 8.0, pad + 1.0, cw - badgeW - 8.0 - pad, badgeH);
 
     CGFloat bodyW = cw - pad * 2.0;
-    CGFloat naturalH = ceil([body sizeThatFits:CGSizeMake(bodyW, CGFLOAT_MAX)].height);
-    if (naturalH < 16.0) naturalH = 16.0;
+    body.numberOfLines = 1;
+    body.lineBreakMode = NSLineBreakByClipping;
+    body.font = [UIFont systemFontOfSize:13];
+    CGFloat naturalW = ceil([body.text sizeWithAttributes:@{NSFontAttributeName: body.font}].width) + 2.0;
+    if (naturalW < bodyW) naturalW = bodyW;
     CGFloat bodyY = pad + badgeH + 8.0;
-    CGFloat winH = naturalH;
-    CGFloat cardH = bodyY + naturalH + pad;
+    CGFloat winH = ceil(body.font.lineHeight + 2.0);
+    CGFloat cardH = bodyY + winH + pad;
     if (cardH > avail) {                       // 再兜一层：绝不越过本行
         cardH = avail;
         winH = cardH - bodyY - pad;
         if (winH < 14.0) winH = 14.0;
     }
     clip.frame = CGRectMake(pad, bodyY, bodyW, winH);
-    body.frame = CGRectMake(0, 0, bodyW, naturalH);
+    body.frame = CGRectMake(0, 0, naturalW, winH);
     SLRecallStartScroll(body, clip);
 
     CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 3.0;
@@ -3229,22 +3305,12 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
     card.frame = CGRectMake(16.0, cardY, cardW, cardH);
 }
 
-// 估算甲卡片高度（供行高 hook 使用）
+// 估算甲卡片高度（供行高 hook 使用）。原文现在是单行横向跑马灯，高度跟字多字少无关 ——
+// 固定就比原来的系统撤回行高一点点（44），不去动聊天列表的整体节奏。
 CGFloat SLRecallCardHeight(NSString *orig, CGFloat tableWidth) {
+    (void)tableWidth;
     if (![orig isKindOfClass:[NSString class]] || !orig.length) return 44.0;
-    CGFloat cw = tableWidth - 32.0;
-    if (cw < 120.0) cw = 120.0;
-    CGFloat pad = 12.0, badgeH = 20.0;
-    CGFloat bodyW = cw - pad * 2.0;
-    UIFont *f = [UIFont systemFontOfSize:13];
-    CGRect r = [orig boundingRectWithSize:CGSizeMake(bodyW, CGFLOAT_MAX)
-                                  options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                               attributes:@{NSFontAttributeName:f} context:nil];
-    CGFloat bodyH = (CGFloat)ceil(r.size.height);
-    // 最多给三行高度，再长就在卡片里自己滚（以前是「一行截断」或「撑满半屏」两种极端）
-    CGFloat maxH = ceil(f.lineHeight * 3.0 + 2.0);
-    if (bodyH > maxH) bodyH = maxH;
-    return pad + badgeH + 8.0 + bodyH + pad + 4.0;
+    return 44.0;
 }
 
 // 刷新可见的被拦撤回行（无重绑：直接按卡片渲染，杜绝 bindWithItem 触发的蓝色死循环）
