@@ -90,11 +90,14 @@ void SLChatRewriteDumpVisibleText(void);
 NSString *_Nullable SLMetaTimeFor(NSString *_Nullable msgid);
 /// 这条消息自定义的距离（"96.96km" 或 "96.96"），没有则 nil
 NSString *_Nullable SLMetaDistFor(NSString *_Nullable msgid);
+/// 这条消息自定义的绝对日期（"10-28 15:19"），填了就整体替换时间头，没有则 nil
+NSString *_Nullable SLMetaDateFor(NSString *_Nullable msgid);
 
-/// 记一条（都为空的等于删除该条）
-void SLMetaSave(NSString *_Nullable msgid, NSString *_Nullable time, NSString *_Nullable dist);
+/// 记一条（时间 / 距离 / 日期 都为空等于删除该条）
+void SLMetaSave(NSString *_Nullable msgid, NSString *_Nullable time,
+                NSString *_Nullable dist, NSString *_Nullable date);
 
-/// 该消息是否已经有自定义时间 / 距离
+/// 该消息是否已经有自定义时间 / 距离 / 日期
 BOOL SLMetaHasOverride(NSString *_Nullable msgid);
 
 /// 把整张表可见行的时间行按映射刷一遍（保存后 / cell 显示时调）
@@ -102,6 +105,12 @@ void SLChatMetaApplyTable(UITableView *_Nullable tv);
 
 /// 从气泡菜单进入「改时间 / 距离」面板（跟「修改」同一套锚点反查）
 void SLChatMetaBeginFromMenu(UIView *_Nullable menuView);
+
+/// 从「长按时间行本身」进入：直接拿这条 cell 的 msgid，零坐标反查误差
+void SLChatMetaBeginFromCell(UITableViewCell *_Nullable cell);
+
+/// 给这条 cell 里的时间行 UILabel 挂一个长按手势（只挂一次），零坐标反查误差
+void SLChatMetaAttachTimeLongPress(UITableViewCell *_Nullable cell);
 
 #pragma mark - 实拍卡片（knock_type28）
 
@@ -130,8 +139,22 @@ BOOL SLRecallGuardEnabled(void);
 void SLRecallGuardSetEnabled(BOOL on);
 
 /// 传本次从模型读到的 body，返回最终该显示的 body。
-/// 正文正常时按 msgid 记一份；等正文被清空 / 变成撤回提示时顶回原文。
+/// 正文正常时按 msgid 记一份；等正文被清空 / 变成撤回提示时，若这条是「被拦」的，
+/// 就顶回原文并把 mid 写进持久拦截名单（重进仍在）。
 NSString *_Nullable SLRecallGuardBody(NSString *_Nullable mid, NSString *_Nullable body);
+
+/// 这条消息是不是被我们拦截下来的撤回（持久名单）
+BOOL SLRecallIsBlocked(NSString *_Nullable mid);
+
+/// 被拦消息的原文（持久名单里存的）
+NSString *_Nullable SLRecallBlockedOriginal(NSString *_Nullable mid);
+
+/// 撤销一条拦截（同时清掉持久记录）
+void SLRecallUnblock(NSString *_Nullable mid);
+
+/// 单格渲染层拦截：被拦的那条把可见的撤回提示换成原文 + 贴「已拦截」标。
+/// 只对被拦 mid 生效，别的消息一律不动（解决「贴满屏」）。
+void SLRecallApplyCell(UITableViewCell *_Nullable cell);
 
 /// 撤回态整形：灰底刷白、字号提回正文，再贴一句「对方撤回了一条消息」。
 void SLRecallStyleSweep(void);
