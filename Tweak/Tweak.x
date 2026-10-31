@@ -36,7 +36,7 @@
 #import "SLTTSAuditionPanel.h"
 #import "SLDiagMoment.h"
 
-#define SLVersion @"0.5.15"
+#define SLVersion @"0.5.16"
 #define kSLEnabledKey @"SLEnhanceEnabled"
 #define kSLCommandKey @"SLCommand"
 
@@ -3004,22 +3004,32 @@ static void SLChatLabelSetTextHook(id self, SEL _cmd, NSString *text) {
         if (rep.length) text = rep;
     }
     ((void (*)(id, SEL, id))orig)(self, _cmd, text);
+    // 时间行「16:32 35.95km」的文本一落地就挂长按 —— 这是唯一确定装得上的时机，
+    // 不依赖 willDisplayCell（那对钩子在陌陌上装不到真正的 delegate）。
+    if (SLMetaIsTimeRowText(text)) {
+        @try { SLChatMetaAttachTimeLongPressForLabel((UIView *)self); } @catch (NSException *e) { }
+    }
 }
 
 static void SLChatLabelSetAttributedHook(id self, SEL _cmd, id as) {
     IMP orig = SLGetOrigIMP(self, _cmd);
     if (!orig) return;
+    NSString *plain = nil;
     if ([as isKindOfClass:[NSAttributedString class]]) {
-        NSString *s = [(NSAttributedString *)as string];
-        if (s.length >= 4 && s.length <= 40) {
-            NSString *_Nullable rep = SLApplyMetaEdits(s);
-            if (rep.length && ![rep isEqualToString:s]) {
+        plain = [(NSAttributedString *)as string];
+        if (plain.length >= 4 && plain.length <= 40) {
+            NSString *_Nullable rep = SLApplyMetaEdits(plain);
+            if (rep.length && ![rep isEqualToString:plain]) {
                 NSDictionary *attrs = [as attributesAtIndex:0 effectiveRange:NULL];
                 as = [[NSMutableAttributedString alloc] initWithString:rep attributes:attrs];
+                plain = rep;
             }
         }
     }
     ((void (*)(id, SEL, id))orig)(self, _cmd, as);
+    if (SLMetaIsTimeRowText(plain)) {
+        @try { SLChatMetaAttachTimeLongPressForLabel((UIView *)self); } @catch (NSException *e) { }
+    }
 }
 
 // 陌陌的气泡菜单是自绘的 MDChatUIMenuView + MDChatUIMenuItem，
@@ -3224,6 +3234,42 @@ static CGFloat SLChatHeightHook(id self, SEL _cmd, UITableView *tv, NSIndexPath 
     return h;
 }
 
+// 陌陌的聊天列表 delegate/dataSource 不是 VC 自己（日志证明 VC 上根本没有这两个方法），
+// 所以静态装不上。等页面出来后再问表格要真正的 delegate，把钩子补到它的类上。
+static void SLCRInstallTableHooks(void) {
+    static BOOL done = NO;
+    if (done) return;
+    UITableView *tv = SLChatFindTable();
+    if (!tv) return;
+    NSMutableArray *targets = [NSMutableArray array];
+    if (tv.delegate) [targets addObject:tv.delegate];
+    if (tv.dataSource && tv.dataSource != tv.delegate) [targets addObject:tv.dataSource];
+    BOOL any = NO;
+    for (id obj in targets) {
+        Class c = object_getClass(obj);
+        if (!c) continue;
+        if (SLRegisterMethod(c, NSSelectorFromString(@"tableView:willDisplayCell:forRowAtIndexPath:"),
+                             (IMP)SLChatWillDisplayCellHook)) any = YES;
+        if (SLRegisterMethod(c, NSSelectorFromString(@"tableView:heightForRowAtIndexPath:"),
+                             (IMP)SLChatHeightHook)) any = YES;
+        SLLog(@"RECALL-HOOK 表 delegate=%@ 补钩=%d", NSStringFromClass(c), (int)any);
+    }
+    if (any) {
+        done = YES;
+        @try { [tv beginUpdates]; [tv endUpdates]; } @catch (NSException *e) { }
+    }
+}
+
+// 每 1.2s 试一次，最多 25 次；装上就停
+static void SLCRScheduleTableHooks(int tryIdx) {
+    if (tryIdx > 25) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try { SLCRInstallTableHooks(); } @catch (NSException *e) { }
+        SLCRScheduleTableHooks(tryIdx + 1);
+    });
+}
+
 static void SLInstallChatRewriteHooks(void) {
     static BOOL done = NO;
     if (done) return;
@@ -3373,6 +3419,8 @@ static void SLInstallHooks(void) {
     @try { SLDiagMomentInstall(); } @catch (NSException *e) {}
     // v0.4.97：聊天记录修改（只拦 body getter + 气泡菜单注入，不碰陌陌数据库）
     @try { SLInstallChatRewriteHooks(); } @catch (NSException *e) {}
+    // 聊天列表真正的 delegate 不是 VC，等页面出来后按运行时类补钩
+    @try { SLCRScheduleTableHooks(0); } @catch (NSException *e) {}
 }
 
 NSString *SLHookStatusSummary(void) {

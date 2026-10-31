@@ -304,6 +304,11 @@ NSString *SLApplyMetaEdits(NSString *s) {
     return s;
 }
 
+// 给 Tweak.x 的标签钩子用：文本像「时间 + 距离」就返回 YES
+BOOL SLMetaIsTimeRowText(NSString *s) {
+    return SLMetaRowLooksLike(s);
+}
+
 // 把某条消息的时间行按它的映射刷一遍。返回是否真的改了。
 //
 // v0.5.12：时间行不是独立 header，它就是这条消息 cell 内部的一个 UILabel（约 100x14），
@@ -381,6 +386,7 @@ void SLChatMetaApplyTable(UITableView *tv) {
         UIViewController *chat = SLCRChatVC(SLCRTopVC());
         tv = chat ? SLCRChatTable(chat.view) : nil;
     }
+    if (!tv) tv = SLCRChatTableAnywhere();
     if (!tv) return;
     NSInteger applied = 0;
     for (UITableViewCell *cell in tv.visibleCells) {
@@ -1436,6 +1442,11 @@ static UITableView *SLCRChatTableAnywhere(void) {
     return nil;
 }
 
+// 对外暴露：给 Tweak.x 在运行时探测「真正的 table delegate」用
+UITableView *SLChatFindTable(void) {
+    return SLCRChatTableAnywhere();
+}
+
 // 按屏幕坐标取被长按的那条消息。
 // targetView 是整个聊天页、targetViewFrame 才是气泡矩形，所以坐标这条路是唯一可靠的定位；
 // 之前从 targetView 子树里翻候选，翻到的全是页面里常驻的旧卡片。
@@ -1914,6 +1925,9 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
         return;
     }
     SLChatClearVisibleHighlights();
+    // 标签钩子会给所有「像时间行」的标签挂长按，通知栏/其它列表里的「10:30」也会命中。
+    // 认不出消息就安静退出，别弹「没认出这条消息」的提示去打扰。
+    if (!SLCRMessageOf(cell)) return;
     NSString *mid = SLCRMsgidOf(SLCRMessageOf(cell));
     if (!mid.length) {
         SLLog(@"META 长按时间行：拿不到 msgid，放弃");
@@ -2019,9 +2033,9 @@ void SLChatMetaBeginFromCell(UITableViewCell *cell) {
 static SLMetaTimeLPRelay *gSLMetaLPRelay = nil;
 static const void *kSLMetaTimeLPKey = &kSLMetaTimeLPKey;
 
-void SLChatMetaAttachTimeLongPress(UITableViewCell *cell) {
-    if (!cell || !SLChatRewriteEnabled()) return;
-    id lab = SLMetaRowViewIn(cell, 6);
+// 给某一颗标签挂长按（按 label 实例去重）。不需要此刻就在 cell 里 ——
+// 手势触发时再从 g.view 沿父链找 cell，那会儿它一定已经挂上去了。
+static void SLMetaAttachLPToLabel(UIView *lab, NSString *why) {
     if (![lab isKindOfClass:[UIView class]]) return;
     if (objc_getAssociatedObject(lab, kSLMetaTimeLPKey)) return;   // 这个 label 实例已经挂过
     objc_setAssociatedObject(lab, kSLMetaTimeLPKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -2032,10 +2046,24 @@ void SLChatMetaAttachTimeLongPress(UITableViewCell *cell) {
     lp.minimumPressDuration = 0.45;
     lp.cancelsTouchesInView = NO;     // 别吞掉 Momo 自己的触摸
     lp.delegate = gSLMetaLPRelay;     // 允许与 Momo 的菜单长按同时识别（否则会被抢）
-    [(UIView *)lab addGestureRecognizer:lp];
-    ((UIView *)lab).userInteractionEnabled = YES;
-    SLLog(@"META 给时间行挂长按手势 cell=%@ label=%@", NSStringFromClass([cell class]),
-          NSStringFromClass([lab class]));
+    [lab addGestureRecognizer:lp];
+    lab.userInteractionEnabled = YES;
+    SLLog(@"META 给时间行挂长按手势 label=%@ 来源=%@", NSStringFromClass([lab class]), why);
+}
+
+// 从「标签文本落地」这条路上挂。这是唯一确定装得上的时机 ——
+// willDisplayCell 那对钩子在 Momo 上根本没装到（真正的 delegate 不是 VC），
+// 靠它挂手势等于永远挂不上。
+void SLChatMetaAttachTimeLongPressForLabel(UIView *label) {
+    if (!label || !SLChatRewriteEnabled()) return;
+    SLMetaAttachLPToLabel(label, @"labelText");
+}
+
+void SLChatMetaAttachTimeLongPress(UITableViewCell *cell) {
+    if (!cell || !SLChatRewriteEnabled()) return;
+    id lab = SLMetaRowViewIn(cell, 6);
+    if (![lab isKindOfClass:[UIView class]]) return;
+    SLMetaAttachLPToLabel((UIView *)lab, @"willDisplay");
 }
 
 #pragma mark - 渲染层补丁
@@ -2442,6 +2470,25 @@ static BOOL SLCRColorIsBlueish(UIColor *c) {
     return (b > 0.55 && b - r > 0.12 && b - g > 0.06);
 }
 
+// 气泡底色不是 UIView 的 backgroundColor，而是 MDAsyncDisplayLayer 异步画上去的位图。
+// 光改 UIView 底色它不会重画，屏幕上的蓝还在 —— 必须逐层 setNeedsDisplay 逼它重绘。
+static void SLCRForceRedraw(UIView *root) {
+    if (!root) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+    NSInteger budget = 400;
+    while (q.count && budget-- > 0) {
+        UIView *v = q.firstObject;
+        [q removeObjectAtIndex:0];
+        NSString *cls = NSStringFromClass([v.layer class]);
+        if ([cls rangeOfString:@"Async" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [cls rangeOfString:@"MD" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            [v.layer setNeedsDisplay];
+        }
+        for (UIView *s in v.subviews) [q addObject:s];
+    }
+    [root.layer setNeedsDisplay];
+}
+
 static NSInteger SLCRRestoreBackgrounds(UIView *root, NSArray *snap) {
     if (!root || !snap.count) return 0;
     NSMutableArray *q = [NSMutableArray arrayWithObject:root];
@@ -2484,6 +2531,13 @@ static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
     @try { [cell setHighlighted:NO animated:NO]; } @catch (NSException *e) { }
     @try { [cell setSelected:NO animated:NO]; } @catch (NSException *e) { }
     SLCRClearHighlightDeep(cell);
+    // 选中底色是 UITableViewCell 自己那层（selectedBackgroundView），
+    // 它会盖在 contentView 底下再"透"出来，清 backgroundColor 是清不掉的。
+    // 重绑期间直接关掉选中样式与选中背景，重绑完再还原。
+    UITableViewCellSelectionStyle selStyle = cell.selectionStyle;
+    UIView *selBG = cell.selectedBackgroundView;
+    @try { cell.selectionStyle = UITableViewCellSelectionStyleNone; } @catch (NSException *e) { }
+    @try { cell.selectedBackgroundView = nil; } @catch (NSException *e) { }
     // v0.5.14：快照必须在「清完高亮之后」拍。之前是进函数第一件事就拍，
     // 而那一刻 cell 还是长按按下态（蓝）→ 快照存的是蓝 → 还原等于把蓝还回去。
     [cell setNeedsLayout];
@@ -2533,12 +2587,28 @@ static NSString *SLCRTryRebindCell(UITableViewCell *cell, id dataItem) {
     @try { [cell setSelected:NO animated:NO]; } @catch (NSException *e) { }
     SLCRClearHighlightDeep(cell);
     NSInteger fixed = SLCRRestoreBackgrounds(cell, bgSnap);
+    // 选中样式 / 选中背景还原回去（下次长按还要正常表现）
+    @try { cell.selectionStyle = selStyle; } @catch (NSException *e) { }
+    @try { cell.selectedBackgroundView = selBG; } @catch (NSException *e) { }
     if (fixed > 0) {
         SLLog(@"REWRITE 重绑后底色还原 %ld 处（白↔蓝）", (long)fixed);
     }
-    // 异步 layer 会把「按下态」的位图缓存住，光改 UIView 底色不一定刷新；
-    // 让它重画一次，白底才真正落到屏幕上。
-    [cell.layer setNeedsDisplay];
+    // 异步 layer 会把「按下态」的位图缓存住，光改 UIView 底色不会重画 ——
+    // 逐层逼它重绘，白底才真正落到屏幕上。
+    SLCRForceRedraw(cell);
+    // 再兜一次：Momo 的 bind 是异步排版的，0.12s 后才真正画完，
+    // 那时如果又染上按下态，这一遍把它按住。只做一次，不会循环。
+    __weak UITableViewCell *weakCell = cell;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UITableViewCell *c = weakCell;
+        if (!c) return;
+        @try { [c setHighlighted:NO animated:NO]; } @catch (NSException *e) { }
+        @try { [c setSelected:NO animated:NO]; } @catch (NSException *e) { }
+        SLCRClearHighlightDeep(c);
+        SLCRRestoreBackgrounds(c, bgSnap);
+        SLCRForceRedraw(c);
+    });
     return tried.count ? [tried componentsJoinedByString:@","] : @"-";
 }
 
@@ -2860,11 +2930,59 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
 
     CGFloat cw = CGRectGetWidth(cell.contentView.bounds) - 32.0;
     if (cw < 120.0) cw = 120.0;
-    CGFloat pad = 12.0;
-    CGFloat badgeH = 20.0;
+    CGFloat cellH = CGRectGetHeight(cell.contentView.bounds);
+    CGFloat cardW = cw;
 
     CGSize badgeSz = [badge.text sizeWithAttributes:@{NSFontAttributeName: badge.font}];
     CGFloat badgeW = badgeSz.width + 16.0;
+
+    // 行高能不能撑开决定了排版走哪条：
+    //   行高够 → 两行（徽章行 + 原文自动换行）；
+    //   行高不够（heightForRow 拿不到、还是 42pt 的系统行高）→ 单行紧凑，
+    //   徽章 + 「对方撤回 · 原文…」，保证原文至少看得见，绝不出现「只有对方撤回」。
+    CGFloat avail = (cellH > 20.0) ? (cellH - 6.0) : 36.0;
+    BOOL compact = (avail < 92.0);
+
+    if (compact) {
+        CGFloat pad = 10.0, rowH = 18.0;
+        CGFloat cardH = (avail > 36.0) ? 36.0 : avail;
+        if (cardH < 28.0) cardH = 28.0;
+        CGFloat y = (cardH - rowH) / 2.0;
+
+        badge.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+        CGSize bsz = [badge.text sizeWithAttributes:@{NSFontAttributeName: badge.font}];
+        badgeW = bsz.width + 14.0;
+        badge.frame = CGRectMake(pad, y, badgeW, rowH);
+        badge.layer.cornerRadius = 9.0;
+
+        CGFloat preX = pad + badgeW + 8.0;
+        CGFloat preW = 56.0;
+        pre.frame = CGRectMake(preX, y, preW, rowH);
+        pre.font = [UIFont systemFontOfSize:11];
+
+        CGFloat bodyX = preX + preW + 4.0;
+        CGFloat bodyW = cardW - bodyX - pad;
+        if (bodyW < 24.0) bodyW = 24.0;
+        body.numberOfLines = 1;
+        body.lineBreakMode = NSLineBreakByTruncatingTail;
+        body.font = [UIFont systemFontOfSize:12];
+        body.frame = CGRectMake(bodyX, y, bodyW, rowH);
+
+        CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 2.0;
+        if (cardY < 0) cardY = 0;
+        card.frame = CGRectMake(16.0, cardY, cardW, cardH);
+        return;
+    }
+
+    // 两行布局
+    CGFloat pad = 12.0, badgeH = 20.0;
+    badge.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    badge.layer.cornerRadius = 10.0;
+    pre.font = [UIFont systemFontOfSize:12];
+    body.numberOfLines = 0;
+    body.lineBreakMode = NSLineBreakByWordWrapping;
+    body.font = [UIFont systemFontOfSize:13];
+
     badge.frame = CGRectMake(pad, pad, badgeW, badgeH);
     pre.frame = CGRectMake(pad + badgeW + 8.0, pad + 1.0, cw - badgeW - 8.0 - pad, badgeH);
 
@@ -2876,18 +2994,14 @@ static void SLRecallBuildCard(UITableViewCell *cell, NSString *orig) {
     CGFloat bodyH = (CGFloat)ceil(bodyRect.size.height);
     CGFloat bodyY = pad + badgeH + 8.0;
     CGFloat cardH = bodyY + bodyH + pad;
-    CGFloat cardW = cw;
-    CGFloat cellH = CGRectGetHeight(cell.contentView.bounds);
-    // 兜底：行高 hook 没生效（取不到数据源）时，卡片绝不能超出这一行去压住下一条。
-    // 宁可把原文裁掉，也不要叠字 —— 裁掉的只是极端长文，且还有「隐藏拦截标记」开关。
-    if (cellH > 24.0 && cardH > cellH - 8.0) {
-        cardH = cellH - 8.0;
+    if (cardH > avail) {                       // 再兜一层：绝不越过本行
+        cardH = avail;
         bodyH = cardH - bodyY - pad;
-        if (bodyH < 12.0) bodyH = 12.0;
+        if (bodyH < 14.0) bodyH = 14.0;
     }
     body.frame = CGRectMake(pad, bodyY, bodyW, bodyH);
 
-    CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 4.0;
+    CGFloat cardY = (cellH > cardH) ? (cellH - cardH) / 2.0 : 3.0;
     if (cardY < 0) cardY = 0;
     card.frame = CGRectMake(16.0, cardY, cardW, cardH);
 }
@@ -2914,6 +3028,7 @@ void SLRecallRepaintVisible(void) {
     if (!gSLRecallBlocked.count) return;
     UIViewController *chat = SLCRChatVC(SLCRTopVC());
     UITableView *tv = chat ? SLCRChatTable(chat.view) : nil;
+    if (!tv) tv = SLCRChatTableAnywhere();          // 认不出聊天页时兜底（日志里常见这种）
     if (!tv) { SLLog(@"RECALL-REPAINT 没找到聊天列表"); return; }
     NSInteger n = 0;
     for (UITableViewCell *cell in tv.visibleCells) {

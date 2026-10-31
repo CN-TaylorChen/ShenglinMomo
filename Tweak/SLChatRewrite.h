@@ -109,9 +109,6 @@ void SLChatMetaBeginFromMenu(UIView *_Nullable menuView);
 /// 从「长按时间行本身」进入：直接拿这条 cell 的 msgid，零坐标反查误差
 void SLChatMetaBeginFromCell(UITableViewCell *_Nullable cell);
 
-/// 给这条 cell 里的时间行 UILabel 挂一个长按手势（只挂一次），零坐标反查误差
-void SLChatMetaAttachTimeLongPress(UITableViewCell *_Nullable cell);
-
 #pragma mark - 实拍卡片（knock_type28）
 
 /// 卡片上的时间 / 公里数。空字符串 = 不改。
@@ -165,6 +162,22 @@ CGFloat SLRecallCardHeight(NSString *_Nullable orig, CGFloat tableWidth);
 
 /// 由 indexPath 反查该行消息的 msgid（行高 hook 用；取不到返回 nil）
 NSString *_Nullable SLCRMsgidAtIndexPath(UITableView *_Nullable tv, NSIndexPath *_Nullable ip);
+
+/// 文本是否像「时间 + 距离」那一行（含 km / 米 / : / 前 / 刚刚）
+BOOL SLMetaIsTimeRowText(NSString *_Nullable s);
+
+/// 找当前的聊天列表（给运行时探测 table delegate 用）
+UITableView *_Nullable SLChatFindTable(void);
+
+/// 给一颗时间行标签挂长按（由 UILabel setText: / setAttributedText: 钩子调用）。
+/// 不依赖 willDisplayCell —— 那对钩子在陌陌上装不到真正的 delegate。
+void SLChatMetaAttachTimeLongPressForLabel(UIView *_Nullable label);
+
+/// 在 cell 里找时间行并挂长按（willDisplayCell 路径，装得上时会走这条路）
+void SLChatMetaAttachTimeLongPress(UITableViewCell *_Nullable cell);
+
+/// 弹出「时间 / 距离 / 日期」编辑器（长按时间行直接调用）
+void SLChatMetaBeginFromCell(UITableViewCell *_Nullable cell);
 
 /// 撤回态整形：灰底刷白、字号提回正文，再贴一句「对方撤回了一条消息」。
 void SLRecallStyleSweep(void);
